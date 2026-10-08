@@ -1,9 +1,20 @@
 // config/config.js
 // Full CRUD for filters + keywords management
-// Developed by CodeNagpur.in
-// Version 6.0.0
+// Developed by Keyn Labs
+// Version 7.0.0
+// ============================================================================
+// CHANGELOG v7.0.0
+//   • DEFAULT_CONFIG mirrors bundle.js v6.2 (faster limits, scroll, cooldown)
+//   • saveFilter stops writing filter_config on new/edited rows
+//   • bulkSyncKeywords: parallel batches of 5, optional filter_config cleanup
+//   • renderFilterCard shows ⚠️ Legacy badge when filter_config is still used
+//   • getConfig reads/writes all new speed fields
+//   • All Supabase fetches get a 12s AbortController timeout
+//   • refreshCounts uses Promise.allSettled
+//   • Auto-migrate on first config-page open (initialized_v620)
+// ============================================================================
 
-console.log('⚙️ BuyLead Assistant Config v6.0.0');
+console.log('⚙️ BuyLead Assistant Config v7.0.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 var SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
@@ -16,16 +27,28 @@ var SB_HEADERS = {
     'Prefer': 'return=representation'
 };
 
-var supabaseEnabled = true;
-var editingFilterId = null;
+var SB_FETCH_TIMEOUT = 12000;
 
+// ============================================================
+// DEFAULT CONFIG — MIRRORS bundle.js v6.2 / service-worker v4.2
+// ============================================================
 var DEFAULT_CONFIG = {
     mode: 'AUTOMATIC',
     minScore: 60,
-    maxPerMinute: 5, maxPerHour: 20, maxPerDay: 50, maxPerSession: 30, cooldownMs: 2000,
+
+    // Speed limits
+    maxPerMinute: 60,
+    maxPerHour: 400,
+    maxPerDay: 2000,
+    maxPerSession: 1000,
+    cooldownMs: 0,
+
+    // Country
     strictCountryMode: false,
     allowedCountries: ['IN'],
     strictCountryRejectUnknown: true,
+
+    // Scoring
     scoreWeights: {
         base: 50,
         perProductKeyword: 10, maxProductBonus: 30,
@@ -36,13 +59,50 @@ var DEFAULT_CONFIG = {
     scorePenalties: { wrongCountry: -20, wrongState: -10, noContact: -5 },
     preferredStates: ['maharashtra'],
     preferredCountries: ['IN'],
-    autoScroll: true, scrollSpeed: 400, scrollDelayMs: 100, bottomWaitMs: 1500,
-    loopIntervalMs: 1200, loadMoreWaitMs: 3000, maxStuckLoops: 4,
-    maxReloadsPerSession: 20, autoReloadOnComplete: true, autoReloadDelayMs: 2000,
-    autoMinimize: true, popupTimeoutMs: 10000,
-    confirmationAnswer: 'yes', purchaseAction: 'close',
+
+    // Navigator (speed-tuned)
+    autoScroll: true,
+    scrollSpeed: 900,
+    scrollDelayMs: 40,
+    bottomWaitMs: 500,
+    loopIntervalMs: 250,
+    loadMoreWaitMs: 900,
+    maxStuckLoops: 3,
+    maxReloadsPerSession: 20,
+    autoReloadOnComplete: true,
+    autoReloadDelayMs: 1500,
+
+    // Popup (speed-tuned)
+    autoMinimize: true,
+    popupTimeoutMs: 5000,
+    confirmationAnswer: 'yes',
+    purchaseAction: 'close',
+
+    // Connection
     supabaseEnabled: true
 };
+
+var supabaseEnabled = true;
+var editingFilterId = null;
+
+// ============================================================
+// FETCH HELPER WITH TIMEOUT
+// ============================================================
+async function sbFetch(url, options, timeoutMs) {
+    timeoutMs = timeoutMs || SB_FETCH_TIMEOUT;
+    var controller = new AbortController();
+    var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+    try {
+        var opts = Object.assign({}, options || {}, { signal: controller.signal });
+        var res = await fetch(url, opts);
+        clearTimeout(timer);
+        return res;
+    } catch (err) {
+        clearTimeout(timer);
+        if (err.name === 'AbortError') throw new Error('Timeout after ' + timeoutMs + 'ms');
+        throw err;
+    }
+}
 
 // ============================================================
 // TOAST
@@ -64,20 +124,74 @@ function showToast(message, type) {
 }
 
 // ============================================================
+// SAFE PARSE HELPERS
+// ============================================================
+function safeInt(val, fallback) {
+    var n = parseInt(val, 10);
+    return isNaN(n) ? (fallback || 0) : n;
+}
+function safeFloat(val, fallback) {
+    var n = parseFloat(val);
+    return isNaN(n) ? (fallback || 0) : n;
+}
+function parseTextarea(id) {
+    var el = document.getElementById(id);
+    if (!el) return [];
+    return el.value.split('\n').map(function(k) { return k.trim(); }).filter(function(k) { return k.length > 0; });
+}
+function escapeHtml(text) {
+    if (!text) return '';
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ============================================================
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
-    loadConfig();
-    loadKeywords();
-    loadSupabaseSetting();
-    loadFilters();
-    refreshCounts();
-    setupTabs();
-    setupModeButtons();
-    setupEventListeners();
-    setupKeywordCounters();
-    setupModal();
+    autoMigrateIfNeeded().then(function() {
+        loadConfig();
+        loadKeywords();
+        loadSupabaseSetting();
+        loadFilters();
+        refreshCounts();
+        setupTabs();
+        setupModeButtons();
+        setupEventListeners();
+        setupKeywordCounters();
+        setupModal();
+    });
 });
+
+/**
+ * If the storage schema is older than v6.20, seed the new defaults
+ * while preserving the user's chosen mode + local keywords.
+ */
+function autoMigrateIfNeeded() {
+    return new Promise(function(resolve) {
+        browserAPI.storage.local.get(
+            ['initialized_v620', 'mode', 'userSetMode', 'keywords'],
+            function(result) {
+                if (result.initialized_v620) { resolve(); return; }
+
+                var seed = Object.assign({}, DEFAULT_CONFIG);
+                if (result.userSetMode && result.mode) {
+                    seed.mode = result.mode;
+                    seed.userSetMode = true;
+                }
+                if (result.keywords) seed.keywords = result.keywords;
+
+                browserAPI.storage.local.set(seed, function() {
+                    browserAPI.storage.local.set({ initialized_v620: true }, function() {
+                        console.log('[Config] Auto-migrated to v6.20 defaults');
+                        resolve();
+                    });
+                });
+            }
+        );
+    });
+}
 
 function setupTabs() {
     document.querySelectorAll('.tab').forEach(function(tab) {
@@ -107,12 +221,12 @@ function updateModeInfo(mode) {
     var infoBox = document.getElementById('modeInfo');
     if (!infoBox) return;
     var descriptions = {
-        'MONITOR': '<strong>Monitor:</strong> Only detects and displays leads.',
-        'DRY_RUN': '<strong>Dry Run:</strong> Full pipeline but no real clicks.',
-        'ASSISTED': '<strong>Assisted:</strong> Shows approval popup for each matched lead.',
+        'MONITOR':   '<strong>Monitor:</strong> Only detects and displays leads.',
+        'DRY_RUN':   '<strong>Dry Run:</strong> Full pipeline but no real clicks.',
+        'ASSISTED':  '<strong>Assisted:</strong> Shows approval popup for each matched lead.',
         'AUTOMATIC': '<strong>Automatic:</strong> Auto-clicks "Contact Buyer Now".'
     };
-    infoBox.innerHTML = descriptions[mode] || descriptions['MONITOR'];
+    infoBox.innerHTML = descriptions[mode] || descriptions['AUTOMATIC'];
 }
 
 function setupKeywordCounters() {
@@ -201,11 +315,10 @@ function setupEventListeners() {
         var orig = btn.textContent;
         btn.disabled = true;
         btn.textContent = '⏳ Refreshing...';
-        refreshCounts();
-        setTimeout(function() {
+        refreshCounts().then(function() {
             btn.disabled = false;
             btn.textContent = orig;
-        }, 1000);
+        });
     });
 
     // Data management buttons (data-action)
@@ -290,9 +403,10 @@ function loadSupabaseSetting() {
 
 function updateConfigSupabaseUI(enabled) {
     var container = document.getElementById('connectionToggle');
-    var icon = document.getElementById('configConnIcon');
-    var label = document.getElementById('configConnLabel');
-    var desc = document.getElementById('configConnDesc');
+    var icon   = document.getElementById('configConnIcon');
+    var label  = document.getElementById('configConnLabel');
+    var desc   = document.getElementById('configConnDesc');
+    if (!container) return;
     if (enabled) {
         container.classList.remove('offline');
         icon.textContent = '☁️';
@@ -310,28 +424,48 @@ function loadConfig() {
     browserAPI.storage.local.get(DEFAULT_CONFIG, function(config) {
         var m = Object.assign({}, DEFAULT_CONFIG, config);
 
+        // Mode
         document.querySelectorAll('.mode-btn').forEach(function(btn) {
             btn.classList.toggle('active', btn.dataset.mode === m.mode);
         });
         updateModeInfo(m.mode);
 
-        ['minScore', 'perMinute', 'perHour', 'perDay', 'perSession', 'cooldownMs',
-         'scrollSpeed', 'scrollDelayMs', 'bottomWaitMs', 'loopIntervalMs', 'loadMoreWaitMs', 'maxStuckLoops',
-         'autoReloadDelayMs', 'maxReloadsPerSession', 'popupTimeoutMs'].forEach(function(id) {
-            var el = document.getElementById(id);
-            if (el) el.value = m[id];
+        // Number inputs (all read from storage keys directly)
+        var numberFields = {
+            minScore: 'minScore',
+            perMinute: 'maxPerMinute',
+            perHour: 'maxPerHour',
+            perDay: 'maxPerDay',
+            perSession: 'maxPerSession',
+            cooldownMs: 'cooldownMs',
+            scrollSpeed: 'scrollSpeed',
+            scrollDelayMs: 'scrollDelayMs',
+            bottomWaitMs: 'bottomWaitMs',
+            loopIntervalMs: 'loopIntervalMs',
+            loadMoreWaitMs: 'loadMoreWaitMs',
+            maxStuckLoops: 'maxStuckLoops',
+            autoReloadDelayMs: 'autoReloadDelayMs',
+            maxReloadsPerSession: 'maxReloadsPerSession',
+            popupTimeoutMs: 'popupTimeoutMs'
+        };
+        Object.keys(numberFields).forEach(function(domId) {
+            var el = document.getElementById(domId);
+            if (el) el.value = m[numberFields[domId]];
         });
 
+        // Checkboxes
         ['autoScroll', 'autoReloadOnComplete', 'autoMinimize'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.checked = m[id] !== false;
         });
 
+        // Selects
         ['confirmationAnswer', 'purchaseAction'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.value = m[id];
         });
 
+        // Scoring weights
         var w = Object.assign({}, DEFAULT_CONFIG.scoreWeights, m.scoreWeights || {});
         ['base', 'perProductKeyword', 'maxProductBonus', 'preferredState', 'countryMatch',
          'hasMobile', 'hasEmail', 'hasPhone', 'detailedRequirement', 'requirementLengthThreshold'].forEach(function(k) {
@@ -339,6 +473,7 @@ function loadConfig() {
             if (el) el.value = w[k];
         });
 
+        // Scoring penalties
         var p = Object.assign({}, DEFAULT_CONFIG.scorePenalties, m.scorePenalties || {});
         var pMap = { wrongCountry: 'pWrongCountry', wrongState: 'pWrongState', noContact: 'pNoContact' };
         Object.keys(pMap).forEach(function(k) {
@@ -346,6 +481,7 @@ function loadConfig() {
             if (el) el.value = p[k];
         });
 
+        // Country fields
         var elPC = document.getElementById('preferredCountries');
         if (elPC) elPC.value = (m.preferredCountries || DEFAULT_CONFIG.preferredCountries).join(', ');
         var elPS = document.getElementById('preferredStates');
@@ -364,13 +500,19 @@ function loadConfig() {
 function updateStrictCountryPreview() {
     var el = document.getElementById('strictCountryPreview');
     if (!el) return;
-    var enabled = document.getElementById('strictCountryMode').checked;
-    var raw = document.getElementById('allowedCountries').value || '';
+    var enabledEl = document.getElementById('strictCountryMode');
+    var allowedEl = document.getElementById('allowedCountries');
+    var rejectEl  = document.getElementById('strictCountryRejectUnknown');
+    if (!enabledEl || !allowedEl || !rejectEl) return;
+
+    var enabled = enabledEl.checked;
+    var raw = allowedEl.value || '';
     var list = raw.split(',').map(function(c) { return c.toUpperCase().trim(); }).filter(function(c) { return c; });
-    var rejectUnknown = document.getElementById('strictCountryRejectUnknown').checked;
+    var rejectUnknown = rejectEl.checked;
 
     if (!enabled) {
-        el.innerHTML = '🌍 <strong>Strict mode OFF</strong> — all countries accepted';
+        el.innerHTML = '🌍 <strong>Strict mode OFF</strong> — all countries accepted' +
+            (rejectUnknown ? ' <em style="font-size:10px;">(unknown still rejected)</em>' : '');
         el.style.background = '#1e1810'; el.style.borderLeftColor = '#f5a623'; el.style.color = '#f5a623';
     } else if (list.length === 0) {
         el.innerHTML = '⚠️ <strong>Strict mode ON but no countries configured</strong> — ALL leads blocked';
@@ -385,7 +527,7 @@ function updateStrictCountryPreview() {
 function loadKeywords() {
     browserAPI.storage.local.get(['keywords'], function(result) {
         var k = result.keywords || {};
-        var el1 = document.getElementById('productKeywords'); if (el1) el1.value = (k.product || []).join('\n');
+        var el1 = document.getElementById('productKeywords');  if (el1) el1.value = (k.product  || []).join('\n');
         var el2 = document.getElementById('negativeKeywords'); if (el2) el2.value = (k.negative || []).join('\n');
         var el3 = document.getElementById('requiredKeywords'); if (el3) el3.value = (k.required || []).join('\n');
         updateKeywordCount('product');
@@ -411,7 +553,7 @@ async function loadFilters(forceRefresh) {
     container.innerHTML = '<div class="empty-state">⏳ Loading filters...</div>';
 
     try {
-        var res = await fetch(SUPABASE_URL + '/rest/v1/filters?select=*&order=id.asc', {
+        var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?select=*&order=id.asc', {
             headers: SB_HEADERS
         });
         if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + (await res.text()).substring(0, 200));
@@ -434,20 +576,25 @@ async function loadFilters(forceRefresh) {
 
 function renderFilterCard(f) {
     var config = f.filter_config || {};
-    var pk = Array.isArray(f.product_keywords) ? f.product_keywords : (config.product_names || []);
+    var pk = Array.isArray(f.product_keywords)  ? f.product_keywords  : (config.product_names     || []);
     var nk = Array.isArray(f.negative_keywords) ? f.negative_keywords : (config.negative_keywords || []);
     var rk = Array.isArray(f.required_keywords) ? f.required_keywords : (config.required_keywords || []);
     var lk = Array.isArray(f.location_keywords) ? f.location_keywords : [];
 
-    // Fallback: derive keywords from filter_config for display
-    if (pk.length === 0 && Array.isArray(config.product_names)) pk = config.product_names;
+    // Fallback to legacy config if new columns are empty
+    if (pk.length === 0 && Array.isArray(config.product_names))     pk = config.product_names;
     if (nk.length === 0 && Array.isArray(config.negative_keywords)) nk = config.negative_keywords;
     if (rk.length === 0 && Array.isArray(config.required_keywords)) rk = config.required_keywords;
     if (lk.length === 0) {
         lk = []
             .concat(Array.isArray(config.countries) ? config.countries : [])
-            .concat(Array.isArray(config.states) ? config.states : []);
+            .concat(Array.isArray(config.states)    ? config.states    : []);
     }
+
+    // Detect legacy-only rows
+    var isLegacy = (!f.product_keywords || f.product_keywords.length === 0) &&
+                   f.filter_config &&
+                   (config.product_names && config.product_names.length > 0);
 
     var isActive = f.is_active !== false;
     var isRunning = f.is_running === true;
@@ -471,6 +618,7 @@ function renderFilterCard(f) {
                             (isActive ? '✓ Active' : '✗ Inactive') +
                         '</span>' +
                         (isRunning ? '<span class="filter-badge running">🟢 Running</span>' : '') +
+                        (isLegacy  ? '<span class="filter-badge" style="background:#1e1810;color:#f5a623;border:1px solid #f5a623;">⚠️ Legacy</span>' : '') +
                     '</div>' +
                     '<div class="filter-meta">ID: ' + f.id + ' • Client: ' + escapeHtml(f.client_id || 'default') + '</div>' +
                 '</div>' +
@@ -492,7 +640,7 @@ function renderFilterCard(f) {
             '</div>' +
 
             '<div class="filter-actions">' +
-                '<button class="btn-tiny btn-edit" data-action="edit" data-id="' + f.id + '">✏️ Edit</button>' +
+                '<button class="btn-tiny btn-edit"   data-action="edit"   data-id="' + f.id + '">✏️ Edit</button>' +
                 '<button class="btn-tiny btn-toggle" data-action="toggle" data-id="' + f.id + '" data-active="' + isActive + '">' + (isActive ? '⏸ Disable' : '▶ Enable') + '</button>' +
                 '<button class="btn-tiny btn-delete" data-action="delete" data-id="' + f.id + '">🗑️ Delete</button>' +
             '</div>' +
@@ -519,7 +667,7 @@ function bindFilterActions() {
 
 async function editFilter(id) {
     try {
-        var res = await fetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id + '&select=*', {
+        var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id + '&select=*', {
             headers: SB_HEADERS
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -542,11 +690,10 @@ function openFilterModal(filter) {
         title.textContent = 'Edit Filter #' + filter.id;
         document.getElementById('editFilterId').value = filter.id;
         document.getElementById('editFilterName').value = filter.filter_name || '';
-        document.getElementById('editClientId').value = filter.client_id || 'default';
+        document.getElementById('editClientId').value   = filter.client_id || 'default';
         document.getElementById('editIsActive').checked = filter.is_active !== false;
 
-        // Prefer new columns, fallback to filter_config
-        var pk = (Array.isArray(filter.product_keywords) && filter.product_keywords.length > 0)
+        var pk = (Array.isArray(filter.product_keywords)  && filter.product_keywords.length  > 0)
             ? filter.product_keywords
             : (Array.isArray(config.product_names) ? config.product_names : []);
         var nk = (Array.isArray(filter.negative_keywords) && filter.negative_keywords.length > 0)
@@ -557,11 +704,12 @@ function openFilterModal(filter) {
             : (Array.isArray(config.required_keywords) ? config.required_keywords : []);
         var lk = (Array.isArray(filter.location_keywords) && filter.location_keywords.length > 0)
             ? filter.location_keywords
-            : []
-                .concat(Array.isArray(config.countries) ? config.countries : [])
-                .concat(Array.isArray(config.states) ? config.states : []);
+            : [].concat(
+                Array.isArray(config.countries) ? config.countries : [],
+                Array.isArray(config.states)    ? config.states    : []
+            );
 
-        document.getElementById('editProductKeywords').value = pk.join('\n');
+        document.getElementById('editProductKeywords').value  = pk.join('\n');
         document.getElementById('editNegativeKeywords').value = nk.join('\n');
         document.getElementById('editRequiredKeywords').value = rk.join('\n');
         document.getElementById('editLocationKeywords').value = lk.join('\n');
@@ -571,7 +719,7 @@ function openFilterModal(filter) {
         document.getElementById('editFilterName').value = '';
         document.getElementById('editClientId').value = 'default';
         document.getElementById('editIsActive').checked = true;
-        document.getElementById('editProductKeywords').value = '';
+        document.getElementById('editProductKeywords').value  = '';
         document.getElementById('editNegativeKeywords').value = '';
         document.getElementById('editRequiredKeywords').value = '';
         document.getElementById('editLocationKeywords').value = '';
@@ -581,10 +729,10 @@ function openFilterModal(filter) {
 }
 
 async function saveFilter() {
-    var name = document.getElementById('editFilterName').value.trim();
+    var name     = document.getElementById('editFilterName').value.trim();
     var clientId = document.getElementById('editClientId').value.trim() || 'default';
     var isActive = document.getElementById('editIsActive').checked;
-    var productKw = parseTextarea('editProductKeywords');
+    var productKw  = parseTextarea('editProductKeywords');
     var negativeKw = parseTextarea('editNegativeKeywords');
     var requiredKw = parseTextarea('editRequiredKeywords');
     var locationKw = parseTextarea('editLocationKeywords');
@@ -607,22 +755,13 @@ async function saveFilter() {
         });
         var states = locationKw.filter(function(l) { return countries.indexOf(l) === -1; });
 
-        // Build filter_config (legacy compatible)
-        var filterConfig = {
-            product_names: productKw,
-            negative_keywords: negativeKw,
-            required_keywords: requiredKw,
-            countries: countries,
-            states: states
-        };
-
-        // Build full row
+        // v7: filter_config is NO LONGER written on new/edited rows.
+        // The keyword columns are the single source of truth.
         var row = {
             filter_name: name,
             client_id: clientId,
             is_active: isActive,
-            filter_config: filterConfig,
-            product_keywords: productKw,
+            product_keywords:  productKw,
             negative_keywords: negativeKw,
             required_keywords: requiredKw,
             location_keywords: locationKw,
@@ -638,7 +777,7 @@ async function saveFilter() {
             method = 'POST';
         }
 
-        var res = await fetch(url, {
+        var res = await sbFetch(url, {
             method: method,
             headers: SB_HEADERS,
             body: JSON.stringify(row)
@@ -650,17 +789,15 @@ async function saveFilter() {
         }
 
         document.getElementById('filterModal').style.display = 'none';
+        var wasEditing = !!editingFilterId;
         editingFilterId = null;
 
-        showToast(editingFilterId ? '✅ Filter updated' : '✅ Filter created', 'success');
+        showToast(wasEditing ? '✅ Filter updated' : '✅ Filter created', 'success');
 
-        // Refresh UI
         await loadFilters(true);
         refreshCounts();
 
-        // Notify content script
         browserAPI.runtime.sendMessage({ action: 'REFRESH_FILTERS' });
-
     } catch (err) {
         showToast('❌ Save failed: ' + err.message, 'error');
     } finally {
@@ -671,7 +808,7 @@ async function saveFilter() {
 
 async function toggleFilter(id, isActive) {
     try {
-        var res = await fetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id, {
+        var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id, {
             method: 'PATCH',
             headers: SB_HEADERS,
             body: JSON.stringify({ is_active: isActive, updated_at: new Date().toISOString() })
@@ -690,7 +827,7 @@ async function deleteFilter(id) {
     if (!confirm('This cannot be undone. Continue?')) return;
 
     try {
-        var res = await fetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id, {
+        var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + id, {
             method: 'DELETE',
             headers: {
                 'apikey': SUPABASE_KEY,
@@ -712,68 +849,88 @@ async function deleteFilter(id) {
     }
 }
 
+// ============================================================
+// BULK SYNC — parallel batches of 5
+// ============================================================
 async function bulkSyncKeywords() {
-    if (!confirm('Sync keywords from filter_config to the new keyword columns for ALL filters?')) return;
+    var cleanupLegacy = confirm(
+        'Sync keywords from filter_config → new keyword columns for ALL filters?\n\n' +
+        'Click OK to sync AND clear legacy filter_config afterward.\n' +
+        'Click Cancel to sync only (keep legacy for safety).'
+    );
+    var shouldClearLegacy = cleanupLegacy;
+
+    if (!confirm('Proceed with bulk sync?')) return;
+
+    var btn = document.getElementById('bulkSyncBtn');
+    var orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Syncing...';
 
     try {
-        var res = await fetch(SUPABASE_URL + '/rest/v1/filters?select=*', {
+        var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?select=*', {
             headers: SB_HEADERS
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var filters = await res.json();
 
         var success = 0, failed = 0;
+        var BATCH = 5;
 
-        for (var i = 0; i < filters.length; i++) {
-            var f = filters[i];
-            var config = f.filter_config || {};
+        for (var i = 0; i < filters.length; i += BATCH) {
+            var batch = filters.slice(i, i + BATCH);
+            var promises = batch.map(function(f) {
+                var config = f.filter_config || {};
+                var pk = Array.isArray(config.product_names)     ? config.product_names     : [];
+                var nk = Array.isArray(config.negative_keywords) ? config.negative_keywords : [];
+                var rk = Array.isArray(config.required_keywords) ? config.required_keywords : [];
+                var lk = [].concat(
+                    Array.isArray(config.countries) ? config.countries : [],
+                    Array.isArray(config.states)    ? config.states    : []
+                );
 
-            var pk = Array.isArray(config.product_names) ? config.product_names : [];
-            var nk = Array.isArray(config.negative_keywords) ? config.negative_keywords : [];
-            var rk = Array.isArray(config.required_keywords) ? config.required_keywords : [];
-            var lk = []
-                .concat(Array.isArray(config.countries) ? config.countries : [])
-                .concat(Array.isArray(config.states) ? config.states : []);
+                var updateBody = {
+                    product_keywords:  pk,
+                    negative_keywords: nk,
+                    required_keywords: rk,
+                    location_keywords: lk,
+                    updated_at: new Date().toISOString()
+                };
 
-            try {
-                var ures = await fetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + f.id, {
+                if (shouldClearLegacy) {
+                    updateBody.filter_config = null;
+                }
+
+                return sbFetch(SUPABASE_URL + '/rest/v1/filters?id=eq.' + f.id, {
                     method: 'PATCH',
                     headers: SB_HEADERS,
-                    body: JSON.stringify({
-                        product_keywords: pk,
-                        negative_keywords: nk,
-                        required_keywords: rk,
-                        location_keywords: lk,
-                        updated_at: new Date().toISOString()
-                    })
-                });
-                if (ures.ok) success++;
-                else failed++;
-            } catch (e) { failed++; }
+                    body: JSON.stringify(updateBody)
+                }).then(function(r) {
+                    if (r.ok) success++;
+                    else failed++;
+                }).catch(function() { failed++; });
+            });
+
+            await Promise.all(promises);
+            btn.textContent = '⏳ Syncing... ' + Math.min(i + BATCH, filters.length) + '/' + filters.length;
         }
 
-        showToast('✅ Sync complete: ' + success + ' updated, ' + failed + ' failed', 'success');
+        showToast(
+            '✅ Sync complete: ' + success + ' updated, ' + failed + ' failed' +
+            (shouldClearLegacy ? ' (legacy cleared)' : ''),
+            'success'
+        );
         await loadFilters(true);
     } catch (err) {
         showToast('❌ Sync failed: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
     }
 }
 
-function parseTextarea(id) {
-    var el = document.getElementById(id);
-    if (!el) return [];
-    return el.value.split('\n').map(function(k) { return k.trim(); }).filter(function(k) { return k.length > 0; });
-}
-
-function escapeHtml(text) {
-    if (!text) return '';
-    var div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // ============================================================
-// COUNTS
+// COUNTS — allSettled so one failure doesn't blank the rest
 // ============================================================
 async function refreshCounts() {
     var el1 = document.getElementById('countLeads');
@@ -784,24 +941,31 @@ async function refreshCounts() {
     if (el3) el3.textContent = '⏳';
 
     try {
-        var [leadsResp, histResp, filtResp] = await Promise.all([
-            fetch(SUPABASE_URL + '/rest/v1/leads?select=id', { headers: SB_HEADERS }),
-            fetch(SUPABASE_URL + '/rest/v1/lead_history?select=id', { headers: SB_HEADERS }),
-            fetch(SUPABASE_URL + '/rest/v1/filters?select=id', { headers: SB_HEADERS })
+        var results = await Promise.allSettled([
+            sbFetch(SUPABASE_URL + '/rest/v1/leads?select=id',        { headers: SB_HEADERS }),
+            sbFetch(SUPABASE_URL + '/rest/v1/lead_history?select=id', { headers: SB_HEADERS }),
+            sbFetch(SUPABASE_URL + '/rest/v1/filters?select=id',      { headers: SB_HEADERS })
         ]);
 
-        var leads = leadsResp.ok ? await leadsResp.json() : [];
-        var hist = histResp.ok ? await histResp.json() : [];
-        var filts = filtResp.ok ? await filtResp.json() : [];
+        var leads  = await safeJsonFromSettled(results[0]);
+        var hist   = await safeJsonFromSettled(results[1]);
+        var filts  = await safeJsonFromSettled(results[2]);
 
         if (el1) el1.textContent = Array.isArray(leads) ? leads.length : '?';
-        if (el2) el2.textContent = Array.isArray(hist) ? hist.length : '?';
+        if (el2) el2.textContent = Array.isArray(hist)  ? hist.length  : '?';
         if (el3) el3.textContent = Array.isArray(filts) ? filts.length : '?';
     } catch (err) {
         if (el1) el1.textContent = '?';
         if (el2) el2.textContent = '?';
         if (el3) el3.textContent = '?';
     }
+}
+
+async function safeJsonFromSettled(settled) {
+    if (!settled || settled.status !== 'fulfilled') return [];
+    var resp = settled.value;
+    if (!resp || !resp.ok) return [];
+    try { return await resp.json(); } catch (e) { return []; }
 }
 
 // ============================================================
@@ -812,61 +976,83 @@ function getConfig() {
     var c = Object.assign({}, DEFAULT_CONFIG);
     c.mode = activeMode ? activeMode.dataset.mode : 'AUTOMATIC';
 
-    ['minScore', 'perMinute', 'perHour', 'perDay', 'perSession', 'cooldownMs',
-     'scrollSpeed', 'scrollDelayMs', 'bottomWaitMs', 'loopIntervalMs', 'loadMoreWaitMs', 'maxStuckLoops',
-     'autoReloadDelayMs', 'maxReloadsPerSession', 'popupTimeoutMs'].forEach(function(id) {
-        var el = document.getElementById(id);
-        if (el) c[id] = parseInt(el.value, 10) || 0;
+    // Number fields (DOM id → storage key)
+    var numberFields = {
+        minScore: 'minScore',
+        perMinute: 'maxPerMinute',
+        perHour: 'maxPerHour',
+        perDay: 'maxPerDay',
+        perSession: 'maxPerSession',
+        cooldownMs: 'cooldownMs',
+        scrollSpeed: 'scrollSpeed',
+        scrollDelayMs: 'scrollDelayMs',
+        bottomWaitMs: 'bottomWaitMs',
+        loopIntervalMs: 'loopIntervalMs',
+        loadMoreWaitMs: 'loadMoreWaitMs',
+        maxStuckLoops: 'maxStuckLoops',
+        autoReloadDelayMs: 'autoReloadDelayMs',
+        maxReloadsPerSession: 'maxReloadsPerSession',
+        popupTimeoutMs: 'popupTimeoutMs'
+    };
+    Object.keys(numberFields).forEach(function(domId) {
+        var el = document.getElementById(domId);
+        if (el) c[numberFields[domId]] = safeInt(el.value, DEFAULT_CONFIG[numberFields[domId]]);
     });
 
+    // Checkboxes
     ['autoScroll', 'autoReloadOnComplete', 'autoMinimize'].forEach(function(id) {
         var el = document.getElementById(id);
         if (el) c[id] = el.checked;
     });
 
-    c.confirmationAnswer = document.getElementById('confirmationAnswer').value;
-    c.purchaseAction = document.getElementById('purchaseAction').value;
-    c.maxPerMinute = c.perMinute;
-    c.maxPerHour = c.perHour;
-    c.maxPerDay = c.perDay;
-    c.maxPerSession = c.perSession;
+    var caEl = document.getElementById('confirmationAnswer');
+    if (caEl) c.confirmationAnswer = caEl.value;
+    var paEl = document.getElementById('purchaseAction');
+    if (paEl) c.purchaseAction = paEl.value;
+
     c.supabaseEnabled = supabaseEnabled;
 
+    // Scoring weights
     c.scoreWeights = {
-        base: parseInt(document.getElementById('wBase').value, 10) || 0,
-        perProductKeyword: parseInt(document.getElementById('wPerProductKeyword').value, 10) || 0,
-        maxProductBonus: parseInt(document.getElementById('wMaxProductBonus').value, 10) || 0,
-        preferredState: parseInt(document.getElementById('wPreferredState').value, 10) || 0,
-        countryMatch: parseInt(document.getElementById('wCountryMatch').value, 10) || 0,
-        hasMobile: parseInt(document.getElementById('wHasMobile').value, 10) || 0,
-        hasEmail: parseInt(document.getElementById('wHasEmail').value, 10) || 0,
-        hasPhone: parseInt(document.getElementById('wHasPhone').value, 10) || 0,
-        detailedRequirement: parseInt(document.getElementById('wDetailedRequirement').value, 10) || 0,
-        requirementLengthThreshold: parseInt(document.getElementById('wRequirementLengthThreshold').value, 10) || 100
+        base: safeInt(document.getElementById('wBase').value, 50),
+        perProductKeyword: safeInt(document.getElementById('wPerProductKeyword').value, 10),
+        maxProductBonus: safeInt(document.getElementById('wMaxProductBonus').value, 30),
+        preferredState: safeInt(document.getElementById('wPreferredState').value, 15),
+        countryMatch: safeInt(document.getElementById('wCountryMatch').value, 15),
+        hasMobile: safeInt(document.getElementById('wHasMobile').value, 10),
+        hasEmail: safeInt(document.getElementById('wHasEmail').value, 8),
+        hasPhone: safeInt(document.getElementById('wHasPhone').value, 5),
+        detailedRequirement: safeInt(document.getElementById('wDetailedRequirement').value, 5),
+        requirementLengthThreshold: safeInt(document.getElementById('wRequirementLengthThreshold').value, 100)
     };
 
     c.scorePenalties = {
-        wrongCountry: parseInt(document.getElementById('pWrongCountry').value, 10) || 0,
-        wrongState: parseInt(document.getElementById('pWrongState').value, 10) || 0,
-        noContact: parseInt(document.getElementById('pNoContact').value, 10) || 0
+        wrongCountry: safeInt(document.getElementById('pWrongCountry').value, -20),
+        wrongState: safeInt(document.getElementById('pWrongState').value, -10),
+        noContact: safeInt(document.getElementById('pNoContact').value, -5)
     };
 
-    c.preferredCountries = document.getElementById('preferredCountries').value
+    c.preferredCountries = (document.getElementById('preferredCountries').value || '')
         .split(',').map(function(x) { return x.trim().toUpperCase(); }).filter(function(x) { return x; });
-    c.preferredStates = document.getElementById('preferredStates').value
+    c.preferredStates = (document.getElementById('preferredStates').value || '')
         .split(',').map(function(x) { return x.trim().toLowerCase(); }).filter(function(x) { return x; });
 
-    c.strictCountryMode = document.getElementById('strictCountryMode').checked;
-    c.allowedCountries = document.getElementById('allowedCountries').value
+    var scmEl = document.getElementById('strictCountryMode');
+    c.strictCountryMode = scmEl ? scmEl.checked : false;
+
+    var acEl = document.getElementById('allowedCountries');
+    c.allowedCountries = (acEl ? acEl.value : '')
         .split(',').map(function(x) { return x.toUpperCase().trim(); }).filter(function(x) { return x; });
-    c.strictCountryRejectUnknown = document.getElementById('strictCountryRejectUnknown').checked;
+
+    var scruEl = document.getElementById('strictCountryRejectUnknown');
+    c.strictCountryRejectUnknown = scruEl ? scruEl.checked : true;
 
     return c;
 }
 
 function getLocalKeywords() {
     return {
-        product: parseTextarea('productKeywords'),
+        product:  parseTextarea('productKeywords'),
         negative: parseTextarea('negativeKeywords'),
         required: parseTextarea('requiredKeywords')
     };
@@ -882,6 +1068,7 @@ function saveAll() {
     c.keywords = kw;
     c.userSetMode = true;
     browserAPI.storage.local.set(c, function() {
+        // Single message with full config (bundle.js handles UPDATE_FULL_CONFIG)
         browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: c });
         browserAPI.runtime.sendMessage({ action: 'UPDATE_KEYWORDS', keywords: kw });
         showToast('✅ All settings saved!', 'success');
@@ -942,9 +1129,15 @@ function resetLocalKeywords() {
 function resetAllToDefaults() {
     if (!confirm('Reset ALL settings to defaults?')) return;
     if (!confirm('Confirm again?')) return;
-    browserAPI.storage.local.set(DEFAULT_CONFIG, function() {
+
+    var seed = Object.assign({}, DEFAULT_CONFIG, {
+        userSetMode: true,
+        initialized_v620: true
+    });
+
+    browserAPI.storage.local.set(seed, function() {
         loadConfig();
-        browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: DEFAULT_CONFIG });
+        browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: seed });
         showToast('✅ Reset to defaults', 'success');
     });
 }

@@ -1,27 +1,36 @@
 {
   "manifest_version": 2,
-  "name": "IndiaMART BuyLead Assistant",
-  "version": "4.0.0",
-  "description": "Smart BuyLead automation with full Supabase integration",
+  "name": "IndiaMART BuyLead Assistant (Fast)",
+  "version": "4.2.0",
+  "description": "Fast BuyLead automation with product-name gating, strict-country filter and full Supabase integration.",
+  "homepage_url": "https://keynlabs.vercel.app/",
+
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "alarms",
     "notifications",
     "https://seller.indiamart.com/*",
     "https://zvhuromubukylsxrsfiz.supabase.co/*"
   ],
+
   "content_scripts": [
     {
-      "matches": ["https://seller.indiamart.com/bltxn/*"],
+      "matches": [
+        "https://seller.indiamart.com/bltxn/*",
+        "https://seller.indiamart.com/bltxn"
+      ],
       "js": ["src/supabase-service.js", "src/bundle.js"],
       "run_at": "document_idle"
     }
   ],
+
   "background": {
     "scripts": ["service-worker.js"],
     "persistent": false
   },
+
   "browser_action": {
     "default_popup": "popup/index.html",
     "default_title": "BuyLead Assistant",
@@ -32,21 +41,40 @@
       "128": "plugin.png"
     }
   },
+
   "icons": {
     "16": "plugin.png",
     "32": "plugin.png",
     "48": "plugin.png",
     "128": "plugin.png"
   },
+
   "web_accessible_resources": [
     "plugin.png",
     "config/index.html",
-    "debug/index.html"
+    "config/config.js",
+    "config/style.css",
+    "debug/index.html",
+    "debug/debug.js",
+    "migration/index.html",
+    "migration/app.js",
+    "migration/style.css"
   ],
+
+  "content_security_policy": "script-src 'self'; object-src 'self'",
+
+  "incognito": "not_allowed",
+
+  "externally_connectable": {
+    "matches": [
+      "https://seller.indiamart.com/*"
+    ]
+  },
+
   "browser_specific_settings": {
     "gecko": {
       "id": "indiamart-buylead@assistant",
-      "strict_min_version": "109.0"
+      "strict_min_version": "115.0"
     }
   }
 }

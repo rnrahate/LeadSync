@@ -1,6 +1,6 @@
 // migration/app.js
 // External script — avoids CSP inline-script restrictions
-// Developed by CodeNagpur.in
+// Developed by Keyn Labs
 
 (function() {
     'use strict';

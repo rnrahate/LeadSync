@@ -15,7 +15,7 @@
                     <span class="subtitle">BuyLead Assistant</span>
                 </div>
             </div>
-            <span class="version">v6.0.0</span>
+            <span class="version">v7.0.0</span>
         </div>
 
         <!-- Connection Toggle -->
@@ -45,15 +45,17 @@
             <span class="tab danger" data-tab="data">🗑️ Data</span>
         </div>
 
-        <!-- General -->
+        <!-- ============================================================
+             GENERAL
+             ============================================================ -->
         <div class="tab-content active" id="tab-general">
             <div class="section">
                 <div class="section-title">🎯 Operating Mode</div>
                 <div class="section-desc">Choose how the extension handles detected leads</div>
                 <div class="mode-grid">
-                    <button class="mode-btn monitor" data-mode="MONITOR">⏹️ Monitor</button>
-                    <button class="mode-btn dryrun" data-mode="DRY_RUN">🔬 Dry Run</button>
-                    <button class="mode-btn assisted" data-mode="ASSISTED">👤 Assisted</button>
+                    <button class="mode-btn monitor"   data-mode="MONITOR">⏹️ Monitor</button>
+                    <button class="mode-btn dryrun"    data-mode="DRY_RUN">🔬 Dry Run</button>
+                    <button class="mode-btn assisted"  data-mode="ASSISTED">👤 Assisted</button>
                     <button class="mode-btn automatic" data-mode="AUTOMATIC">▶️ Automatic</button>
                 </div>
                 <div class="info-box" id="modeInfo"><strong>Monitor:</strong> Only detects and displays leads.</div>
@@ -67,13 +69,28 @@
             </div>
         </div>
 
-        <!-- Filters Tab (NEW - Full CRUD) -->
+        <!-- ============================================================
+             FILTERS (Full CRUD + Legacy migration banner)
+             ============================================================ -->
         <div class="tab-content" id="tab-filters">
             <div class="section">
-                <div class="section-title">🗄️ Filter Management <span class="keyword-count" id="filtersCount">0</span></div>
-                <div class="section-desc">
-                    Manage Supabase filters directly. Each filter contains product keywords, negative keywords, required keywords, and location rules.
+                <div class="section-title">
+                    🗄️ Filter Management
+                    <span class="keyword-count" id="filtersCount">0</span>
                 </div>
+                <div class="section-desc">
+                    Manage Supabase filters directly. Each filter contains product keywords,
+                    negative keywords, required keywords, and location rules.
+                </div>
+
+                <!-- Legacy migration hint (auto-toggled by config.js) -->
+                <div class="info-box" id="legacyBanner" style="display:none;">
+                    <strong>⚠️ Legacy filters detected.</strong>
+                    Some filters still use the old <code>filter_config</code> column.
+                    Click <strong>Bulk Sync Keywords</strong> below to migrate them to the new
+                    <code>product_keywords</code> / <code>negative_keywords</code> / etc. columns.
+                </div>
+
                 <div class="actions" style="margin-top:0;padding-top:0;border-top:none;">
                     <button class="btn-primary" id="refreshFiltersBtn">🔄 Refresh</button>
                     <button class="btn-primary" id="addFilterBtn">➕ Add New Filter</button>
@@ -85,7 +102,9 @@
             </div>
         </div>
 
-        <!-- Keywords Tab (Local + Supabase view) -->
+        <!-- ============================================================
+             KEYWORDS (Local fallback)
+             ============================================================ -->
         <div class="tab-content" id="tab-keywords">
             <div class="section">
                 <div class="section-title">📋 Local Product Keywords <span class="keyword-count" id="productCount">0</span></div>
@@ -106,7 +125,9 @@
             </div>
         </div>
 
-        <!-- Scoring -->
+        <!-- ============================================================
+             SCORING (unchanged, defaults read from config.js)
+             ============================================================ -->
         <div class="tab-content" id="tab-scoring">
             <div class="section" style="border-color:#02A699;background:linear-gradient(135deg,#0f1f1e 0%,#0d1a1a 100%);">
                 <div class="section-title">🎯 STRICT COUNTRY FILTER <span class="keyword-count" style="background:#02A699;color:#fff;">PRIMARY GATE</span></div>
@@ -171,50 +192,69 @@
             </div>
         </div>
 
-        <!-- Limits -->
+        <!-- ============================================================
+             LIMITS (defaults reflect v6.2 speed tuning)
+             ============================================================ -->
         <div class="tab-content" id="tab-limits">
             <div class="section">
                 <div class="section-title">⏱️ Rate Limits</div>
-                <div class="field"><div class="field-label">Per Minute</div><div class="field-control"><input type="number" id="perMinute" min="0" max="100" value="5"></div></div>
-                <div class="field"><div class="field-label">Per Hour</div><div class="field-control"><input type="number" id="perHour" min="0" max="500" value="20"></div></div>
-                <div class="field"><div class="field-label">Per Day</div><div class="field-control"><input type="number" id="perDay" min="0" max="5000" value="50"></div></div>
-                <div class="field"><div class="field-label">Per Session</div><div class="field-control"><input type="number" id="perSession" min="0" max="1000" value="30"></div></div>
-                <div class="field"><div class="field-label">Cooldown (ms)</div><div class="field-control"><input type="number" id="cooldownMs" min="0" max="60000" step="100" value="2000"></div></div>
+                <div class="section-desc">
+                    Higher limits = faster queue. Cooldown is the gap between two acquisitions.
+                </div>
+                <div class="field"><div class="field-label">Per Minute</div><div class="field-control"><input type="number" id="perMinute" min="0" max="200" value="60"></div></div>
+                <div class="field"><div class="field-label">Per Hour</div><div class="field-control"><input type="number" id="perHour" min="0" max="1000" value="400"></div></div>
+                <div class="field"><div class="field-label">Per Day</div><div class="field-control"><input type="number" id="perDay" min="0" max="10000" value="2000"></div></div>
+                <div class="field"><div class="field-label">Per Session</div><div class="field-control"><input type="number" id="perSession" min="0" max="5000" value="1000"></div></div>
+                <div class="field"><div class="field-label">Cooldown (ms) <span class="desc">Lower = faster queue</span></div><div class="field-control"><input type="number" id="cooldownMs" min="0" max="60000" step="50" value="400"></div></div>
             </div>
         </div>
 
-        <!-- Navigator -->
+        <!-- ============================================================
+             NAVIGATOR (defaults reflect v6.2 speed tuning)
+             ============================================================ -->
         <div class="tab-content" id="tab-navigator">
             <div class="section">
                 <div class="section-title">🔄 Auto-Scroll & Load</div>
+                <div class="section-desc">
+                    These settings control how fast the page is scrolled to the bottom
+                    and how quickly new leads are pulled in. Defaults are tuned for speed.
+                </div>
                 <div class="field"><div class="field-label">Auto-Scroll Enabled</div><div class="field-control"><input type="checkbox" id="autoScroll" checked style="width:18px;height:18px;"></div></div>
-                <div class="field"><div class="field-label">Scroll Speed (px/step)</div><div class="field-control"><input type="number" id="scrollSpeed" min="100" max="2000" step="50" value="400"></div></div>
-                <div class="field"><div class="field-label">Scroll Delay (ms)</div><div class="field-control"><input type="number" id="scrollDelayMs" min="10" max="1000" step="10" value="100"></div></div>
-                <div class="field"><div class="field-label">Bottom Wait (ms)</div><div class="field-control"><input type="number" id="bottomWaitMs" min="500" max="10000" step="100" value="1500"></div></div>
-                <div class="field"><div class="field-label">Loop Interval (ms)</div><div class="field-control"><input type="number" id="loopIntervalMs" min="500" max="10000" step="100" value="1200"></div></div>
-                <div class="field"><div class="field-label">Load More Wait (ms)</div><div class="field-control"><input type="number" id="loadMoreWaitMs" min="500" max="15000" step="100" value="3000"></div></div>
-                <div class="field"><div class="field-label">Max Stuck Loops</div><div class="field-control"><input type="number" id="maxStuckLoops" min="1" max="20" value="4"></div></div>
+                <div class="field"><div class="field-label">Scroll Speed (px/step) <span class="desc">Higher = faster</span></div><div class="field-control"><input type="number" id="scrollSpeed" min="100" max="3000" step="50" value="900"></div></div>
+                <div class="field"><div class="field-label">Scroll Delay (ms) <span class="desc">Lower = faster</span></div><div class="field-control"><input type="number" id="scrollDelayMs" min="10" max="1000" step="10" value="40"></div></div>
+                <div class="field"><div class="field-label">Bottom Wait (ms)</div><div class="field-control"><input type="number" id="bottomWaitMs" min="100" max="10000" step="100" value="500"></div></div>
+                <div class="field"><div class="field-label">Loop Interval (ms) <span class="desc">Lower = faster queue refill</span></div><div class="field-control"><input type="number" id="loopIntervalMs" min="100" max="10000" step="50" value="250"></div></div>
+                <div class="field"><div class="field-label">Load More Wait (ms)</div><div class="field-control"><input type="number" id="loadMoreWaitMs" min="200" max="15000" step="100" value="900"></div></div>
+                <div class="field"><div class="field-label">Max Stuck Loops</div><div class="field-control"><input type="number" id="maxStuckLoops" min="1" max="20" value="3"></div></div>
             </div>
             <div class="section">
                 <div class="section-title">♻️ Auto-Reload</div>
                 <div class="field"><div class="field-label">Auto-Reload on Complete</div><div class="field-control"><input type="checkbox" id="autoReloadOnComplete" checked style="width:18px;height:18px;"></div></div>
-                <div class="field"><div class="field-label">Reload Delay (ms)</div><div class="field-control"><input type="number" id="autoReloadDelayMs" min="500" max="30000" step="500" value="2000"></div></div>
+                <div class="field"><div class="field-label">Reload Delay (ms)</div><div class="field-control"><input type="number" id="autoReloadDelayMs" min="500" max="30000" step="100" value="1500"></div></div>
                 <div class="field"><div class="field-label">Max Reloads/Session</div><div class="field-control"><input type="number" id="maxReloadsPerSession" min="1" max="200" value="20"></div></div>
+            </div>
+            <div class="actions">
+                <!-- Speed-only reset — see note in config.js. Not wired by default; safe to remove if unwanted. -->
+                <button class="btn-secondary" id="speedResetBtn" title="Reset only scroll/loop/cooldown to fast defaults">⚡ Reset to Speed Defaults</button>
             </div>
         </div>
 
-        <!-- Popup -->
+        <!-- ============================================================
+             POPUP (defaults reflect v6.2 speed tuning)
+             ============================================================ -->
         <div class="tab-content" id="tab-popup">
             <div class="section">
                 <div class="section-title">💬 Popup Handling</div>
                 <div class="field"><div class="field-label">Auto-Handle Popups</div><div class="field-control"><input type="checkbox" id="autoMinimize" checked style="width:18px;height:18px;"></div></div>
-                <div class="field"><div class="field-label">Popup Timeout (ms)</div><div class="field-control"><input type="number" id="popupTimeoutMs" min="2000" max="60000" step="500" value="10000"></div></div>
+                <div class="field"><div class="field-label">Popup Timeout (ms) <span class="desc">How long to wait before assuming no popup</span></div><div class="field-control"><input type="number" id="popupTimeoutMs" min="1000" max="60000" step="500" value="5000"></div></div>
                 <div class="field"><div class="field-label">Confirmation Answer</div><div class="field-control"><select id="confirmationAnswer"><option value="yes">YES</option><option value="no">NO</option></select></div></div>
                 <div class="field"><div class="field-label">Purchase Modal Action</div><div class="field-control"><select id="purchaseAction"><option value="close">Auto-close</option><option value="stop">Stop acquiring</option></select></div></div>
             </div>
         </div>
 
-        <!-- Data Management -->
+        <!-- ============================================================
+             DATA
+             ============================================================ -->
         <div class="tab-content" id="tab-data">
             <div class="section">
                 <div class="section-title">📊 Supabase Table Counts</div>
@@ -232,7 +272,7 @@
                 <div class="section-title">🧹 Local Data</div>
                 <div class="danger-zone-buttons">
                     <button class="btn-warning" data-action="clearDupCache">🗑️ Clear Duplicate Cache</button>
-                    <button class="btn-danger" data-action="clearAllLocal">⚠️ Clear ALL Local Data</button>
+                    <button class="btn-danger"  data-action="clearAllLocal">⚠️ Clear ALL Local Data</button>
                 </div>
             </div>
 
@@ -240,17 +280,19 @@
                 <div class="section-title">☢️ Supabase Data — DANGER ZONE</div>
                 <div class="danger-zone-buttons">
                     <button class="btn-warning" data-action="resetStats">🔄 Reset Filter Stats</button>
-                    <button class="btn-danger" data-action="clearHistory">🗑️ Delete ALL Lead History</button>
-                    <button class="btn-danger" data-action="clearLeads">🗑️ Delete ALL Leads</button>
-                    <button class="btn-danger" data-action="clearBefore">📅 Delete Leads Before Date</button>
-                    <button class="btn-danger" data-action="clearFilters">🗑️ Delete ALL Filters</button>
+                    <button class="btn-danger"  data-action="clearHistory">🗑️ Delete ALL Lead History</button>
+                    <button class="btn-danger"  data-action="clearLeads">🗑️ Delete ALL Leads</button>
+                    <button class="btn-danger"  data-action="clearBefore">📅 Delete Leads Before Date</button>
+                    <button class="btn-danger"  data-action="clearFilters">🗑️ Delete ALL Filters</button>
                 </div>
             </div>
         </div>
 
-        <!-- Global Actions -->
+        <!-- ============================================================
+             GLOBAL ACTIONS
+             ============================================================ -->
         <div class="actions">
-            <button class="btn-primary" id="saveAllBtn">💾 Save All Settings</button>
+            <button class="btn-primary"   id="saveAllBtn">💾 Save All Settings</button>
             <button class="btn-secondary" id="resetAllBtn">↺ Reset to Defaults</button>
             <button class="btn-secondary" id="backBtn">← Back</button>
         </div>
@@ -261,11 +303,13 @@
         </div>
 
         <div class="credit">
-            Developed by <a href="https://codenagpur.in" target="_blank">CodeNagpur.in</a>
+            Developed by <a href="https://keynlabs.vercel.app/" target="_blank">Keyn Labs</a>
         </div>
     </div>
 
-    <!-- Filter Editor Modal -->
+    <!-- ============================================================
+         FILTER EDITOR MODAL (unchanged — all IDs kept)
+         ============================================================ -->
     <div class="modal-overlay" id="filterModal" style="display:none;">
         <div class="modal">
             <div class="modal-header">
@@ -300,15 +344,15 @@
                 </div>
 
                 <div class="section-title" style="margin-top:20px;">📦 Product Keywords</div>
-                <div class="section-desc">One per line. At least one must match (if list is not empty)</div>
+                <div class="section-desc">One per line. At least one must match the lead's <strong>product name</strong> (not the message).</div>
                 <textarea id="editProductKeywords" class="modal-textarea" rows="6" placeholder="serum&#10;sunscreen&#10;spf&#10;cream"></textarea>
 
                 <div class="section-title" style="margin-top:16px;">🚫 Negative Keywords</div>
-                <div class="section-desc">One per line. Any match rejects the lead</div>
+                <div class="section-desc">One per line. Any match in the product name rejects the lead.</div>
                 <textarea id="editNegativeKeywords" class="modal-textarea" rows="4" placeholder="used&#10;repair&#10;job"></textarea>
 
                 <div class="section-title" style="margin-top:16px;">✅ Required Keywords</div>
-                <div class="section-desc">One per line. At least one must be present</div>
+                <div class="section-desc">One per line. At least one must appear in the product name <em>or</em> message.</div>
                 <textarea id="editRequiredKeywords" class="modal-textarea" rows="3" placeholder="buy&#10;purchase"></textarea>
 
                 <div class="section-title" style="margin-top:16px;">🌍 Location Keywords</div>
@@ -316,12 +360,14 @@
                 <textarea id="editLocationKeywords" class="modal-textarea" rows="3" placeholder="india&#10;maharashtra"></textarea>
 
                 <div class="info-box" style="margin-top:16px;">
-                    <strong>💡 Tip:</strong> When you save, keywords are stored in the <code>filter_config.product_names</code> AND the new <code>product_keywords</code> column (auto-synced).
+                    <strong>💡 Tip:</strong> v7 stores keywords only in the new columns
+                    (<code>product_keywords</code>, <code>negative_keywords</code>, etc.).
+                    Legacy <code>filter_config</code> is no longer written.
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" id="filterModalCancel">Cancel</button>
-                <button class="btn-primary" id="filterModalSave">💾 Save Filter</button>
+                <button class="btn-primary"   id="filterModalSave">💾 Save Filter</button>
             </div>
         </div>
     </div>

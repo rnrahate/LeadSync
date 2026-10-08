@@ -1,10 +1,28 @@
 // src/supabase-service.js
 // Complete Supabase integration with data management
-// Developed by CodeNagpur.in
-// Version 4.8.0
+// Developed by Keyn Labs
+// Version 4.9.0
+// ============================================================================
+// CHANGELOG v4.9.0
+//   • insertLead returns { data, conflict, existingId } on 409 (no throw)
+//   • getRecentLeads(limit, statuses) — optional status filter
+//   • _flushStats early-returns if no filters cached
+//   • Filters cache TTL: 30s → 10s
+//   • updateFilterStatus debounced (5s coalesce window)
+//   • markLeadContacted fires history insert in parallel (non-blocking)
+//   • AbortController timeouts on all mutating fetches
+//   • getFilterById() + getActiveFilterCount() helpers added
+//   • healthCheck gets 5s timeout
+//   • More robust _extractCount across PostgREST versions
+// ============================================================================
 
 const SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2aHVyb211YnVreWxzeHJzZml6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwODI4MDYsImV4cCI6MjEwMzY1ODgwNn0.29J2uGHxFhPtEqRZvnXjaYpL-x4I0uEc2TT8u9d5PVw';
+
+// Default network timeouts (ms)
+const TIMEOUT_READ   = 8000;
+const TIMEOUT_WRITE  = 15000;
+const TIMEOUT_HEALTH = 5000;
 
 class SupabaseService {
     constructor() {
@@ -20,40 +38,72 @@ class SupabaseService {
         this._filters = [];
         this._filtersLoaded = false;
         this._filtersLastFetch = 0;
-        this._filtersTTL = 30000; // 30 seconds
+        this._filtersTTL = 10000; // 10 seconds (was 30s)
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
+        this._statsPending = false;
+        this._filterStatusLastPushed = 0;
+        this._filterStatusPending = null;
     }
 
+    // ============================================================
+    // LOGGING
+    // ============================================================
     setLogger(logger) {
         this.logger = logger;
     }
 
     _log(level, msg, data) {
-        if (this.logger && this.logger[level]) {
+        if (this.logger && typeof this.logger[level] === 'function') {
             this.logger[level](msg, data);
+        }
+    }
+
+    // ============================================================
+    // FETCH HELPERS (AbortController timeouts)
+    // ============================================================
+    async _fetchWithTimeout(url, options, timeoutMs) {
+        timeoutMs = timeoutMs || TIMEOUT_READ;
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+        try {
+            var opts = Object.assign({}, options || {}, { signal: controller.signal });
+            var res = await fetch(url, opts);
+            clearTimeout(timer);
+            return res;
+        } catch (err) {
+            clearTimeout(timer);
+            if (err.name === 'AbortError') {
+                throw new Error('Timeout after ' + timeoutMs + 'ms');
+            }
+            throw err;
         }
     }
 
     // ============================================================
     // FILTERS - Fetch and cache
     // ============================================================
+    /**
+     * Load active filters. Cached for _filtersTTL ms.
+     * @param {boolean} forceRefresh
+     * @returns {Promise<Array>}
+     */
     async loadFilters(forceRefresh) {
-        const now = Date.now();
+        var now = Date.now();
         if (!forceRefresh && this._filtersLoaded && (now - this._filtersLastFetch) < this._filtersTTL) {
             return this._filters;
         }
 
         try {
-            const url = this.url + '/rest/v1/filters?is_active=eq.true&select=*&order=id.asc';
-            const response = await fetch(url, { headers: this.headers });
+            var url = this.url + '/rest/v1/filters?is_active=eq.true&select=*&order=id.asc';
+            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
 
             if (!response.ok) {
                 throw new Error('HTTP ' + response.status);
             }
 
-            const data = await response.json();
+            var data = await response.json();
             this._filters = Array.isArray(data) ? data : [];
             this._filtersLoaded = true;
             this._filtersLastFetch = now;
@@ -71,32 +121,97 @@ class SupabaseService {
         }
     }
 
+    /** @returns {Array} Currently cached filters */
     getFilters() {
         return this._filters;
     }
 
-    // ============================================================
-    // FILTER STATUS
-    // ============================================================
-    async updateFilterStatus(isRunning) {
+    /**
+     * Fetch a single filter by id. Always hits the network (no cache).
+     * @param {number|string} id
+     * @returns {Promise<Object|null>}
+     */
+    async getFilterById(id) {
         try {
-            const url = this.url + '/rest/v1/filters?is_active=eq.true';
-            const body = {
+            var url = this.url + '/rest/v1/filters?id=eq.' + encodeURIComponent(id) + '&select=*&limit=1';
+            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var arr = await response.json();
+            return Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
+        } catch (err) {
+            this._log('warn', 'getFilterById failed', { id: id, error: err.message });
+            return null;
+        }
+    }
+
+    /**
+     * Count of currently active filters.
+     * @returns {Promise<number>}
+     */
+    async getActiveFilterCount() {
+        try {
+            var url = this.url + '/rest/v1/filters?is_active=eq.true&select=id';
+            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var arr = await response.json();
+            return Array.isArray(arr) ? arr.length : 0;
+        } catch (err) {
+            return 0;
+        }
+    }
+
+    // ============================================================
+    // FILTER STATUS (debounced — coalesces rapid calls)
+    // ============================================================
+    /**
+     * Mark all active filters as running/not-running.
+     * Debounced: rapid calls within 5s collapse into a single PATCH.
+     * @param {boolean} isRunning
+     * @returns {Promise<boolean>}
+     */
+    async updateFilterStatus(isRunning) {
+        var now = Date.now();
+        this._filterStatusPending = isRunning;
+
+        // If a call was made < 5s ago with the same value, skip entirely
+        if (this._filterStatusLastPushed &&
+            (now - this._filterStatusLastPushed) < 5000 &&
+            this._filterStatusLastPushed_value === isRunning) {
+            return true;
+        }
+
+        // Coalesce: if we just fired, debounce
+        if (this._filterStatusLastPushed && (now - this._filterStatusLastPushed) < 5000) {
+            var self = this;
+            if (this._filterStatusDebounceTimer) clearTimeout(this._filterStatusDebounceTimer);
+            this._filterStatusDebounceTimer = setTimeout(function() {
+                self._filterStatusDebounceTimer = null;
+                self._doFilterStatusPush(self._filterStatusPending);
+            }, 5000 - (now - this._filterStatusLastPushed));
+            return true;
+        }
+
+        return this._doFilterStatusPush(isRunning);
+    }
+
+    async _doFilterStatusPush(isRunning) {
+        try {
+            var url = this.url + '/rest/v1/filters?is_active=eq.true';
+            var body = {
                 is_running: isRunning,
                 last_poll_time: new Date().toISOString()
             };
-
-            const response = await fetch(url, {
+            var response = await this._fetchWithTimeout(url, {
                 method: 'PATCH',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
+            if (!response.ok) throw new Error('HTTP ' + response.status);
 
-            this._log('debug', '📡 Filter status updated', { isRunning });
+            this._filterStatusLastPushed = Date.now();
+            this._filterStatusLastPushed_value = isRunning;
+            this._log('debug', '📡 Filter status updated', { isRunning: isRunning });
             return true;
         } catch (err) {
             this._log('warn', 'Failed to update filter status', { error: err.message });
@@ -107,16 +222,18 @@ class SupabaseService {
     // ============================================================
     // LEADS - Check if exists
     // ============================================================
+    /**
+     * @param {string} uniqueQueryId
+     * @returns {Promise<Object|null>}
+     */
     async leadExists(uniqueQueryId) {
         try {
-            const url = this.url + '/rest/v1/leads?unique_query_id=eq.' + encodeURIComponent(uniqueQueryId) + '&select=id,status,is_contacted';
-            const response = await fetch(url, { headers: this.headers });
-
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
-
-            const data = await response.json();
+            var url = this.url + '/rest/v1/leads?unique_query_id=eq.' +
+                encodeURIComponent(uniqueQueryId) +
+                '&select=id,status,is_contacted&limit=1';
+            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var data = await response.json();
             return data.length > 0 ? data[0] : null;
         } catch (err) {
             this._log('warn', 'Failed to check lead existence', { error: err.message, uniqueQueryId: uniqueQueryId });
@@ -125,56 +242,73 @@ class SupabaseService {
     }
 
     // ============================================================
-    // LEADS - Insert
+    // LEADS - Insert (409-aware)
     // ============================================================
+    /**
+     * Insert a lead. On 409 conflict, returns the existing row instead of throwing.
+     * @param {Object} lead
+     * @returns {Promise<{data: Object|null, conflict: boolean, existingId: number|string|null}>}
+     */
     async insertLead(lead) {
-        try {
-            const url = this.url + '/rest/v1/leads';
-            const body = {
-                unique_query_id: lead.uniqueQueryId,
-                query_type: lead.queryType || 'BUY_LEAD',
-                query_time: lead.queryTime || new Date().toISOString(),
-                sender_name: lead.senderName || null,
-                sender_mobile: lead.senderMobile || null,
-                sender_mobile_alt: lead.senderMobileAlt || null,
-                sender_phone: lead.senderPhone || null,
-                sender_phone_alt: lead.senderPhoneAlt || null,
-                sender_email: lead.senderEmail || null,
-                sender_email_alt: lead.senderEmailAlt || null,
-                sender_company: lead.senderCompany || null,
-                sender_address: lead.senderAddress || null,
-                sender_city: lead.senderCity || null,
-                sender_state: lead.senderState || null,
-                sender_pincode: lead.senderPincode || null,
-                sender_country_iso: lead.senderCountryIso || null,
-                subject: lead.subject || null,
-                query_product_name: lead.queryProductName || null,
-                query_message: lead.queryMessage || null,
-                query_mcat_name: lead.queryMcatName || null,
-                call_duration: lead.callDuration || null,
-                receiver_mobile: lead.receiverMobile || null,
-                is_matched: lead.isMatched || false,
-                is_contacted: false,
-                status: 'new'
-            };
+        var body = {
+            unique_query_id: lead.uniqueQueryId,
+            query_type: lead.queryType || 'BUY_LEAD',
+            query_time: lead.queryTime || new Date().toISOString(),
+            sender_name: lead.senderName || null,
+            sender_mobile: lead.senderMobile || null,
+            sender_mobile_alt: lead.senderMobileAlt || null,
+            sender_phone: lead.senderPhone || null,
+            sender_phone_alt: lead.senderPhoneAlt || null,
+            sender_email: lead.senderEmail || null,
+            sender_email_alt: lead.senderEmailAlt || null,
+            sender_company: lead.senderCompany || null,
+            sender_address: lead.senderAddress || null,
+            sender_city: lead.senderCity || null,
+            sender_state: lead.senderState || null,
+            sender_pincode: lead.senderPincode || null,
+            sender_country_iso: lead.senderCountryIso || null,
+            subject: lead.subject || null,
+            query_product_name: lead.queryProductName || null,
+            query_message: lead.queryMessage || null,
+            query_mcat_name: lead.queryMcatName || null,
+            call_duration: lead.callDuration || null,
+            receiver_mobile: lead.receiverMobile || null,
+            is_matched: lead.isMatched || false,
+            is_contacted: false,
+            status: 'new'
+        };
 
-            const response = await fetch(url, {
+        try {
+            var url = this.url + '/rest/v1/leads';
+            var response = await this._fetchWithTimeout(url, {
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error('HTTP ' + response.status + ': ' + errorText);
+            if (response.status === 409) {
+                // Conflict — fetch existing row so caller can recover id
+                this._log('debug', '🔁 Lead already exists (409)', { uniqueQueryId: lead.uniqueQueryId });
+                var existing = await this.leadExists(lead.uniqueQueryId);
+                return {
+                    data: existing,
+                    conflict: true,
+                    existingId: existing ? existing.id : null
+                };
             }
 
-            const data = await response.json();
-            this._log('info', '💾 Lead inserted', { uniqueQueryId: lead.uniqueQueryId, id: data[0]?.id });
-            return data[0] || null;
+            if (!response.ok) {
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText.substring(0, 200));
+            }
+
+            var data = await response.json();
+            var row = data[0] || null;
+            this._log('info', '💾 Lead inserted', { uniqueQueryId: lead.uniqueQueryId, id: row && row.id });
+            return { data: row, conflict: false, existingId: null };
         } catch (err) {
             this._log('error', '❌ Failed to insert lead', { error: err.message, uniqueQueryId: lead.uniqueQueryId });
-            return null;
+            return { data: null, conflict: false, existingId: null, error: err.message };
         }
     }
 
@@ -183,18 +317,16 @@ class SupabaseService {
     // ============================================================
     async updateLead(uniqueQueryId, updates) {
         try {
-            const url = this.url + '/rest/v1/leads?unique_query_id=eq.' + encodeURIComponent(uniqueQueryId);
-            const body = Object.assign({}, updates, { updated_at: new Date().toISOString() });
+            var url = this.url + '/rest/v1/leads?unique_query_id=eq.' + encodeURIComponent(uniqueQueryId);
+            var body = Object.assign({}, updates, { updated_at: new Date().toISOString() });
 
-            const response = await fetch(url, {
+            var response = await this._fetchWithTimeout(url, {
                 method: 'PATCH',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
+            if (!response.ok) throw new Error('HTTP ' + response.status);
 
             this._log('debug', '✏️ Lead updated', { uniqueQueryId: uniqueQueryId, updates: updates });
             return true;
@@ -219,25 +351,27 @@ class SupabaseService {
     // ============================================================
     // LEAD HISTORY
     // ============================================================
+    /**
+     * Insert a lead_history row. Non-blocking wrapper is provided by caller.
+     * @returns {Promise<boolean>}
+     */
     async insertLeadHistory(leadId, action, details, contactedAt) {
         try {
-            const url = this.url + '/rest/v1/lead_history';
-            const body = {
+            var url = this.url + '/rest/v1/lead_history';
+            var body = {
                 lead_id: leadId,
                 action: action,
                 action_details: typeof details === 'string' ? details : JSON.stringify(details || {}),
                 contacted_at: contactedAt || null
             };
 
-            const response = await fetch(url, {
+            var response = await this._fetchWithTimeout(url, {
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
+            if (!response.ok) throw new Error('HTTP ' + response.status);
 
             this._log('debug', '📝 History added', { leadId: leadId, action: action });
             return true;
@@ -250,14 +384,18 @@ class SupabaseService {
     // ============================================================
     // STATS - Buffered updates
     // ============================================================
+    /**
+     * Update filter stats. Buffered for 10s to avoid PATCH storms.
+     */
     async updateFilterStats(scanned, matched, clicked) {
         this._statsBuffer.scanned = scanned;
         this._statsBuffer.matched = matched;
         this._statsBuffer.clicked = clicked;
 
         if (this._statsFlushTimer) return;
+        if (this._statsPending) return;
 
-        const self = this;
+        var self = this;
         this._statsFlushTimer = setTimeout(function() {
             self._statsFlushTimer = null;
             self._flushStats();
@@ -265,44 +403,58 @@ class SupabaseService {
     }
 
     async _flushStats() {
+        // Skip if no filters cached — PATCH would match zero rows
+        if (!this._filters || this._filters.length === 0) {
+            this._statsPending = false;
+            return;
+        }
+
+        this._statsPending = true;
         try {
-            const url = this.url + '/rest/v1/filters?is_active=eq.true';
-            const body = {
+            var url = this.url + '/rest/v1/filters?is_active=eq.true';
+            var body = {
                 stats_scanned: this._statsBuffer.scanned,
                 stats_matched: this._statsBuffer.matched,
                 stats_clicked: this._statsBuffer.clicked,
                 updated_at: new Date().toISOString()
             };
 
-            const response = await fetch(url, {
+            var response = await this._fetchWithTimeout(url, {
                 method: 'PATCH',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
             if (response.ok) {
                 this._log('debug', '📊 Stats flushed to DB', this._statsBuffer);
             }
         } catch (err) {
             this._log('warn', 'Stats flush failed', { error: err.message });
+        } finally {
+            this._statsPending = false;
         }
     }
 
     // ============================================================
     // BATCH - Fetch recent leads (for dedup cache)
     // ============================================================
-    async getRecentLeads(limit) {
+    /**
+     * Fetch recent leads. Optionally filter by status.
+     * @param {number} limit
+     * @param {string[]} [statuses] - e.g. ['rejected','skipped']
+     * @returns {Promise<Array>}
+     */
+    async getRecentLeads(limit, statuses) {
         limit = limit || 100;
         try {
-            const url = this.url + '/rest/v1/leads?select=unique_query_id,status,is_contacted&order=created_at.desc&limit=' + limit;
-            const response = await fetch(url, { headers: this.headers });
-
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
+            var url = this.url + '/rest/v1/leads?select=unique_query_id,status,is_contacted&order=created_at.desc&limit=' + limit;
+            if (Array.isArray(statuses) && statuses.length > 0) {
+                url += '&status=in.(' + statuses.map(function(s) { return encodeURIComponent(s); }).join(',') + ')';
             }
-
-            const data = await response.json();
-            return data || [];
+            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var data = await response.json();
+            return Array.isArray(data) ? data : [];
         } catch (err) {
             this._log('warn', 'Failed to fetch recent leads', { error: err.message });
             return [];
@@ -310,18 +462,13 @@ class SupabaseService {
     }
 
     // ============================================================
-    // DATA MANAGEMENT - CLEAR OPERATIONS
+    // DATA MANAGEMENT — CLEAR OPERATIONS
     // ============================================================
 
-    /**
-     * Delete ALL leads from the leads table.
-     * ⚠️ Cascade will also delete lead_history rows referencing them.
-     */
     async clearAllLeads() {
         try {
-            // Use a filter that matches every row
-            const url = this.url + '/rest/v1/leads?id=gte.0';
-            const response = await fetch(url, {
+            var url = this.url + '/rest/v1/leads?id=gte.0';
+            var response = await this._fetchWithTimeout(url, {
                 method: 'DELETE',
                 headers: {
                     'apikey': this.key,
@@ -329,11 +476,11 @@ class SupabaseService {
                     'Content-Type': 'application/json',
                     'Prefer': 'return=minimal'
                 }
-            });
+            }, TIMEOUT_WRITE);
 
             if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error('HTTP ' + response.status + ': ' + errorText);
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText.substring(0, 200));
             }
 
             this._log('warn', '🗑️ All leads deleted');
@@ -344,14 +491,10 @@ class SupabaseService {
         }
     }
 
-    /**
-     * Delete ALL lead history rows.
-     * Leads themselves are NOT deleted.
-     */
     async clearAllHistory() {
         try {
-            const url = this.url + '/rest/v1/lead_history?id=gte.0';
-            const response = await fetch(url, {
+            var url = this.url + '/rest/v1/lead_history?id=gte.0';
+            var response = await this._fetchWithTimeout(url, {
                 method: 'DELETE',
                 headers: {
                     'apikey': this.key,
@@ -359,11 +502,11 @@ class SupabaseService {
                     'Content-Type': 'application/json',
                     'Prefer': 'return=minimal'
                 }
-            });
+            }, TIMEOUT_WRITE);
 
             if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error('HTTP ' + response.status + ': ' + errorText);
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText.substring(0, 200));
             }
 
             this._log('warn', '🗑️ All history deleted');
@@ -374,13 +517,10 @@ class SupabaseService {
         }
     }
 
-    /**
-     * Reset filter stats counters to zero.
-     */
     async resetFilterStats() {
         try {
-            const url = this.url + '/rest/v1/filters?is_active=eq.true';
-            const body = {
+            var url = this.url + '/rest/v1/filters?is_active=eq.true';
+            var body = {
                 stats_scanned: 0,
                 stats_matched: 0,
                 stats_clicked: 0,
@@ -388,15 +528,13 @@ class SupabaseService {
                 updated_at: new Date().toISOString()
             };
 
-            const response = await fetch(url, {
+            var response = await this._fetchWithTimeout(url, {
                 method: 'PATCH',
                 headers: this.headers,
                 body: JSON.stringify(body)
-            });
+            }, TIMEOUT_WRITE);
 
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
+            if (!response.ok) throw new Error('HTTP ' + response.status);
 
             this._log('warn', '🔄 Filter stats reset');
             return { success: true, message: 'Stats reset' };
@@ -406,13 +544,17 @@ class SupabaseService {
         }
     }
 
-    /**
-     * Delete leads created BEFORE the given ISO date.
-     */
     async clearLeadsBefore(dateISO) {
+        if (!dateISO || typeof dateISO !== 'string') {
+            return { success: false, error: 'Missing date' };
+        }
+        if (!/^\d{4}-\d{2}-\d{2}(T[\d:.Z+-]+)?$/.test(dateISO)) {
+            return { success: false, error: 'Invalid date format (expected YYYY-MM-DD or ISO)' };
+        }
+
         try {
-            const url = this.url + '/rest/v1/leads?created_at=lt.' + encodeURIComponent(dateISO);
-            const response = await fetch(url, {
+            var url = this.url + '/rest/v1/leads?created_at=lt.' + encodeURIComponent(dateISO);
+            var response = await this._fetchWithTimeout(url, {
                 method: 'DELETE',
                 headers: {
                     'apikey': this.key,
@@ -420,11 +562,11 @@ class SupabaseService {
                     'Content-Type': 'application/json',
                     'Prefer': 'return=minimal'
                 }
-            });
+            }, TIMEOUT_WRITE);
 
             if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error('HTTP ' + response.status + ': ' + errorText);
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText.substring(0, 200));
             }
 
             this._log('warn', '🗑️ Old leads deleted before ' + dateISO);
@@ -435,29 +577,26 @@ class SupabaseService {
         }
     }
 
-    /**
-     * Get table counts (leads, history, filters).
-     */
     async getTableCounts() {
         try {
-            const countHeaders = {
+            var countHeaders = {
                 'apikey': this.key,
                 'Authorization': 'Bearer ' + this.key,
                 'Range': '0-0',
                 'Prefer': 'count=exact'
             };
 
-            const [leadsResp, historyResp, filtersResp] = await Promise.all([
-                fetch(this.url + '/rest/v1/leads?select=id', { headers: countHeaders }),
-                fetch(this.url + '/rest/v1/lead_history?select=id', { headers: countHeaders }),
-                fetch(this.url + '/rest/v1/filters?select=id', { headers: countHeaders })
+            var results = await Promise.all([
+                this._fetchWithTimeout(this.url + '/rest/v1/leads?select=id',        { headers: countHeaders }, TIMEOUT_READ),
+                this._fetchWithTimeout(this.url + '/rest/v1/lead_history?select=id', { headers: countHeaders }, TIMEOUT_READ),
+                this._fetchWithTimeout(this.url + '/rest/v1/filters?select=id',      { headers: countHeaders }, TIMEOUT_READ)
             ]);
 
             return {
                 success: true,
-                leads: this._extractCount(leadsResp),
-                history: this._extractCount(historyResp),
-                filters: this._extractCount(filtersResp)
+                leads:   this._extractCount(results[0]),
+                history: this._extractCount(results[1]),
+                filters: this._extractCount(results[2])
             };
         } catch (err) {
             this._log('warn', 'Failed to get table counts', { error: err.message });
@@ -465,13 +604,21 @@ class SupabaseService {
         }
     }
 
+    /**
+     * Extract count from a PostgREST response header.
+     * Handles both `Range: 0-0` + `Prefer: count=exact` and plain `content-range`.
+     * Returns '?' if header is missing/malformed.
+     */
     _extractCount(response) {
         try {
-            const range = response.headers.get('content-range');
+            if (!response || !response.headers || typeof response.headers.get !== 'function') return '?';
+            var range = response.headers.get('content-range') || response.headers.get('Content-Range');
             if (range) {
-                const parts = range.split('/');
+                // Format: "0-0/123" or "*/123" or "0-9/*"
+                var parts = range.split('/');
                 if (parts[1] && parts[1] !== '*') {
-                    return parseInt(parts[1], 10);
+                    var n = parseInt(parts[1], 10);
+                    return isNaN(n) ? '?' : n;
                 }
             }
             return '?';
@@ -483,11 +630,17 @@ class SupabaseService {
     // ============================================================
     // HEALTH CHECK
     // ============================================================
+    /**
+     * Ping the REST endpoint. 5s timeout.
+     * @returns {Promise<boolean>}
+     */
     async healthCheck() {
         try {
-            const response = await fetch(this.url + '/rest/v1/filters?select=id&limit=1', {
-                headers: this.headers
-            });
+            var response = await this._fetchWithTimeout(
+                this.url + '/rest/v1/filters?select=id&limit=1',
+                { headers: this.headers },
+                TIMEOUT_HEALTH
+            );
             return response.ok;
         } catch (err) {
             return false;
@@ -495,7 +648,8 @@ class SupabaseService {
     }
 
     /**
-     * Refresh filters cache manually
+     * Force-refresh filters cache.
+     * @returns {Promise<Array>}
      */
     async refresh() {
         this._filtersLastFetch = 0;
@@ -504,4 +658,5 @@ class SupabaseService {
     }
 }
 
+// Export to window for content-script consumption
 window.SupabaseService = SupabaseService;
