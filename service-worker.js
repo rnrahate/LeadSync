@@ -63,9 +63,9 @@ var DEFAULT_CONFIG = {
     loopIntervalMs: 250,
     loadMoreWaitMs: 900,
     maxStuckLoops: 3,
-    maxReloadsPerSession: 20,
+    maxReloadsPerSession: 999999,
     autoReloadOnComplete: true,
-    autoReloadDelayMs: 1500,
+    autoReloadDelayMs: 100,
 
     // Popup (speed-tuned)
     autoMinimize: true,
@@ -136,7 +136,7 @@ browserAPI.runtime.onStartup.addListener(function() {
     console.log('[SW] Extension started');
     setupAlarms();
     // Run once on startup, tab-gated
-    setTimeout(runGatedFilterCheck, 1500);
+    runGatedFilterCheck();
 });
 
 // ============================================================
@@ -150,8 +150,6 @@ function setupAlarms() {
         console.log('[SW] ⏰ Filter-check alarm scheduled (1 min)');
     } catch (e) {
         console.warn('[SW] alarms.create failed:', e.message);
-        // Fallback: interval (Chrome MV2 with persistent:false may suspend it)
-        setInterval(runGatedFilterCheck, 60000);
     }
 }
 
@@ -216,13 +214,16 @@ async function checkActiveFilters() {
             lastFilterCheck: Date.now()
         });
 
-        try {
-            browserAPI.runtime.sendMessage({
+               try {
+            var p = browserAPI.runtime.sendMessage({
                 action: 'FILTER_STATUS_UPDATE',
                 hasActiveFilters: hasActiveFilters,
                 filterCount: filters.length,
                 filters: filters
             });
+            if (p && typeof p.catch === 'function') {
+                p.catch(function() { /* no listeners */ });
+            }
         } catch (e) { /* no listeners */ }
     } catch (err) {
         console.warn('[SW] checkActiveFilters failed:', err && err.message);
@@ -596,7 +597,7 @@ function fallbackClearDup(sendResponse) {
 }
 
 // ============================================================
-// KEEP ALIVE
+// KEEP ALIVE (MV3: service worker survives via events, not intervals)
 // ============================================================
 browserAPI.runtime.onConnect.addListener(function(port) {
     if (port.name === 'keepAlive') {
@@ -604,10 +605,6 @@ browserAPI.runtime.onConnect.addListener(function(port) {
         try { port.postMessage({ type: 'keepAlive' }); } catch (e) {}
     }
 });
-
-setInterval(function() {
-    try { browserAPI.runtime.getPlatformInfo(function() {}); } catch (e) {}
-}, 20000);
 
 // ============================================================
 // TAB UPDATE LISTENER — retry with backoff on hydration

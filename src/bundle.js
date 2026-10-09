@@ -72,9 +72,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
         loopIntervalMs: 250,
         loadMoreWaitMs: 900,
         maxStuckLoops: 3,
-        maxReloadsPerSession: 20,
+        maxReloadsPerSession: 999999,
         autoReloadOnComplete: true,
-        autoReloadDelayMs: 1500,
+        autoReloadDelayMs: 100,
+        liveScanWaitMs: 2000,
 
         // ---- POPUP (v6.2 speed) ----
         autoMinimize: true,
@@ -190,7 +191,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this._settings = {
             scrollSpeed: 900, scrollDelayMs: 40, bottomWaitMs: 500,
             loopIntervalMs: 250, loadMoreWaitMs: 900, maxStuckLoops: 3,
-            autoReloadOnComplete: true, autoReloadDelayMs: 1500, maxReloadsPerSession: 20
+            autoReloadOnComplete: true, autoReloadDelayMs: 100, maxReloadsPerSession: 999999,
+            liveScanWaitMs: 2000
         };
         this.RELOAD_STORAGE_KEY = 'bl_auto_reload_count';
     }
@@ -222,54 +224,22 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this.logger.info('⏹ Bottom-loop navigator stopped');
     };
 
-    PageNavigator.prototype._startLoop = function() {
+        PageNavigator.prototype._startLoop = function() {
         var self = this;
         if (!this._running || this._loopInProgress) return;
         this._loopInProgress = true;
 
-        this._fastScrollToBottom(function() {
+        // LIVE MODE: no scroll, no "Show more".
+        // Wait for scanner to process top cards, then reload for fresh leads.
+        setTimeout(function() {
             if (!self._running) { self._loopInProgress = false; return; }
-
-            // Immediately try Load More (no scrollIntoView delay)
-            var loadMoreClicked = self._clickLoadMore();
-            if (loadMoreClicked) {
-                self.logger.info('🔄 Clicked "Show more BuyLeads"');
-                self.orchestrator.stats.loadMoreClicks++;
-                self._noMoreCount = 0;
-                self._stuckCount = 0;
-                self._lastLeadCount = self._countLeads();
-                setTimeout(function() {
-                    self._loopInProgress = false;
-                    self.orchestrator.stats.loopsCompleted++;
-                    self._scheduleNextLoop();
-                }, self._settings.loadMoreWaitMs);
-                return;
-            }
-
-            self._noMoreCount++;
-            var currentLeads = self._countLeads();
-            var grown = currentLeads > self._lastLeadCount;
-            if (grown) {
-                self.logger.info('📈 Leads grew: ' + self._lastLeadCount + ' → ' + currentLeads);
-                self._lastLeadCount = currentLeads;
-                self._stuckCount = 0;
-            } else {
-                self._stuckCount++;
-            }
-
-            if (self._stuckCount >= self._settings.maxStuckLoops) {
-                self.logger.warn('⚠ No more leads after ' + self._stuckCount + ' attempts.');
-                self._running = false;
-                self._loopInProgress = false;
-                if (self._settings.autoReloadOnComplete) self._autoReloadPage();
-                else self._showFinalBanner();
-                return;
-            }
-
+            self.logger.info('🔄 Live scan wait complete — reloading');
+            self._running = false;
             self._loopInProgress = false;
             self.orchestrator.stats.loopsCompleted++;
-            self._scheduleNextLoop();
-        });
+            if (self._settings.autoReloadOnComplete) self._autoReloadPage();
+            else self._showFinalBanner();
+        }, self._settings.liveScanWaitMs);
     };
 
     PageNavigator.prototype._scheduleNextLoop = function() {
@@ -363,19 +333,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         setTimeout(function() { try { window.location.reload(); } catch (e) {} }, this._settings.autoReloadDelayMs);
     };
 
-    PageNavigator.prototype._showReloadOverlay = function(n) {
-        try {
-            var existing = document.getElementById('bl-reload-overlay');
-            if (existing) existing.remove();
-            var overlay = document.createElement('div');
-            overlay.id = 'bl-reload-overlay';
-            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:-apple-system,Arial,sans-serif;';
-            overlay.innerHTML = '<div style="background:#fff;padding:24px 32px;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.3);text-align:center;max-width:340px;">' +
-                '<div style="font-size:40px;margin-bottom:12px;">🔄</div>' +
-                '<div style="font-size:16px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">All leads processed</div>' +
-                '<div style="font-size:12px;color:#666;">Reloading page... (#' + n + '/' + this._settings.maxReloadsPerSession + ')</div></div>';
-            document.body.appendChild(overlay);
-        } catch (e) {}
+        PageNavigator.prototype._showReloadOverlay = function(n) {
+        // Overlay removed — silent reload
     };
 
     PageNavigator.prototype._showFinalBanner = function() {
@@ -1259,11 +1218,20 @@ SafetyController.prototype.getStatus = function() {
                 return null;
             }
 
-            // --- LOCATION ---
-            var locEl = el.querySelector('[class*="BuyLdC_time_loc"] strong');
-            var location = locEl ? cleanRawLocation(locEl.textContent) : null;
+                                 // --- LOCATION ---
+            // India card has TWO <strong> for city/state, PLUS one <strong> for time ("11 hrs ago").
+            // Location strongs have a tooltip span (.BuyLdC_tltp); time strong does NOT.
+            var locEls = el.querySelectorAll('[class*="BuyLdC_time_loc"] strong');
+            var locParts = [];
+            for (var li = 0; li < locEls.length; li++) {
+                // Skip time strong — it has no tooltip span
+                if (!locEls[li].querySelector('.BuyLdC_tltp')) continue;
+                var cleaned = cleanRawLocation(locEls[li].textContent);
+                if (cleaned) locParts.push(cleaned);
+            }
+            var location = locParts.length > 0 ? locParts.join(', ') : null;
 
-            // --- COUNTRY ---
+                        // --- COUNTRY ---
             var countryIso = null;
 
             // 1) flag alt attribute
@@ -1272,6 +1240,11 @@ SafetyController.prototype.getStatus = function() {
                 if (flagImg && flagImg.alt) {
                     var alt = flagImg.alt.trim().toUpperCase();
                     if (/^[A-Z]{2}$/.test(alt)) countryIso = alt;
+                }
+                // 2) fallback: parse ISO from flag image src (e.g. .../in_flag_s.png → IN)
+                if (!countryIso && flagImg && flagImg.src) {
+                    var srcMatch = flagImg.src.match(/\/([a-z]{2})_flag[_s]*\.png/i);
+                    if (srcMatch) countryIso = srcMatch[1].toUpperCase();
                 }
             } catch (e) {}
 
@@ -1331,9 +1304,15 @@ SafetyController.prototype.getStatus = function() {
             // --- COMPOSE LEAD ---
             var subject = productName + (location ? ' - ' + location : '');
 
+                        // Build content-based unique ID so position-based card IDs
+            // don't collide across sessions (id_BLCard1 today ≠ id_BLCard1 tomorrow)
+            var contentKey = leadId + '|' +
+                (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
+                ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+
             return {
                 leadId: leadId,
-                uniqueQueryId: leadId,
+                uniqueQueryId: contentKey,
                 queryType: 'BUY_LEAD',
                 queryTime: new Date().toISOString(),
 
@@ -1432,8 +1411,9 @@ SafetyController.prototype.getStatus = function() {
                         if (r.width > 100 && r.height > 60) { popup = c; break; }
                     }
 
-                    if (popup) {
+                                        if (popup) {
                         clearInterval(interval);
+                        log.info('⏱️ Popup detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
                         var text = (popup.textContent || '').toLowerCase();
                         var isPurchase = text.indexOf('purchase buylead') !== -1 ||
                             text.indexOf("to view buyer's contact details") !== -1 ||
@@ -1468,7 +1448,7 @@ SafetyController.prototype.getStatus = function() {
                         return;
                     }
 
-                    if (Date.now() - start > 1500) {
+                                        if (Date.now() - start > 1000) {
                         clearInterval(interval);
                         resolve({ success: true, action: 'timeout_no_popup', popup: { success: true } });
                     }
@@ -1619,8 +1599,10 @@ SafetyController.prototype.getStatus = function() {
         this._statsTimer = null;
         this._cleanupTimer = null;
         this._statusPanelTimer = null;
-                this._supabaseEnabled = true;
+                        this._supabaseEnabled = true;
         this._initTime = Date.now();
+        this._syncRetryAttempt = 0;
+        this._syncRetryNextAt = 0;
 
         var self = this;
         this._loadConfig().then(function() { self._init(); });
@@ -1682,18 +1664,20 @@ SafetyController.prototype.getStatus = function() {
 
         this.duplicateManager.clear();
 
-        this.keywordManager.loadKeywords().then(function() {
-            // FIX: Load Supabase filters BEFORE starting scanner to prevent race condition.
-            // Cards scanned before filters loaded were being skipped permanently.
+                this.keywordManager.loadKeywords().then(function() {
+            // Setup UI + periodic tasks IMMEDIATELY so panel shows during retries
+            self.queue.setProcessor(function(lead) { return self._processLead(lead); });
+            self._startPeriodicTasks();
+            self._setupUI();
+            self._broadcastStatus();
+
+            // Now wait for Supabase filters (with retry) before starting scanner
             if (self._supabaseEnabled) {
                 return self._syncSupabaseKeywords();
             }
             return Promise.resolve();
         }).then(function() {
-            self.queue.setProcessor(function(lead) { return self._processLead(lead); });
             self.scanner.startWatching(function(cards) { self._onCardsDetected(cards); });
-            self._startPeriodicTasks();
-            self._setupUI();
 
             if (self.config.autoScroll) self.navigator.start();
 
@@ -1703,23 +1687,59 @@ SafetyController.prototype.getStatus = function() {
         });
     };
 
-           Orchestrator.prototype._syncSupabaseKeywords = function() {
+               Orchestrator.prototype._syncSupabaseKeywords = function(retryAttempt) {
         var self = this;
-        this.logger.info('🔄 Syncing keywords from Supabase...');
-        return this.supabase.loadFilters(true).then(function() {
+        retryAttempt = retryAttempt || 0;
+        var MAX_RETRIES = 5;
+        var DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
+
+        if (retryAttempt === 0) {
+            this.logger.info('🔄 Syncing keywords from Supabase...');
+        } else {
+            this.logger.info('🔄 Retry ' + retryAttempt + '/' + MAX_RETRIES + ' — syncing keywords from Supabase...');
+        }
+
+        return this.supabase.loadFilters(false).then(function(success) {
+            if (!success) {
+                throw new Error('Supabase fetch failed (network/server)');
+            }
+
             var filtersArray = self.supabase.getFilters();
             self.logger.info('📥 Loaded ' + filtersArray.length + ' filters');
             self.keywordManager.extractFromSupabaseFilters(filtersArray);
             self.supabase.updateFilterStatus(true);
+
+            // Success — clear retry state
+            self._syncRetryAttempt = 0;
+            self._syncRetryNextAt = 0;
+
             return self.duplicateManager.loadFromDb();
         }).then(function() {
-            // FIX: Re-emit all current DOM cards now that filters are loaded,
-            // so cards skipped before filters loaded get re-evaluated.
             self.scanner.resetEmitted();
             self.logger.info('🔄 Scanner reset — re-evaluating all current cards');
             self._broadcastStatus();
         }).catch(function(err) {
-            self.logger.error('Sync failed', { error: err.message });
+            self.logger.error('❌ Sync failed: ' + err.message);
+
+            // Schedule retry (only if Supabase still enabled)
+            if (retryAttempt < MAX_RETRIES && self._supabaseEnabled) {
+                var delay = DELAYS_MS[retryAttempt] || DELAYS_MS[DELAYS_MS.length - 1];
+                self._syncRetryAttempt = retryAttempt + 1;
+                self._syncRetryNextAt = Date.now() + delay;
+                self.logger.warn('⏳ Retry ' + (retryAttempt + 1) + '/' + MAX_RETRIES + ' in ' + Math.round(delay / 1000) + 's');
+                self._broadcastStatus();
+
+                return new Promise(function(resolve) {
+                    setTimeout(function() {
+                        self._syncSupabaseKeywords(retryAttempt + 1).then(resolve, resolve);
+                    }, delay);
+                });
+            } else {
+                self.logger.error('🛑 Max retries reached. Refresh the page to retry.');
+                self._syncRetryAttempt = -1; // permanent failure state
+                self._syncRetryNextAt = 0;
+                self._broadcastStatus();
+            }
         });
     };
 
@@ -1913,12 +1933,25 @@ SafetyController.prototype.getStatus = function() {
                 qEl.textContent = 'Queue: ' + q.size + (q.processing ? ' (1 active)' : '');
             }
 
-            var warnEl = document.getElementById('bl-warning-text');
+                        var warnEl = document.getElementById('bl-warning-text');
             if (warnEl) {
                 var shouldWarn = self._supabaseEnabled
                     && !self.supabase._filtersLoaded
                     && (Date.now() - self._initTime > 5000);
-                warnEl.style.display = shouldWarn ? 'block' : 'none';
+
+                if (shouldWarn) {
+                    var msg = '⚠️ Filters not loaded — acquiring disabled';
+                    if (self._syncRetryAttempt > 0) {
+                        var secondsLeft = Math.max(0, Math.round((self._syncRetryNextAt - Date.now()) / 1000));
+                        msg = '⚠️ Filters not loaded — retrying in ' + secondsLeft + 's (' + self._syncRetryAttempt + '/' + 5 + ')';
+                    } else if (self._syncRetryAttempt === -1) {
+                        msg = '🛑 Filters failed to load — refresh page to retry';
+                    }
+                    warnEl.textContent = msg;
+                    warnEl.style.display = 'block';
+                } else {
+                    warnEl.style.display = 'none';
+                }
             }
 
             self._broadcastStatus();
@@ -1980,9 +2013,10 @@ SafetyController.prototype.getStatus = function() {
                     continue;
                 }
 
-                // === STEP 1: DUPLICATE ===
-                if (self.duplicateManager.isDuplicate(lead.leadId)) {
+                                                // === STEP 1: DUPLICATE ===
+                if (self.duplicateManager.isDuplicate(lead.uniqueQueryId)) {
                     self.stats.duplicate++;
+                    self.logger.debug('🔁 Duplicate skip: ' + card.id + ' | "' + (lead.productName || '').substring(0, 50) + '"');
                     continue;
                 }
 
@@ -1997,23 +2031,19 @@ SafetyController.prototype.getStatus = function() {
                     : self.keywordManager.checkKeywords(lead.productName, lead.messageText);
                 if (!kw.passed) {
                     self.stats.rejected++;
-                    self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"');
-                    self.duplicateManager.markSeen(lead.leadId);
+                                       self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"');
+                    self.duplicateManager.markSeen(lead.uniqueQueryId);
                     continue;
                 }
 
                 self.stats.validated++;
 
                 // === STEP 3: SCORE ===
-                var score = self.scorer.scoreLead(lead, { matchedProducts: kw.matchedProducts || [] });
-                self.stats.scored++;
-
-                if (!self.scorer.isEligible(score)) {
-                    self.stats.rejected++;
-                    self.logger.debug('❌ Score ' + score.score + ' < ' + self.scorer.minimumScore + ' | ' + card.id);
-                    self.duplicateManager.markSeen(lead.leadId);
-                    continue;
-                }
+                
+                // === STEP 3: SCORE — REMOVED ===
+                // Filter already verified product + location + contact.
+                // Scoring was penalizing foreign leads (-20 country, -10 state)
+                // making them impossible to pass (min 60). Removed
 
                 // === STEP 4: SAFETY ===
                 var safetyCheck = self.safety.canAcquire();
@@ -2025,12 +2055,12 @@ SafetyController.prototype.getStatus = function() {
                     continue;
                 }
 
-                // === STEP 5: ENQUEUE ===
-                self.duplicateManager.markSeen(lead.leadId);
-                var enqueued = self.queue.enqueue(lead);
+                                // === STEP 5: ENQUEUE ===
+                self.duplicateManager.markSeen(lead.uniqueQueryId);
+                                var enqueued = self.queue.enqueue(lead);
                 if (enqueued) {
                     self.stats.queued++;
-                    self.logger.info('✅ Queued ' + card.id + ' (score=' + score.score + ', match=' + (kw.matchedProducts || []).join(',') + ')');
+                    self.logger.info('✅ Queued ' + card.id + ' (match=' + (kw.matchedProducts || []).join(',') + ')');
                 }
                 if (self._supabaseEnabled) self._saveLeadToDb(lead, true);
             } catch (e) {
@@ -2139,8 +2169,11 @@ SafetyController.prototype.getStatus = function() {
     };
 
     Orchestrator.prototype._esc = function(t) { if (!t) return ''; var d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
-    Orchestrator.prototype._broadcastStatus = function() {
-        try { chrome.runtime.sendMessage({ action: 'UPDATE_STATUS', status: this.getStatus() }); } catch (e) {}
+        Orchestrator.prototype._broadcastStatus = function() {
+        try {
+            var p = chrome.runtime.sendMessage({ action: 'UPDATE_STATUS', status: this.getStatus() });
+            if (p && typeof p.catch === 'function') p.catch(function() {});
+        } catch (e) {}
     };
 
     Orchestrator.prototype.updateFullConfig = function(newConfig) {

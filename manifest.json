@@ -1,5 +1,5 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "IndiaMART BuyLead Assistant (Fast)",
   "version": "4.2.0",
   "description": "Fast BuyLead automation with product-name gating, strict-country filter and full Supabase integration.",
@@ -10,7 +10,10 @@
     "unlimitedStorage",
     "tabs",
     "alarms",
-    "notifications",
+    "notifications"
+  ],
+
+  "host_permissions": [
     "https://seller.indiamart.com/*",
     "https://zvhuromubukylsxrsfiz.supabase.co/*"
   ],
@@ -27,11 +30,10 @@
   ],
 
   "background": {
-    "scripts": ["service-worker.js"],
-    "persistent": false
+    "service_worker": "service-worker.js"
   },
 
-  "browser_action": {
+  "action": {
     "default_popup": "popup/index.html",
     "default_title": "BuyLead Assistant",
     "default_icon": {
@@ -50,18 +52,22 @@
   },
 
   "web_accessible_resources": [
-    "plugin.png",
-    "config/index.html",
-    "config/config.js",
-    "config/style.css",
-    "debug/index.html",
-    "debug/debug.js",
-    "migration/index.html",
-    "migration/app.js",
-    "migration/style.css"
+    {
+      "resources": [
+        "plugin.png",
+        "config/index.html",
+        "config/config.js",
+        "config/style.css",
+        "debug/index.html",
+        "debug/debug.js"
+      ],
+      "matches": ["https://seller.indiamart.com/*"]
+    }
   ],
 
-  "content_security_policy": "script-src 'self'; object-src 'self'",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
 
   "incognito": "not_allowed",
 
@@ -69,12 +75,5 @@
     "matches": [
       "https://seller.indiamart.com/*"
     ]
-  },
-
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "indiamart-buylead@assistant",
-      "strict_min_version": "115.0"
-    }
   }
 }

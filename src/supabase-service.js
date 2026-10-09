@@ -35,10 +35,12 @@ class SupabaseService {
             'Prefer': 'return=representation'
         };
         this.logger = null;
-        this._filters = [];
+                this._filters = [];
         this._filtersLoaded = false;
         this._filtersLastFetch = 0;
-        this._filtersTTL = 10000; // 10 seconds (was 30s)
+        this._filtersTTL = 10000; // 10 seconds (in-memory TTL)
+        this._filtersCacheKey = 'cached_filters_v1';
+        this._filtersCacheTTL = 60000; // 60 seconds — how long storage cache stays "fresh"
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
@@ -89,36 +91,106 @@ class SupabaseService {
      * @param {boolean} forceRefresh
      * @returns {Promise<Array>}
      */
-    async loadFilters(forceRefresh) {
+            async loadFilters(forceRefresh) {
+        var self = this;
         var now = Date.now();
+
+        // 1) In-memory cache — fastest
         if (!forceRefresh && this._filtersLoaded && (now - this._filtersLastFetch) < this._filtersTTL) {
-            return this._filters;
+            return true;
         }
 
+        // 2) Storage cache — instant, no network
+        if (!forceRefresh) {
+            var cached = await this._readFiltersCache();
+            if (cached && Array.isArray(cached.filters)) {
+                this._filters = cached.filters;
+                this._filtersLoaded = true;
+                this._filtersLastFetch = cached.timestamp;
+                this._log('info', '📦 Filters loaded from cache', {
+                    count: this._filters.length,
+                    ageSec: Math.round((now - cached.timestamp) / 1000)
+                });
+                if (this._filters.length > 0 && this._filters[0].client_id) {
+                    this._clientId = this._filters[0].client_id;
+                }
+                // Stale? Refresh in background (don't block scanner)
+                if (now - cached.timestamp > this._filtersCacheTTL) {
+                    this._refreshFiltersInBackground();
+                }
+                return true;
+            }
+        }
+
+        // 3) Network fetch (first ever load, or forced refresh, or cache miss)
+        return this._fetchFiltersFromNetwork();
+    }
+
+    async _fetchFiltersFromNetwork() {
         try {
             var url = this.url + '/rest/v1/filters?is_active=eq.true&select=*&order=id.asc';
             var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
-
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
+            if (!response.ok) throw new Error('HTTP ' + response.status);
 
             var data = await response.json();
             this._filters = Array.isArray(data) ? data : [];
             this._filtersLoaded = true;
-            this._filtersLastFetch = now;
-
-            this._log('info', '📥 Filters loaded from Supabase', { count: this._filters.length });
+            this._filtersLastFetch = Date.now();
 
             if (this._filters.length > 0 && this._filters[0].client_id) {
                 this._clientId = this._filters[0].client_id;
             }
 
-            return this._filters;
+            // Write to storage cache
+            await this._writeFiltersCache(this._filters);
+
+            this._log('info', '📥 Filters loaded from Supabase', { count: this._filters.length });
+            return true;
         } catch (err) {
             this._log('error', '❌ Failed to load filters', { error: err.message });
-            return this._filters;
+            return false;
         }
+    }
+
+    _refreshFiltersInBackground() {
+        var self = this;
+        this._log('info', '🔄 Refreshing filters in background...');
+        // Fire and forget — do not await
+        this._fetchFiltersFromNetwork().catch(function() {});
+    }
+
+    _readFiltersCache() {
+        var self = this;
+        return new Promise(function(resolve) {
+            try {
+                chrome.storage.local.get(self._filtersCacheKey, function(result) {
+                    var cached = result && result[self._filtersCacheKey];
+                    if (cached && typeof cached.timestamp === 'number') {
+                        resolve(cached);
+                    } else {
+                        resolve(null);
+                    }
+                });
+            } catch (e) {
+                resolve(null);
+            }
+        });
+    }
+
+    _writeFiltersCache(filters) {
+        var self = this;
+        return new Promise(function(resolve) {
+            try {
+                var payload = {};
+                payload[self._filtersCacheKey] = {
+                    filters: filters,
+                    timestamp: Date.now()
+                };
+                chrome.storage.local.set(payload, function() { resolve(); });
+            } catch (e) {
+                resolve();
+            }
+        });
     }
 
     /** @returns {Array} Currently cached filters */
