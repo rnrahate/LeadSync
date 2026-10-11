@@ -40,7 +40,7 @@ class SupabaseService {
         this._filtersLastFetch = 0;
         this._filtersTTL = 10000; // 10 seconds (in-memory TTL)
         this._filtersCacheKey = 'cached_filters_v1';
-        this._filtersCacheTTL = 60000; // 60 seconds — how long storage cache stays "fresh"
+        this._filtersCacheTTL = 20000; // 20 seconds
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
@@ -100,25 +100,29 @@ class SupabaseService {
             return true;
         }
 
-        // 2) Storage cache — instant, no network
+                // 2) Storage cache — instant, only if FRESH
         if (!forceRefresh) {
             var cached = await this._readFiltersCache();
             if (cached && Array.isArray(cached.filters)) {
-                this._filters = cached.filters;
-                this._filtersLoaded = true;
-                this._filtersLastFetch = cached.timestamp;
-                this._log('info', '📦 Filters loaded from cache', {
-                    count: this._filters.length,
-                    ageSec: Math.round((now - cached.timestamp) / 1000)
+                var cacheAge = now - cached.timestamp;
+                if (cacheAge <= this._filtersCacheTTL) {
+                    // Fresh — use it
+                    this._filters = cached.filters;
+                    this._filtersLoaded = true;
+                    this._filtersLastFetch = cached.timestamp;
+                    this._log('info', '📦 Filters loaded from cache', {
+                        count: this._filters.length,
+                        ageSec: Math.round(cacheAge / 1000)
+                    });
+                    if (this._filters.length > 0 && this._filters[0].client_id) {
+                        this._clientId = this._filters[0].client_id;
+                    }
+                    return true;
+                }
+                // Stale — fall through to network fetch
+                this._log('info', '🔄 Cache stale — fetching fresh filters', {
+                    ageSec: Math.round(cacheAge / 1000)
                 });
-                if (this._filters.length > 0 && this._filters[0].client_id) {
-                    this._clientId = this._filters[0].client_id;
-                }
-                // Stale? Refresh in background (don't block scanner)
-                if (now - cached.timestamp > this._filtersCacheTTL) {
-                    this._refreshFiltersInBackground();
-                }
-                return true;
             }
         }
 

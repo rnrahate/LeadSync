@@ -784,18 +784,23 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 }
                 return out;
             };
-            rules.push({
+                        rules.push({
                 id: f.id,
                 name: f.filter_name || ('filter_' + f.id),
-                exactProducts: uniqNorm(cfg.product_names),
+                keywords:         uniqNorm(cfg.product_names),
+                matchMode:        cfg.match_mode === 'all' ? 'all' : 'any',
+                negativeKeywords: uniqNorm(cfg.negative_keywords),
                 locations: uniqNorm([].concat(
                     Array.isArray(cfg.countries) ? cfg.countries : [],
                     Array.isArray(cfg.states)    ? cfg.states    : [],
                     Array.isArray(cfg.cities)    ? cfg.cities    : []
                 )),
-                requireMobile:   cfg.require_mobile   === true,
+                restrictedCountries: uniqNorm(cfg.restricted_countries),
+                               requireMobile:   cfg.require_mobile   === true,
                 requireWhatsapp: cfg.require_whatsapp === true,
                 requireEmail:    cfg.require_email    === true,
+                quantityUnit:    typeof cfg.quantity_unit === 'string' ? cfg.quantity_unit.toLowerCase() : '',
+                minQuantity:     (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : 0,
                 _indianStates: INDIAN_STATES
             });
         }
@@ -861,7 +866,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         });
     };
 
-    KeywordManager.prototype.evaluateFilters = function(lead) {
+        KeywordManager.prototype.evaluateFilters = function(lead) {
+        var self = this;
         var rules = this._activeFilters || [];
         if (rules.length === 0) {
             return { passed: false, reason: 'no_active_filter', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
@@ -872,27 +878,27 @@ console.log('🔗 https://keynlabs.vercel.app/');
         }
 
         var normProduct = normForMatch(lead.productName || '');
+        var rawProduct  = lead.productName || '';
         var contact = lead.contact || {};
+        var leadCountryIso = (lead.countryIso || '').toUpperCase().trim();
 
-        // Location parts from lead (city/state already normalized by Parser.normalize)
+        // Location parts from lead
         var locParts = [];
         if (lead.city)  locParts.push(normForMatch(lead.city));
         if (lead.state) locParts.push(normForMatch(lead.state));
-        if (lead.countryIso && lead.countryIso.toUpperCase() === 'IN') locParts.push('india');
+        if (leadCountryIso === 'IN') locParts.push('india');
 
         function locationMatches(rule) {
-            if (rule.locations.length === 0) return true; // no location filter = any location ok
+            if (rule.locations.length === 0) return true;
             for (var i = 0; i < rule.locations.length; i++) {
                 var entry = rule.locations[i];
                 if (entry === 'india') {
-                    // Match if countryIso is IN, or if any loc part is an Indian state
-                    if (lead.countryIso && lead.countryIso.toUpperCase() === 'IN') return true;
+                    if (leadCountryIso === 'IN') return true;
                     for (var p = 0; p < locParts.length; p++) {
                         if (rule._indianStates[locParts[p]]) return true;
                     }
                     continue;
                 }
-                // Match exact city or state name
                 for (var q = 0; q < locParts.length; q++) {
                     if (locParts[q] === entry) return true;
                 }
@@ -903,20 +909,72 @@ console.log('🔗 https://keynlabs.vercel.app/');
         for (var i = 0; i < rules.length; i++) {
             var r = rules[i];
 
-            // 1) EXACT PRODUCT MATCH
-            if (r.exactProducts.length > 0 && r.exactProducts.indexOf(normProduct) === -1) {
-                continue;
+            // 1) NEGATIVE KEYWORDS — agar koi bhi match kare productName se, skip
+            if (r.negativeKeywords && r.negativeKeywords.length > 0) {
+                var negHit = false;
+                for (var ni = 0; ni < r.negativeKeywords.length; ni++) {
+                    if (self._textMatches(rawProduct, r.negativeKeywords[ni])) { negHit = true; break; }
+                }
+                if (negHit) continue;
             }
 
-            // 2) LOCATION
+            // 2) KEYWORD MATCH — word-level, productName ke against
+            if (r.keywords.length > 0) {
+                var matched = [];
+                for (var ki = 0; ki < r.keywords.length; ki++) {
+                    if (self._textMatches(rawProduct, r.keywords[ki])) {
+                        matched.push(r.keywords[ki]);
+                    }
+                }
+                if (r.matchMode === 'all') {
+                    if (matched.length !== r.keywords.length) continue;
+                } else {
+                    if (matched.length === 0) continue;
+                }
+            }
+
+            // 3) RESTRICTED COUNTRIES — agar lead ka country restrict list mein hai, skip to remove the country while creating lead
+            if (r.restrictedCountries && r.restrictedCountries.length > 0) {
+                var restricted = false;
+                if (leadCountryIso) {
+                    for (var ri = 0; ri < r.restrictedCountries.length; ri++) {
+                        if (r.restrictedCountries[ri] === leadCountryIso.toLowerCase()) { restricted = true; break; }
+                    }
+                }
+                if (!restricted) {
+                    for (var li = 0; li < r.restrictedCountries.length; li++) {
+                        for (var lp = 0; lp < locParts.length; lp++) {
+                            if (r.restrictedCountries[li] === locParts[lp]) { restricted = true; break; }
+                        }
+                        if (restricted) break;
+                    }
+                }
+                if (restricted) continue;
+            }
+
+            // 4) LOCATION (include list)
             if (!locationMatches(r)) continue;
 
-            // 3) CONTACT REQUIREMENTS
-            if (r.requireMobile   && !contact.mobile) continue;
-            if (r.requireWhatsapp && !contact.phone)  continue;
-            if (r.requireEmail    && !contact.email)  continue;
+                        // 5) CONTACT REQUIREMENTS — OR logic
+            //    Client ne jo bhi select kiya, un mein se at least 1 lead mein hona chahiye.
+            var anyRequired = r.requireMobile || r.requireWhatsapp || r.requireEmail;
+            if (anyRequired) {
+                var has = false;
+                if (r.requireMobile   && contact.mobile) has = true;
+                if (r.requireWhatsapp && contact.phone)  has = true;
+                if (r.requireEmail    && contact.email)  has = true;
+                if (!has) continue;
+            }
 
-            // All conditions passed
+            // 6) QUANTITY FILTER — only if filter has both unit + minimum
+            if (r.quantityUnit && r.minQuantity > 0) {
+                var q = lead.quantity;
+                if (!q) continue;                           // card mein quantity nahi mili → skip
+                if (q.unit !== r.quantityUnit) continue;    // unit mismatch → skip
+                if (q.max < r.minQuantity) continue;        // minimum se kam → skip
+            }
+
+            // Passed
             return {
                 passed: true, reason: null,
                 filterId: r.id, filterName: r.name,
@@ -1203,6 +1261,58 @@ SafetyController.prototype.getStatus = function() {
             .trim() || null;
     }
 
+        function normalizeUnit(u) {
+        if (!u) return null;
+        u = String(u).toLowerCase().trim();
+        if (u === 'box' || u === 'boxes') return 'box';
+        if (u === 'strip' || u === 'strips' || u === 'stripe' || u === 'stripes') return 'strip';
+        if (u === 'tube' || u === 'tubes') return 'tube';
+        if (u === 'piece' || u === 'pieces' || u === 'pc' || u === 'pcs') return 'piece';
+        if (u === 'vial' || u === 'vials') return 'vial';
+        if (u === 'bottle' || u === 'bottles') return 'bottle';
+        if (u === 'pack' || u === 'packs' || u === 'package') return 'pack';
+        return null;
+    }
+
+    function parseQuantityString(str) {
+        if (!str) return null;
+        str = String(str).trim();
+        // Match: "5 Piece", "10 Boxes", "5-10 Box", "50 Vial", "Pack of 6 Box"
+        var m = str.match(/(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*([a-zA-Z]+)/);
+        if (!m) return null;
+        var min = parseInt(m[1], 10);
+        var max = m[2] ? parseInt(m[2], 10) : min;
+        var unit = normalizeUnit(m[3]);
+        if (!unit) return null;
+        return { min: min, max: max, unit: unit };
+    }
+
+    function extractQuantityFromCard(el) {
+        try {
+            var items = el.querySelectorAll('[class*="BuyLdC_isqdet"]');
+            for (var i = 0; i < items.length; i++) {
+                var label = items[i].querySelector('span.SLC_c0');
+                if (!label) continue;
+                var labelText = (label.textContent || '').trim().toLowerCase();
+                if (labelText === 'quantity' || labelText === 'qty') {
+                    var strong = items[i].querySelector('strong');
+                    if (strong) {
+                        var parsed = parseQuantityString(strong.textContent);
+                        if (parsed) return parsed;
+                    }
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function extractQuantityFromTitle(title) {
+        if (!title) return null;
+        var m = title.match(/\bqty\s*[:\-]\s*([^\|]+)/i);
+        if (!m) return null;
+        return parseQuantityString(m[1]);
+    }
+
     function Parser() { this.logger = new Logger('Parser'); }
 
     Parser.prototype.parseCard = function(el, leadId) {
@@ -1216,6 +1326,12 @@ SafetyController.prototype.getStatus = function() {
             if (!productName || productName.length < 2) {
                 this.logger.debug('Card skipped — no product name', { leadId: leadId });
                 return null;
+            }
+
+                          // --- QUANTITY ---
+            var quantity = extractQuantityFromCard(el);
+            if (!quantity) {
+                quantity = extractQuantityFromTitle(productName);
             }
 
                                  // --- LOCATION ---
@@ -1325,10 +1441,12 @@ SafetyController.prototype.getStatus = function() {
                 mcatName: mcatName || null,
                 queryMcatName: mcatName || null,
 
-                location: location,
+                               location: location,
                 city: location ? location.split(',')[0].trim() : null,
                 state: location ? location.split(',').pop().trim() : null,
                 countryIso: countryIso,
+
+                quantity: quantity,
 
                 senderMobile: senderMobile,
                 senderEmail: senderEmail,
@@ -1715,8 +1833,7 @@ SafetyController.prototype.getStatus = function() {
 
             return self.duplicateManager.loadFromDb();
         }).then(function() {
-            self.scanner.resetEmitted();
-            self.logger.info('🔄 Scanner reset — re-evaluating all current cards');
+            
             self._broadcastStatus();
         }).catch(function(err) {
             self.logger.error('❌ Sync failed: ' + err.message);
