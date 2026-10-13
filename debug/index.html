@@ -4,360 +4,218 @@
     <meta charset="UTF-8">
     <title>Debug - BuyLead Assistant</title>
     <style>
-        /* ============================================================
-           RESET & BASE
-           ============================================================ */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Consolas', -apple-system, Arial, sans-serif;
-            background: #0d0d1a;
-            color: #e0e0e0;
-            padding: 16px 20px 20px;
-            min-height: 100vh;
+
+        :root {
+            --bg: #ffffff;
+            --bg-subtle: #fafafa;
+            --bg-hover: #f4f4f5;
+            --border: #e4e4e7;
+            --border-strong: #d4d4d8;
+            --text: #18181b;
+            --text-2: #52525b;
+            --text-3: #a1a1aa;
+            --accent: #0d9488;
+            --accent-bg: #f0fdfa;
+            --success: #059669;
+            --success-bg: #ecfdf5;
+            --warning: #d97706;
+            --warning-bg: #fffbeb;
+            --danger: #dc2626;
+            --danger-bg: #fef2f2;
+            --purple: #7c3aed;
+            --purple-bg: #f5f3ff;
         }
 
-        /* ============================================================
-           HEADER
-           ============================================================ */
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-subtle);
+            color: var(--text);
+            padding: 20px 24px 24px;
+            min-height: 100vh;
+            font-size: 13px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* HEADER */
         .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 14px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #1a1a2e;
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 16px; padding-bottom: 14px;
+            border-bottom: 1px solid var(--border);
         }
         .header-left { display: flex; align-items: center; gap: 12px; }
-        .header-icon-img {
-            width: 36px;
-            height: 36px;
-            object-fit: contain;
-            border-radius: 8px;
-            flex-shrink: 0;
-        }
+        .header-icon-img { width: 32px; height: 32px; object-fit: contain; border-radius: 6px; flex-shrink: 0; }
         .header-text { display: flex; flex-direction: column; }
-        .header h1 { font-size: 20px; color: #02A699; line-height: 1.2; }
-        .header .subtitle { font-size: 11px; color: #666; margin-top: 2px; }
-        .header .status { font-size: 12px; color: #888; }
-        .header .status #liveIndicator { margin-left: 12px; color: #02A699; }
+        .header h1 { font-size: 18px; color: var(--text); font-weight: 600; line-height: 1.2; letter-spacing: -0.02em; }
+        .header .subtitle { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+        .header .status { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 12px; font-variant-numeric: tabular-nums; }
+        .header .status #liveIndicator { color: var(--success); font-weight: 600; }
 
-        /* ============================================================
-           STATS BAR
-           ============================================================ */
+        /* STATS BAR */
         .stats-bar {
-            display: flex;
-            gap: 16px;
-            margin-bottom: 10px;
-            padding: 8px 12px;
-            background: #1a1a2e;
-            border-radius: 6px;
-            font-size: 12px;
-            flex-wrap: wrap;
+            display: flex; gap: 16px; margin-bottom: 10px; padding: 8px 12px;
+            background: var(--bg); border-radius: 6px; font-size: 12px; flex-wrap: wrap;
+            border: 1px solid var(--border);
         }
-        .stats-bar span { color: #888; }
-        .stats-bar strong { color: #02A699; }
+        .stats-bar span { color: var(--text-2); }
+        .stats-bar strong { color: var(--text); font-variant-numeric: tabular-nums; }
 
-        /* ============================================================
-           STICKY FILTER BAR
-           ============================================================ */
+        /* STICKY FILTER BAR */
         .controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-            padding: 10px 0;
-            margin-bottom: 12px;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            background: #0d0d1a;
-            border-bottom: 1px solid #1a1a2e;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+            padding: 10px 0; margin-bottom: 12px;
+            position: sticky; top: 0; z-index: 100;
+            background: var(--bg-subtle);
+            border-bottom: 1px solid var(--border);
         }
         .controls select,
         .controls input {
-            padding: 6px 10px;
-            border-radius: 4px;
-            border: 1px solid #333;
-            background: #1a1a2e;
-            color: #e0e0e0;
-            font-size: 12px;
-            font-family: inherit;
+            padding: 6px 10px; border-radius: 5px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 12px; font-family: inherit;
+            transition: border-color 0.12s ease;
         }
         .controls select:focus,
         .controls input:focus {
-            outline: none;
-            border-color: #02A699;
-            box-shadow: 0 0 0 2px rgba(2, 166, 153, 0.15);
+            outline: none; border-color: var(--text-2);
         }
         .controls button {
-            padding: 6px 14px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 12px;
-            font-family: inherit;
-            transition: all 0.15s ease;
+            padding: 6px 12px; border: 1px solid transparent; border-radius: 5px;
+            cursor: pointer; font-weight: 600; font-size: 12px;
+            font-family: inherit; transition: all 0.12s ease;
+            display: inline-flex; align-items: center; gap: 5px;
         }
-        .controls button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        /* ============================================================
-           BUTTON VARIANTS
-           ============================================================ */
-        .btn-primary   { background: #02A699; color: white; }
-        .btn-primary:hover:not(:disabled)   { background: #018f88; }
-        .btn-danger    { background: #ef7076; color: white; }
-        .btn-danger:hover:not(:disabled)    { background: #e05a5f; }
-        .btn-secondary { background: #444; color: white; }
-        .btn-secondary:hover:not(:disabled) { background: #555; }
+        .btn-primary   { background: var(--text); color: #fff; }
+        .btn-primary:hover:not(:disabled)   { background: #000; }
+        .btn-danger    { background: var(--danger-bg); color: var(--danger); border-color: #fecaca; }
+        .btn-danger:hover:not(:disabled)    { background: #fee2e2; }
+        .btn-secondary { background: var(--bg); color: var(--text-2); border-color: var(--border); }
+        .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 
-        /* ============================================================
-           LOG CONTAINER
-           ============================================================ */
+        /* LOG CONTAINER */
         .log-container {
-            background: #0d0d1a;
-            border-radius: 8px;
-            max-height: 74vh;
-            overflow-y: auto;
-            border: 1px solid #1a1a2e;
+            background: var(--bg); border-radius: 6px;
+            max-height: 74vh; overflow-y: auto;
+            border: 1px solid var(--border);
         }
-        .log-container::-webkit-scrollbar { width: 10px; }
-        .log-container::-webkit-scrollbar-track { background: #0d0d1a; }
-        .log-container::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 5px; }
-        .log-container::-webkit-scrollbar-thumb:hover { background: #3a3a4e; }
+        .log-container::-webkit-scrollbar { width: 8px; }
+        .log-container::-webkit-scrollbar-track { background: var(--bg-subtle); }
+        .log-container::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+        .log-container::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 
-        /* ============================================================
-           LOG ROW
-           ============================================================ */
+        /* LOG ROW */
         .log-entry {
-            padding: 6px 12px;
-            border-bottom: 1px solid #1a1a2e;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-family: 'Consolas', monospace;
+            padding: 6px 12px; border-bottom: 1px solid var(--border);
+            font-size: 12px; display: flex; align-items: center; gap: 10px;
+            font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
             flex-wrap: wrap;
         }
-        .log-entry:hover { background: #14141f; }
+        .log-entry:hover { background: var(--bg-subtle); }
         .log-entry:last-child { border-bottom: none; }
 
-        /* Level badge */
         .log-level {
-            font-weight: 700;
-            min-width: 55px;
-            text-align: center;
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 10px;
-            flex-shrink: 0;
+            font-weight: 700; min-width: 55px; text-align: center;
+            padding: 1px 6px; border-radius: 3px; font-size: 10px; flex-shrink: 0;
+            border: 1px solid transparent;
         }
-        .level-TRACE { color: #666;    background: #1a1a1a; }
-        .level-DEBUG { color: #8888cc; background: #1a1a2e; }
-        .level-INFO  { color: #02A699; background: #0a2e2c; }
-        .level-WARN  { color: #f5a623; background: #2e2410; }
-        .level-ERROR { color: #ef7076; background: #2e1012; }
-        .level-FATAL {
-            color: #ff0000;
-            background: #2e0000;
-            animation: pulseFatal 1.5s ease-in-out infinite;
-        }
-        @keyframes pulseFatal {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.65; }
-        }
+        .level-TRACE { color: var(--text-3);  background: var(--bg-hover); border-color: var(--border); }
+        .level-DEBUG { color: #6366f1;       background: #eef2ff;         border-color: #c7d2fe; }
+        .level-INFO  { color: var(--accent);  background: var(--accent-bg); border-color: #99f6e4; }
+        .level-WARN  { color: var(--warning); background: var(--warning-bg); border-color: #fde68a; }
+        .level-ERROR { color: var(--danger);  background: var(--danger-bg); border-color: #fecaca; }
+        .level-FATAL { color: #fff; background: var(--danger); border-color: var(--danger); }
 
-        /* Time + module columns */
-        .log-time {
-            color: #666;
-            font-size: 11px;
-            min-width: 130px;
-            flex-shrink: 0;
-            font-variant-numeric: tabular-nums;
-        }
-        .log-module {
-            color: #888;
-            min-width: 85px;
-            flex-shrink: 0;
-            font-size: 11px;
-        }
-        .log-message {
-            flex: 1;
-            color: #e0e0e0;
-            word-break: break-word;
-            min-width: 200px;
-        }
+        .log-time { color: var(--text-3); font-size: 11px; min-width: 130px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+        .log-module { color: var(--text-2); min-width: 85px; flex-shrink: 0; font-size: 11px; font-weight: 500; }
+        .log-message { flex: 1; color: var(--text); word-break: break-word; min-width: 200px; }
 
-        /* Inline extras: product name + reason chips */
         .log-extra {
-            display: inline-block;
-            color: #7c8fbe;
-            background: #1a1a2e;
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 10px;
-            margin-left: 6px;
-            max-width: 220px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            vertical-align: middle;
+            display: inline-block; color: var(--text-2);
+            background: var(--bg-hover); padding: 1px 6px;
+            border-radius: 3px; font-size: 10px; margin-left: 6px;
+            max-width: 220px; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
         }
         .log-reason {
-            display: inline-block;
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 10px;
-            margin-left: 6px;
-            background: #1a1a2e;
-            font-weight: 600;
-            vertical-align: middle;
+            display: inline-block; padding: 1px 6px; border-radius: 3px;
+            font-size: 10px; margin-left: 6px; background: var(--bg-hover);
+            font-weight: 600; vertical-align: middle;
         }
 
-        /* Preview data + buttons cluster */
         .log-data {
-            color: #666;
-            font-size: 10px;
-            max-width: 260px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            flex-shrink: 0;
+            color: var(--text-3); font-size: 10px; max-width: 260px;
+            overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; flex-shrink: 0;
+            font-family: ui-monospace, monospace;
         }
-        .log-buttons {
-            display: inline-flex;
-            align-items: center;
-            gap: 2px;
-            flex-shrink: 0;
-        }
+        .log-buttons { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
         .expand-btn {
-            background: none;
-            border: none;
-            color: #02A699;
-            cursor: pointer;
-            font-size: 10px;
-            padding: 3px 6px;
-            border-radius: 3px;
+            background: none; border: none; color: var(--text-3);
+            cursor: pointer; font-size: 10px; padding: 3px 6px;
+            border-radius: 3px; transition: color 0.12s ease;
         }
-        .expand-btn:hover {
-            background: #1a1a2e;
-            color: #fff;
-        }
+        .expand-btn:hover { background: var(--bg-hover); color: var(--text); }
         .copy-btn {
-            background: none;
-            border: none;
-            color: #666;
-            cursor: pointer;
-            font-size: 11px;
-            padding: 3px 6px;
-            border-radius: 3px;
-            transition: all 0.15s ease;
+            background: none; border: none; color: var(--text-3);
+            cursor: pointer; font-size: 11px; padding: 3px 6px;
+            border-radius: 3px; transition: all 0.12s ease;
         }
-        .copy-btn:hover {
-            color: #02A699;
-            background: #1a1a2e;
-        }
+        .copy-btn:hover { color: var(--accent); background: var(--bg-hover); }
 
-        /* Expanded data */
         .log-data-full {
-            display: none;
-            width: 100%;
-            padding: 10px;
-            margin-top: 4px;
-            background: #1a1a2e;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #aaa;
-            white-space: pre-wrap;
-            word-break: break-all;
-            font-family: 'Consolas', monospace;
-            border-left: 3px solid #02A699;
+            display: none; width: 100%; padding: 10px; margin-top: 4px;
+            background: var(--bg-subtle); border-radius: 4px;
+            font-size: 11px; color: var(--text-2);
+            white-space: pre-wrap; word-break: break-all;
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            border-left: 3px solid var(--accent);
         }
         .log-data-full.show { display: block; }
 
-        /* ============================================================
-           EMPTY STATE
-           ============================================================ */
+        /* EMPTY */
         .empty {
-            text-align: center;
-            color: #666;
-            padding: 60px 20px;
-            font-size: 14px;
-            line-height: 1.6;
+            text-align: center; color: var(--text-3);
+            padding: 60px 20px; font-size: 13px; line-height: 1.6;
         }
-        .empty-icon {
-            font-size: 40px;
-            display: block;
-            margin-bottom: 12px;
-            opacity: 0.7;
-        }
+        .empty-icon { font-size: 32px; display: block; margin-bottom: 12px; opacity: 0.5; }
 
-        /* ============================================================
-           FOOTER + CREDIT
-           ============================================================ */
+        /* FOOTER */
         .footer {
-            margin-top: 16px;
-            display: flex;
-            justify-content: space-between;
-            font-size: 11px;
-            color: #666;
-            flex-wrap: wrap;
-            gap: 8px;
+            margin-top: 16px; display: flex; justify-content: space-between;
+            font-size: 11px; color: var(--text-3); flex-wrap: wrap; gap: 8px;
         }
-        .footer a {
-            color: #02A699;
-            text-decoration: none;
-            cursor: pointer;
-        }
-        .footer a:hover { text-decoration: underline; }
+        .footer a { color: var(--text-2); text-decoration: none; cursor: pointer; font-weight: 500; }
+        .footer a:hover { color: var(--text); }
 
         .credit {
-            text-align: center;
-            margin-top: 14px;
-            padding-top: 12px;
-            border-top: 1px solid #1a1a2e;
-            font-size: 10px;
-            color: #444;
+            text-align: center; margin-top: 14px; padding-top: 12px;
+            border-top: 1px solid var(--border); font-size: 10px; color: var(--text-3);
         }
-        .credit a { color: #02A699; text-decoration: none; }
+        .credit a { color: var(--accent); text-decoration: none; }
         .credit a:hover { text-decoration: underline; }
 
-        /* ============================================================
-           TOAST
-           ============================================================ */
+        /* TOAST */
         .toast {
-            position: fixed;
-            bottom: 24px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #1a1a2e;
-            color: white;
-            padding: 10px 20px;
-            border-radius: 6px;
-            font-size: 12px;
-            z-index: 9999;
-            max-width: 90%;
-            text-align: center;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-            border: 1px solid #2a2a3e;
+            position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+            background: var(--text); color: #fff; padding: 10px 20px;
+            border-radius: 5px; font-size: 12px; z-index: 9999;
+            max-width: 90%; text-align: center; font-weight: 500;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
         }
         @keyframes fadeInUp {
-            from { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            from { opacity: 0; transform: translateX(-50%) translateY(12px); }
             to   { opacity: 1; transform: translateX(-50%) translateY(0); }
         }
         @keyframes fadeOutDown {
             from { opacity: 1; transform: translateX(-50%) translateY(0); }
-            to   { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            to   { opacity: 0; transform: translateX(-50%) translateY(12px); }
         }
 
-        /* ============================================================
-           RESPONSIVE
-           ============================================================ */
         @media (max-width: 700px) {
-            body { padding: 12px; }
-            .controls select,
-            .controls input { font-size: 11px; padding: 5px 8px; }
+            body { padding: 14px; }
+            .controls select, .controls input { font-size: 11px; padding: 5px 8px; }
             .controls button { padding: 5px 10px; font-size: 11px; }
             .log-time { min-width: 100px; font-size: 10px; }
             .log-module { min-width: 70px; }
@@ -366,26 +224,20 @@
     </style>
 </head>
 <body>
-    <!-- ============================================================
-         HEADER
-         ============================================================ -->
     <div class="header">
         <div class="header-left">
             <img src="../plugin.png" alt="BuyLead Assistant" class="header-icon-img" />
             <div class="header-text">
-                <h1>🐞 Debug Logs</h1>
-                <span class="subtitle">BuyLead Assistant v6.2.0</span>
+                <h1>Debug Logs</h1>
+                <span class="subtitle">Lead Sync Assistant v6.2.0</span>
             </div>
         </div>
         <div class="status">
             <span id="logCount">0 entries</span>
-            <span id="liveIndicator">● LIVE</span>
+            <span id="liveIndicator">Live</span>
         </div>
     </div>
 
-    <!-- ============================================================
-         STATS BAR
-         ============================================================ -->
     <div class="stats-bar">
         <span>Total: <strong id="statTotal">0</strong></span>
         <span>INFO: <strong id="statInfo">0</strong></span>
@@ -394,9 +246,6 @@
         <span>DEBUG: <strong id="statDebug">0</strong></span>
     </div>
 
-    <!-- ============================================================
-         STICKY FILTER BAR (dropdowns + search + actions)
-         ============================================================ -->
     <div class="controls">
         <select id="levelFilter">
             <option value="ALL">All Levels</option>
@@ -424,37 +273,28 @@
 
         <button class="btn-primary"   id="applyFilter">Apply</button>
         <button class="btn-secondary" id="clearFilter">Clear</button>
-        <button class="btn-secondary" id="refreshBtn">🔄 Refresh</button>
-        <button class="btn-secondary" id="autoRefreshBtn">⏸ Pause Auto</button>
-        <button class="btn-primary"   id="exportBtn">📥 Export</button>
-        <button class="btn-danger"    id="clearBtn">🗑 Clear</button>
+        <button class="btn-secondary" id="refreshBtn">Refresh</button>
+        <button class="btn-secondary" id="autoRefreshBtn">Pause Auto</button>
+        <button class="btn-primary"   id="exportBtn">Export</button>
+        <button class="btn-danger"    id="clearBtn">Clear All</button>
     </div>
 
-    <!-- ============================================================
-         LOG CONTAINER
-         ============================================================ -->
     <div class="log-container" id="logContainer">
         <div class="empty">
-            <span class="empty-icon">📭</span>
+            <span class="empty-icon">...</span>
             Loading logs...
         </div>
     </div>
 
-    <!-- ============================================================
-         FOOTER
-         ============================================================ -->
     <div class="footer">
-        <span>Logs stored locally • Max 500 entries • Auto-refresh 1.2s</span>
-        <a id="backLink">← Back to Dashboard</a>
+        <span>Logs stored locally · Max 500 entries · Auto-refresh 1.2s</span>
+        <a id="backLink">Back to Dashboard</a>
     </div>
 
     <div class="credit">
         Developed by <a href="https://keynlabs.vercel.app/" target="_blank">Keyn Labs</a> — Debug v6.2.0
     </div>
 
-    <!-- ============================================================
-         SCRIPT (event delegation handles all clicks — no inline JS)
-         ============================================================ -->
     <script src="debug.js"></script>
 </body>
 </html>

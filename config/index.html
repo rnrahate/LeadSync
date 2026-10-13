@@ -12,7 +12,7 @@
                 <img src="../plugin.png" alt="BuyLead Assistant" class="header-icon-img" />
                 <div class="header-text">
                     <h1>Configuration</h1>
-                    <span class="subtitle">BuyLead Assistant</span>
+                    <span class="subtitle">lead Sync Assistant</span>
                 </div>
             </div>
             <span class="version">v7.0.0</span>
@@ -21,7 +21,9 @@
         <!-- Connection Toggle -->
         <div class="connection-toggle" id="connectionToggle">
             <div class="connection-left">
-                <div class="connection-icon" id="configConnIcon">☁️</div>
+                <div class="connection-icon" id="configConnIcon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                </div>
                 <div class="connection-info">
                     <div class="connection-label" id="configConnLabel">Supabase Mode: ON</div>
                     <div class="connection-desc" id="configConnDesc">Using CRM filters from Supabase</div>
@@ -35,33 +37,43 @@
 
         <!-- Tabs -->
         <div class="tab-bar">
-            <span class="tab active" data-tab="general">🎛️ General</span>
-            <span class="tab" data-tab="filters">🗄️ Filters</span>
-            <span class="tab" data-tab="keywords">🔑 Keywords</span>
-            <span class="tab" data-tab="scoring">🎯 Scoring</span>
-            <span class="tab" data-tab="limits">📊 Limits</span>
-            <span class="tab" data-tab="navigator">🔄 Navigator</span>
-            <span class="tab" data-tab="popup">💬 Popup</span>
-            <span class="tab danger" data-tab="data">🗑️ Data</span>
+            <span class="tab active" data-tab="general">General</span>
+            <span class="tab" data-tab="filters">Filters</span>
+            <span class="tab" data-tab="keywords">Keywords</span>
+            <span class="tab" data-tab="scoring">Scoring</span>
+            <span class="tab" data-tab="limits">Limits</span>
+            <span class="tab" data-tab="navigator">Navigator</span>
+            <span class="tab" data-tab="popup">Popup</span>
+            <span class="tab danger" data-tab="data">Data</span>
         </div>
 
-        <!-- ============================================================
-             GENERAL
-             ============================================================ -->
+        <!-- GENERAL -->
         <div class="tab-content active" id="tab-general">
             <div class="section">
-                <div class="section-title">🎯 Operating Mode</div>
+                <div class="section-title">Operating Mode</div>
                 <div class="section-desc">Choose how the extension handles detected leads</div>
                 <div class="mode-grid">
-                    <button class="mode-btn monitor"   data-mode="MONITOR">⏹️ Monitor</button>
-                    <button class="mode-btn dryrun"    data-mode="DRY_RUN">🔬 Dry Run</button>
-                    <button class="mode-btn assisted"  data-mode="ASSISTED">👤 Assisted</button>
-                    <button class="mode-btn automatic" data-mode="AUTOMATIC">▶️ Automatic</button>
+                    <button class="mode-btn monitor"   data-mode="MONITOR">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+                        Monitor
+                    </button>
+                    <button class="mode-btn dryrun"    data-mode="DRY_RUN">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3h15"/><path d="M6 3v16a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V3"/><path d="M6 14h12"/></svg>
+                        Dry Run
+                    </button>
+                    <button class="mode-btn assisted"  data-mode="ASSISTED">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        Assisted
+                    </button>
+                    <button class="mode-btn automatic" data-mode="AUTOMATIC">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                        Automatic
+                    </button>
                 </div>
                 <div class="info-box" id="modeInfo"><strong>Monitor:</strong> Only detects and displays leads.</div>
             </div>
             <div class="section">
-                <div class="section-title">📈 Minimum Score</div>
+                <div class="section-title">Minimum Score</div>
                 <div class="field">
                     <div class="field-label">Minimum Score <span class="desc">Leads below this will be rejected (0-100)</span></div>
                     <div class="field-control"><input type="number" id="minScore" min="0" max="100" value="60"></div>
@@ -69,13 +81,11 @@
             </div>
         </div>
 
-        <!-- ============================================================
-             FILTERS (Full CRUD + Legacy migration banner)
-             ============================================================ -->
+        <!-- FILTERS -->
         <div class="tab-content" id="tab-filters">
             <div class="section">
                 <div class="section-title">
-                    🗄️ Filter Management
+                    Filter Management
                     <span class="keyword-count" id="filtersCount">0</span>
                 </div>
                 <div class="section-desc">
@@ -83,57 +93,67 @@
                     negative keywords, required keywords, and location rules.
                 </div>
 
-                <!-- Legacy migration hint (auto-toggled by config.js) -->
                 <div class="info-box" id="legacyBanner" style="display:none;">
-                    <strong>⚠️ Legacy filters detected.</strong>
+                    <strong>Legacy filters detected.</strong>
                     Some filters still use the old <code>filter_config</code> column.
                     Click <strong>Bulk Sync Keywords</strong> below to migrate them to the new
                     <code>product_keywords</code> / <code>negative_keywords</code> / etc. columns.
                 </div>
 
                 <div class="actions" style="margin-top:0;padding-top:0;border-top:none;">
-                    <button class="btn-primary" id="refreshFiltersBtn">🔄 Refresh</button>
-                    <button class="btn-primary" id="addFilterBtn">➕ Add New Filter</button>
-                    <button class="btn-warning" id="bulkSyncBtn">🔄 Bulk Sync Keywords</button>
+                    <button class="btn-primary" id="refreshFiltersBtn">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                        Refresh
+                    </button>
+                    <button class="btn-primary" id="addFilterBtn">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg>
+                        Add New Filter
+                    </button>
+                    <button class="btn-warning" id="bulkSyncBtn">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                        Bulk Sync Keywords
+                    </button>
                 </div>
                 <div id="filtersList" style="margin-top:16px;">
-                    <div class="empty-state">⏳ Loading filters...</div>
+                    <div class="empty-state">Loading filters...</div>
                 </div>
             </div>
         </div>
 
-        <!-- ============================================================
-             KEYWORDS (Local fallback)
-             ============================================================ -->
+        <!-- KEYWORDS -->
         <div class="tab-content" id="tab-keywords">
             <div class="section">
-                <div class="section-title">📋 Local Product Keywords <span class="keyword-count" id="productCount">0</span></div>
+                <div class="section-title">Local Product Keywords <span class="keyword-count" id="productCount">0</span></div>
                 <div class="section-desc">One per line. Used when Supabase is OFF, or as fallback when Supabase has no keywords.</div>
                 <div class="field"><div class="field-control" style="flex:1;text-align:left;min-width:auto;"><textarea id="productKeywords" rows="6"></textarea></div></div>
             </div>
             <div class="section">
-                <div class="section-title">🚫 Local Negative Keywords <span class="keyword-count" id="negativeCount">0</span></div>
+                <div class="section-title">Local Negative Keywords <span class="keyword-count" id="negativeCount">0</span></div>
                 <div class="field"><div class="field-control" style="flex:1;text-align:left;min-width:auto;"><textarea id="negativeKeywords" rows="5"></textarea></div></div>
             </div>
             <div class="section">
-                <div class="section-title">✅ Local Required Keywords <span class="keyword-count" id="requiredCount">0</span></div>
+                <div class="section-title">Local Required Keywords <span class="keyword-count" id="requiredCount">0</span></div>
                 <div class="field"><div class="field-control" style="flex:1;text-align:left;min-width:auto;"><textarea id="requiredKeywords" rows="4"></textarea></div></div>
             </div>
             <div class="actions">
-                <button class="btn-primary" id="saveKeywordsBtn">💾 Save Local Keywords</button>
-                <button class="btn-secondary" id="resetKeywordsBtn">↺ Clear</button>
+                <button class="btn-primary" id="saveKeywordsBtn">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                    Save Local Keywords
+                </button>
+                <button class="btn-secondary" id="resetKeywordsBtn">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                    Clear
+                </button>
             </div>
         </div>
 
-        <!-- ============================================================
-             SCORING (unchanged, defaults read from config.js)
-             ============================================================ -->
+        <!-- SCORING -->
         <div class="tab-content" id="tab-scoring">
-            <div class="section" style="border-color:#02A699;background:linear-gradient(135deg,#0f1f1e 0%,#0d1a1a 100%);">
-                <div class="section-title">🎯 STRICT COUNTRY FILTER <span class="keyword-count" style="background:#02A699;color:#fff;">PRIMARY GATE</span></div>
+            <div class="section">
+                <div class="section-title">Strict Country Filter <span class="keyword-count">PRIMARY GATE</span></div>
                 <div class="section-desc">When enabled, leads are filtered by country BEFORE keyword matching.</div>
                 <div class="field">
-                    <div class="field-label"><strong style="color:#02A699;">Enable Strict Country Mode</strong><span class="desc">Only acquire leads from allowed countries</span></div>
+                    <div class="field-label"><strong>Enable Strict Country Mode</strong><span class="desc">Only acquire leads from allowed countries</span></div>
                     <div class="field-control"><label class="switch"><input type="checkbox" id="strictCountryMode"><span class="slider"></span></label></div>
                 </div>
                 <div class="field">
@@ -144,36 +164,36 @@
                     <div class="field-label">Reject Unknown Country <span class="desc">Also reject leads with no country</span></div>
                     <div class="field-control"><label class="switch"><input type="checkbox" id="strictCountryRejectUnknown" checked><span class="slider"></span></label></div>
                 </div>
-                <div class="info-box" id="strictCountryPreview">🌍 Strict mode OFF — all countries accepted</div>
+                <div class="info-box" id="strictCountryPreview">Strict mode OFF — all countries accepted</div>
             </div>
 
             <div class="section">
-                <div class="section-title">🎯 Base Scoring</div>
+                <div class="section-title">Base Scoring</div>
                 <div class="field"><div class="field-label">Base Score</div><div class="field-control"><input type="number" id="wBase" min="0" max="100" value="50"></div></div>
             </div>
 
             <div class="section">
-                <div class="section-title">📦 Product Keyword Weight</div>
+                <div class="section-title">Product Keyword Weight</div>
                 <div class="field"><div class="field-label">Points per Keyword</div><div class="field-control"><input type="number" id="wPerProductKeyword" min="0" max="50" value="10"></div></div>
                 <div class="field"><div class="field-label">Max Product Bonus</div><div class="field-control"><input type="number" id="wMaxProductBonus" min="0" max="100" value="30"></div></div>
             </div>
 
             <div class="section">
-                <div class="section-title">🌍 Country Weightage</div>
+                <div class="section-title">Country Weightage</div>
                 <div class="field"><div class="field-label">Preferred Countries</div><div class="field-control" style="flex:1;text-align:left;"><input type="text" id="preferredCountries" style="width:100%;" placeholder="IN"></div></div>
                 <div class="field"><div class="field-label">Country Match Bonus</div><div class="field-control"><input type="number" id="wCountryMatch" min="0" max="50" value="15"></div></div>
                 <div class="field"><div class="field-label">Wrong Country Penalty</div><div class="field-control"><input type="number" id="pWrongCountry" min="-50" max="0" value="-20"></div></div>
             </div>
 
             <div class="section">
-                <div class="section-title">📍 State Weightage</div>
+                <div class="section-title">State Weightage</div>
                 <div class="field"><div class="field-label">Preferred States</div><div class="field-control" style="flex:1;text-align:left;"><input type="text" id="preferredStates" style="width:100%;" placeholder="maharashtra"></div></div>
                 <div class="field"><div class="field-label">State Match Bonus</div><div class="field-control"><input type="number" id="wPreferredState" min="0" max="50" value="15"></div></div>
                 <div class="field"><div class="field-label">Wrong State Penalty</div><div class="field-control"><input type="number" id="pWrongState" min="-50" max="0" value="-10"></div></div>
             </div>
 
             <div class="section">
-                <div class="section-title">📞 Contact Weightage</div>
+                <div class="section-title">Contact Weightage</div>
                 <div class="field"><div class="field-label">Mobile Available Bonus</div><div class="field-control"><input type="number" id="wHasMobile" min="0" max="30" value="10"></div></div>
                 <div class="field"><div class="field-label">Email Available Bonus</div><div class="field-control"><input type="number" id="wHasEmail" min="0" max="30" value="8"></div></div>
                 <div class="field"><div class="field-label">Phone Bonus</div><div class="field-control"><input type="number" id="wHasPhone" min="0" max="30" value="5"></div></div>
@@ -181,23 +201,27 @@
             </div>
 
             <div class="section">
-                <div class="section-title">📝 Requirement Detail</div>
+                <div class="section-title">Requirement Detail</div>
                 <div class="field"><div class="field-label">Detail Bonus</div><div class="field-control"><input type="number" id="wDetailedRequirement" min="0" max="30" value="5"></div></div>
                 <div class="field"><div class="field-label">Min Length</div><div class="field-control"><input type="number" id="wRequirementLengthThreshold" min="20" max="500" value="100"></div></div>
             </div>
 
             <div class="actions">
-                <button class="btn-primary" id="saveScoringBtn">💾 Save Scoring</button>
-                <button class="btn-secondary" id="resetScoringBtn">↺ Reset</button>
+                <button class="btn-primary" id="saveScoringBtn">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                    Save Scoring
+                </button>
+                <button class="btn-secondary" id="resetScoringBtn">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                    Reset
+                </button>
             </div>
         </div>
 
-        <!-- ============================================================
-             LIMITS (defaults reflect v6.2 speed tuning)
-             ============================================================ -->
+        <!-- LIMITS -->
         <div class="tab-content" id="tab-limits">
             <div class="section">
-                <div class="section-title">⏱️ Rate Limits</div>
+                <div class="section-title">Rate Limits</div>
                 <div class="section-desc">
                     Higher limits = faster queue. Cooldown is the gap between two acquisitions.
                 </div>
@@ -209,12 +233,10 @@
             </div>
         </div>
 
-        <!-- ============================================================
-             NAVIGATOR (defaults reflect v6.2 speed tuning)
-             ============================================================ -->
+        <!-- NAVIGATOR -->
         <div class="tab-content" id="tab-navigator">
             <div class="section">
-                <div class="section-title">🔄 Auto-Scroll & Load</div>
+                <div class="section-title">Auto-Scroll & Load</div>
                 <div class="section-desc">
                     These settings control how fast the page is scrolled to the bottom
                     and how quickly new leads are pulled in. Defaults are tuned for speed.
@@ -228,23 +250,20 @@
                 <div class="field"><div class="field-label">Max Stuck Loops</div><div class="field-control"><input type="number" id="maxStuckLoops" min="1" max="20" value="3"></div></div>
             </div>
             <div class="section">
-                <div class="section-title">♻️ Auto-Reload</div>
+                <div class="section-title">Auto-Reload</div>
                 <div class="field"><div class="field-label">Auto-Reload on Complete</div><div class="field-control"><input type="checkbox" id="autoReloadOnComplete" checked style="width:18px;height:18px;"></div></div>
                 <div class="field"><div class="field-label">Reload Delay (ms)</div><div class="field-control"><input type="number" id="autoReloadDelayMs" min="500" max="30000" step="100" value="1500"></div></div>
                 <div class="field"><div class="field-label">Max Reloads/Session</div><div class="field-control"><input type="number" id="maxReloadsPerSession" min="1" max="999999999" value="999999"></div></div>
             </div>
             <div class="actions">
-                <!-- Speed-only reset — see note in config.js. Not wired by default; safe to remove if unwanted. -->
-                <button class="btn-secondary" id="speedResetBtn" title="Reset only scroll/loop/cooldown to fast defaults">⚡ Reset to Speed Defaults</button>
+                <button class="btn-secondary" id="speedResetBtn" title="Reset only scroll/loop/cooldown to fast defaults">Reset to Speed Defaults</button>
             </div>
         </div>
 
-        <!-- ============================================================
-             POPUP (defaults reflect v6.2 speed tuning)
-             ============================================================ -->
+        <!-- POPUP -->
         <div class="tab-content" id="tab-popup">
             <div class="section">
-                <div class="section-title">💬 Popup Handling</div>
+                <div class="section-title">Popup Handling</div>
                 <div class="field"><div class="field-label">Auto-Handle Popups</div><div class="field-control"><input type="checkbox" id="autoMinimize" checked style="width:18px;height:18px;"></div></div>
                 <div class="field"><div class="field-label">Popup Timeout (ms) <span class="desc">How long to wait before assuming no popup</span></div><div class="field-control"><input type="number" id="popupTimeoutMs" min="1000" max="60000" step="500" value="5000"></div></div>
                 <div class="field"><div class="field-label">Confirmation Answer</div><div class="field-control"><select id="confirmationAnswer"><option value="yes">YES</option><option value="no">NO</option></select></div></div>
@@ -252,54 +271,53 @@
             </div>
         </div>
 
-        <!-- ============================================================
-             DATA
-             ============================================================ -->
+        <!-- DATA -->
         <div class="tab-content" id="tab-data">
             <div class="section">
-                <div class="section-title">📊 Supabase Table Counts</div>
+                <div class="section-title">Supabase Table Counts</div>
                 <div class="weight-grid">
                     <div class="stat-box"><div class="num" id="countLeads">-</div><div class="lbl">Leads</div></div>
                     <div class="stat-box"><div class="num" id="countHistory">-</div><div class="lbl">History</div></div>
                     <div class="stat-box"><div class="num" id="countFilters">-</div><div class="lbl">Filters</div></div>
                 </div>
                 <div style="margin-top:16px;">
-                    <button class="btn-primary" id="refreshCountsBtn">🔄 Refresh Counts</button>
+                    <button class="btn-primary" id="refreshCountsBtn">Refresh Counts</button>
                 </div>
             </div>
 
             <div class="section">
-                <div class="section-title">🧹 Local Data</div>
+                <div class="section-title">Local Data</div>
                 <div class="danger-zone-buttons">
-                    <button class="btn-warning" data-action="clearDupCache">🗑️ Clear Duplicate Cache</button>
-                    <button class="btn-danger"  data-action="clearAllLocal">⚠️ Clear ALL Local Data</button>
+                    <button class="btn-warning" data-action="clearDupCache">Clear Duplicate Cache</button>
+                    <button class="btn-danger"  data-action="clearAllLocal">Clear ALL Local Data</button>
                 </div>
             </div>
 
             <div class="section danger">
-                <div class="section-title">☢️ Supabase Data — DANGER ZONE</div>
+                <div class="section-title">Supabase Data — DANGER ZONE</div>
                 <div class="danger-zone-buttons">
-                    <button class="btn-warning" data-action="resetStats">🔄 Reset Filter Stats</button>
-                    <button class="btn-danger"  data-action="clearHistory">🗑️ Delete ALL Lead History</button>
-                    <button class="btn-danger"  data-action="clearLeads">🗑️ Delete ALL Leads</button>
-                    <button class="btn-danger"  data-action="clearBefore">📅 Delete Leads Before Date</button>
-                    <button class="btn-danger"  data-action="clearFilters">🗑️ Delete ALL Filters</button>
+                    <button class="btn-warning" data-action="resetStats">Reset Filter Stats</button>
+                    <button class="btn-danger"  data-action="clearHistory">Delete ALL Lead History</button>
+                    <button class="btn-danger"  data-action="clearLeads">Delete ALL Leads</button>
+                    <button class="btn-danger"  data-action="clearBefore">Delete Leads Before Date</button>
+                    <button class="btn-danger"  data-action="clearFilters">Delete ALL Filters</button>
                 </div>
             </div>
         </div>
 
-        <!-- ============================================================
-             GLOBAL ACTIONS
-             ============================================================ -->
+        <!-- GLOBAL ACTIONS -->
         <div class="actions">
-            <button class="btn-primary"   id="saveAllBtn">💾 Save All Settings</button>
-            <button class="btn-secondary" id="resetAllBtn">↺ Reset to Defaults</button>
-            <button class="btn-secondary" id="backBtn">← Back</button>
+            <button class="btn-primary"   id="saveAllBtn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Save All Settings
+            </button>
+            <button class="btn-secondary" id="resetAllBtn">Reset to Defaults</button>
+            <button class="btn-secondary" id="backBtn">Back</button>
         </div>
 
         <div class="footer">
             <span>Settings stored locally • Filters from Supabase</span>
-            <a id="debugLink">🐞 View Debug Logs</a>
+            <a id="debugLink">View Debug Logs</a>
         </div>
 
         <div class="credit">
@@ -307,9 +325,7 @@
         </div>
     </div>
 
-    <!-- ============================================================
-         FILTER EDITOR MODAL (unchanged — all IDs kept)
-         ============================================================ -->
+    <!-- FILTER MODAL -->
     <div class="modal-overlay" id="filterModal" style="display:none;">
         <div class="modal">
             <div class="modal-header">
@@ -343,31 +359,31 @@
                     </div>
                 </div>
 
-                <div class="section-title" style="margin-top:20px;">📦 Product Keywords</div>
+                <div class="section-title" style="margin-top:20px;">Product Keywords</div>
                 <div class="section-desc">One per line. At least one must match the lead's <strong>product name</strong> (not the message).</div>
                 <textarea id="editProductKeywords" class="modal-textarea" rows="6" placeholder="serum&#10;sunscreen&#10;spf&#10;cream"></textarea>
 
-                <div class="section-title" style="margin-top:16px;">🚫 Negative Keywords</div>
+                <div class="section-title" style="margin-top:16px;">Negative Keywords</div>
                 <div class="section-desc">One per line. Any match in the product name rejects the lead.</div>
                 <textarea id="editNegativeKeywords" class="modal-textarea" rows="4" placeholder="used&#10;repair&#10;job"></textarea>
 
-                <div class="section-title" style="margin-top:16px;">✅ Required Keywords</div>
+                <div class="section-title" style="margin-top:16px;">Required Keywords</div>
                 <div class="section-desc">One per line. At least one must appear in the product name <em>or</em> message.</div>
                 <textarea id="editRequiredKeywords" class="modal-textarea" rows="3" placeholder="buy&#10;purchase"></textarea>
 
-                <div class="section-title" style="margin-top:16px;">🌍 Location Keywords</div>
+                <div class="section-title" style="margin-top:16px;">Location Keywords</div>
                 <div class="section-desc">One per line. Country or state names (e.g. india, maharashtra)</div>
                 <textarea id="editLocationKeywords" class="modal-textarea" rows="3" placeholder="india&#10;maharashtra"></textarea>
 
                 <div class="info-box" style="margin-top:16px;">
-                    <strong>💡 Tip:</strong> v7 stores keywords only in the new columns
+                    <strong>Tip:</strong> v7 stores keywords only in the new columns
                     (<code>product_keywords</code>, <code>negative_keywords</code>, etc.).
                     Legacy <code>filter_config</code> is no longer written.
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" id="filterModalCancel">Cancel</button>
-                <button class="btn-primary"   id="filterModalSave">💾 Save Filter</button>
+                <button class="btn-primary"   id="filterModalSave">Save Filter</button>
             </div>
         </div>
     </div>

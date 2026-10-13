@@ -1,24 +1,16 @@
 // debug/debug.js
-// Debug log viewer — Complete working version with country/reason filters
+// Debug log viewer — Attio theme
 // Developed by Keyn Labs
-// Version 6.2.0
+// Version 6.3.0
 // ============================================================================
-// CHANGELOG v6.2.0
-//   • Country filter chip (STRICT_COUNTRY_* reasons)
-//   • Reason filter chip (keyword / safety / purchase reasons)
-//   • Auto-refresh: 3000ms → 1200ms
-//   • Logs fetched via background SW first (more reliable than tab)
-//   • Product name + reason surfaced per row
-//   • Copy-to-clipboard per row
-//   • Sticky filter bar
-//   • Filters persisted in chrome.storage.local
-//   • Debounced search (200ms)
-//   • Live "showing X of Y" counter
-//   • Cap visible logs at 500 for perf
-//   • Event delegation instead of inline onclick
+// CHANGELOG v6.3.0
+//   • Attio-style UI — removed emojis from all user-facing strings
+//   • Clean SVG icons for expand/copy buttons
+//   • Updated color palette to match popup + config
+//   • All functionality preserved
 // ============================================================================
 
-console.log('🐞 BuyLead Assistant Debug v6.2.0');
+console.log('BuyLead Assistant Debug v6.3.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 
@@ -32,8 +24,12 @@ var REFRESH_MS = 1200;
 var SEARCH_DEBOUNCE_MS = 200;
 var _searchTimer = null;
 
-// Persist key for filter state
 var FILTER_STORAGE_KEY = 'debugFilters_v620';
+
+var ICON_EXPAND = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+var ICON_COLLAPSE = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>';
+var ICON_COPY = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+var ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
 // ============================================================
 // DOM READY
@@ -47,7 +43,7 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // ============================================================
-// EVENT LISTENERS (with event delegation for row buttons)
+// EVENT LISTENERS
 // ============================================================
 function setupEventListeners() {
     var applyBtn = document.getElementById('applyFilter');
@@ -70,7 +66,7 @@ function setupEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', function() {
             loadLogs();
-            showToast('🔄 Refreshed');
+            showToast('Refreshed');
         });
     }
 
@@ -78,8 +74,8 @@ function setupEventListeners() {
     if (autoRefreshBtn) {
         autoRefreshBtn.addEventListener('click', function() {
             autoRefresh = !autoRefresh;
-            this.textContent = autoRefresh ? '⏸ Pause Auto' : '▶ Resume Auto';
-            showToast(autoRefresh ? '▶ Auto-refresh ON' : '⏸ Auto-refresh OFF');
+            this.textContent = autoRefresh ? 'Pause Auto' : 'Resume Auto';
+            showToast(autoRefresh ? 'Auto-refresh ON' : 'Auto-refresh OFF');
         });
     }
 
@@ -145,19 +141,21 @@ function setupEventListeners() {
         });
     }
 
-    // Event delegation for expand + copy buttons
     var logContainer = document.getElementById('logContainer');
     if (logContainer) {
         logContainer.addEventListener('click', function(e) {
             var target = e.target;
             if (!target) return;
 
-            if (target.classList.contains('expand-btn')) {
+            var expandBtn = target.closest('.expand-btn');
+            var copyBtn = target.closest('.copy-btn');
+
+            if (expandBtn) {
                 e.stopPropagation();
-                toggleData(target);
-            } else if (target.classList.contains('copy-btn')) {
+                toggleData(expandBtn);
+            } else if (copyBtn) {
                 e.stopPropagation();
-                copyRowToClipboard(target);
+                copyRowToClipboard(copyBtn);
             }
         });
     }
@@ -174,13 +172,11 @@ function startAutoRefresh() {
 }
 
 // ============================================================
-// LOAD LOGS — background SW first, then content script
+// LOAD LOGS
 // ============================================================
 function loadLogs() {
-    // Primary: background service worker (always alive, holds batched logs)
     browserAPI.runtime.sendMessage({ action: 'GET_LOGS' }, function(response) {
         if (browserAPI.runtime.lastError) {
-            // Background unreachable — try the tab
             loadFromContentScript();
             return;
         }
@@ -188,7 +184,6 @@ function loadLogs() {
             updateLogs(response);
             return;
         }
-        // Response shape unexpected — fall back
         loadFromContentScript();
     });
 }
@@ -221,12 +216,11 @@ function loadFromStorage() {
 }
 
 function updateLogs(logs) {
-    // Only re-render if logs actually changed (compare last log timestamp)
     var lastOld = allLogs.length > 0 ? allLogs[allLogs.length - 1].timestamp : null;
     var lastNew = logs.length > 0 ? logs[logs.length - 1].timestamp : null;
 
     if (lastOld === lastNew && allLogs.length === logs.length) {
-        return; // no change, skip re-render
+        return;
     }
 
     allLogs = logs;
@@ -254,7 +248,6 @@ function populateFilterOptions() {
                 if (log.data.leadCountry) countries[log.data.leadCountry] = true;
             }
         }
-        // Also collect from message text
         var msg = log.message || '';
         if (msg.indexOf('COUNTRY BLOCK') !== -1) {
             var m = msg.match(/\[(STRICT_COUNTRY_[A-Z_]+)\]/);
@@ -265,6 +258,7 @@ function populateFilterOptions() {
     populateSelect('moduleFilter', modules, 'All Modules');
     populateSelect('reasonFilter', reasons, 'All Reasons');
     populateSelect('countryFilter', countries, 'All Country Events');
+    applySavedDropdowns();
 }
 
 function populateSelect(id, valuesObj, defaultLabel) {
@@ -311,7 +305,6 @@ function applyFilters() {
                 (log.message && log.message.indexOf('COUNTRY BLOCK') !== -1);
             if (!isCountryEvent) return false;
 
-            // Match either the reason OR the lead country code
             var hit = false;
             if (reason === countryFilter) hit = true;
             if (log.data && log.data.leadCountry === countryFilter) hit = true;
@@ -394,14 +387,12 @@ function renderLogs(logs) {
             : 'No logs match the current filters. Try clearing them.';
         container.innerHTML =
             '<div class="empty">' +
-                '<span class="empty-icon">📭</span>' +
                 'No logs to show' +
-                '<br><small style="color:#444;margin-top:8px;display:block;">' + reason + '</small>' +
+                '<br><small style="color:var(--text-3);margin-top:8px;display:block;">' + reason + '</small>' +
             '</div>';
         return;
     }
 
-    // Cap visible rows for perf
     var total = logs.length;
     var trimmed = logs;
     var capped = false;
@@ -419,7 +410,7 @@ function renderLogs(logs) {
 
     if (capped) {
         html += '<div class="empty" style="font-size:12px;padding:12px;">' +
-            '⚠️ Showing latest ' + MAX_VISIBLE + ' of ' + total + ' matching logs. Refine filters to see older entries.' +
+            'Showing latest ' + MAX_VISIBLE + ' of ' + total + ' matching logs. Refine filters to see older entries.' +
         '</div>';
     }
 
@@ -440,7 +431,6 @@ function renderRow(log) {
     var moduleName = log.module || '-';
     var message = escapeHtml(log.message || '');
 
-    // Surface product name + reason if present in data
     var extraInfo = '';
     if (log.data) {
         var productName = log.data.productName || log.data.leadId;
@@ -450,7 +440,7 @@ function renderRow(log) {
         }
         if (reason && reason !== 'ok') {
             var isCountry = typeof reason === 'string' && reason.indexOf('STRICT_COUNTRY') === 0;
-            extraInfo += '<span class="log-reason" style="color:' + (isCountry ? '#02A699' : '#f5a623') + ';">' +
+            extraInfo += '<span class="log-reason" style="color:' + (isCountry ? 'var(--accent)' : 'var(--warning)') + ';">' +
                 escapeHtml(reason) + '</span>';
         }
     }
@@ -476,8 +466,8 @@ function renderRow(log) {
         '<span class="log-message">' + message + extraInfo + '</span>' +
         (hasData ? '<span class="log-data">' + escapeHtml(dataStr) + '</span>' : '') +
         '<span class="log-buttons">' +
-            (hasData ? '<button class="expand-btn" aria-label="Expand">▼</button>' : '') +
-            '<button class="copy-btn" aria-label="Copy" title="Copy JSON">📋</button>' +
+            (hasData ? '<button class="expand-btn" aria-label="Expand" data-state="collapsed">' + ICON_EXPAND + '</button>' : '') +
+            '<button class="copy-btn" aria-label="Copy" title="Copy JSON">' + ICON_COPY + '</button>' +
         '</span>' +
         (hasData ? '<div class="log-data-full">' + escapeHtml(dataFull) + '</div>' : '') +
     '</div>';
@@ -492,7 +482,7 @@ function toggleData(btn) {
     var fullData = entry.querySelector('.log-data-full');
     if (fullData) {
         var shown = fullData.classList.toggle('show');
-        btn.textContent = shown ? '▲' : '▼';
+        btn.innerHTML = shown ? ICON_COLLAPSE : ICON_EXPAND;
     }
 }
 
@@ -521,8 +511,8 @@ function copyRowToClipboard(btn) {
     var text = safeStringify(payload, null, 2);
 
     var done = function() {
-        btn.textContent = '✓';
-        setTimeout(function() { btn.textContent = '📋'; }, 1200);
+        btn.innerHTML = ICON_CHECK;
+        setTimeout(function() { btn.innerHTML = ICON_COPY; }, 1200);
     };
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -560,14 +550,14 @@ function escapeHtml(text) {
 // CLEAR / EXPORT
 // ============================================================
 function clearLogs() {
-    if (!confirm('🗑 Clear all debug logs?\n\nThis action cannot be undone.')) return;
+    if (!confirm('Clear all debug logs?\n\nThis action cannot be undone.')) return;
 
     browserAPI.storage.local.set({ logs: [] }, function() {
         allLogs = [];
         filteredLogs = [];
         renderLogs([]);
         updateStats();
-        showToast('🗑 Logs cleared');
+        showToast('Logs cleared');
     });
 }
 
@@ -588,7 +578,7 @@ function exportLogs() {
     var payload = {
         exportedAt: new Date().toISOString(),
         extension: 'BuyLead Assistant',
-        version: '6.2.0',
+        version: '6.3.0',
         totalLogs: allLogs.length,
         filters: filterState,
         logs: filteredLogs.length > 0 ? filteredLogs : allLogs
@@ -605,7 +595,7 @@ function exportLogs() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    showToast('📥 Exported ' + (filteredLogs.length > 0 ? filteredLogs.length : allLogs.length) + ' logs');
+    showToast('Exported ' + (filteredLogs.length > 0 ? filteredLogs.length : allLogs.length) + ' logs');
 }
 
 // ============================================================
@@ -629,7 +619,6 @@ function restoreFilters() {
 
         var lf = document.getElementById('levelFilter');   if (lf && state.level)   lf.value = state.level;
         var mf = document.getElementById('moduleFilter');  if (mf && state.module)  mf.value = state.module;
-        // reason + country are populated after first log load
         var rf = document.getElementById('reasonFilter');  if (rf && state.reason)  rf.setAttribute('data-saved', state.reason);
         var cf = document.getElementById('countryFilter'); if (cf && state.country) cf.setAttribute('data-saved', state.country);
         var sf = document.getElementById('searchFilter');  if (sf && state.search)  sf.value = state.search;
@@ -637,13 +626,11 @@ function restoreFilters() {
 }
 
 function applySavedDropdowns() {
-    // Called after populateFilterOptions — restores saved selections
     ['reasonFilter', 'countryFilter'].forEach(function(id) {
         var el = document.getElementById(id);
         if (!el) return;
         var saved = el.getAttribute('data-saved');
         if (saved) {
-            // Only set if option exists
             var found = false;
             for (var i = 0; i < el.options.length; i++) {
                 if (el.options[i].value === saved) { found = true; break; }

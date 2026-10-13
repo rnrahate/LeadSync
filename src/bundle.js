@@ -152,8 +152,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
     LeadIdGenerator.prototype.generateFromElement = function(element) {
         var dataId = element.getAttribute('data-lead-id');
         if (dataId) return 'dm_' + dataId;
-        var id = element.getAttribute('id');
-        if (id && id.length > 3) return 'id_' + id;
+        //var id = element.getAttribute('id');
+        //if (id && id.length > 3) return 'id_' + id;
         var links = element.querySelectorAll('a[href]');
         for (var i = 0; i < links.length; i++) {
             var href = links[i].getAttribute('href') || '';
@@ -1422,9 +1422,13 @@ SafetyController.prototype.getStatus = function() {
 
                         // Build content-based unique ID so position-based card IDs
             // don't collide across sessions (id_BLCard1 today ≠ id_BLCard1 tomorrow)
-            var contentKey = leadId + '|' +
-                (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
-                ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            //var contentKey = leadId + '|' +
+               // (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
+               // ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+
+                 var contentKey =
+                 (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
+                  ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
 
             return {
                 leadId: leadId,
@@ -1771,10 +1775,10 @@ SafetyController.prototype.getStatus = function() {
             });
         });
     };
-
         Orchestrator.prototype._init = function() {
-        var self = this;
-        this.logger.info('Mode: ' + this.config.mode);
+    var self = this;
+    this._injectPanelStyles();
+    this.logger.info('Mode: ' + this.config.mode);
         this.logger.info('Supabase mode: ' + (this._supabaseEnabled ? 'ON' : 'OFF'));
         if (this.config.strictCountryMode) {
             this.logger.info('🌍 STRICT COUNTRY ON — allowed: ' + this.config.allowedCountries.join(', '));
@@ -1859,7 +1863,196 @@ SafetyController.prototype.getStatus = function() {
             }
         });
     };
+          Orchestrator.prototype._injectPanelStyles = function() {
+        if (document.getElementById('bl-panel-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'bl-panel-styles';
+        style.textContent = `
+            .bl-panel {
+                position: fixed;
+                background: #ffffff;
+                border: 1px solid #e4e4e7;
+                border-radius: 8px;
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                font-size: 12px;
+                color: #18181b;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04);
+                z-index: 2147483647;
+                user-select: none;
+                overflow: hidden;
+                -webkit-font-smoothing: antialiased;
+            }
+            .bl-panel-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 10px;
+                border-bottom: 1px solid #e4e4e7;
+                cursor: move;
+                touch-action: none;
+                background: #fafafa;
+            }
+            .bl-panel-header img {
+                width: 18px; height: 18px;
+                object-fit: contain;
+                border-radius: 4px;
+                flex-shrink: 0;
+            }
+            .bl-panel-title {
+                flex: 1;
+                font-size: 12px;
+                font-weight: 600;
+                color: #18181b;
+                letter-spacing: -0.01em;
+            }
+            .bl-status-dot {
+                width: 7px; height: 7px;
+                border-radius: 50%;
+                background: #059669;
+                flex-shrink: 0;
+            }
+            .bl-panel-toggle {
+                background: #ffffff;
+                border: 1px solid #e4e4e7;
+                color: #52525b;
+                width: 20px; height: 20px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+                line-height: 1;
+                padding: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-family: inherit;
+                transition: background 0.12s ease;
+            }
+            .bl-panel-toggle:hover { background: #f4f4f5; color: #18181b; }
+            .bl-panel-body {
+                padding: 8px 10px;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                width: 210px;
+            }
+            .bl-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 11px;
+                color: #52525b;
+                line-height: 1.4;
+            }
+            .bl-row .bl-strong { color: #18181b; font-weight: 500; }
+            .bl-row .bl-dim { color: #a1a1aa; }
+            .bl-warning {
+                display: none;
+                margin-top: 6px;
+                padding: 6px 8px;
+                background: #fffbeb;
+                border: 1px solid #fde68a;
+                border-radius: 5px;
+                color: #92400e;
+                font-size: 10px;
+                font-weight: 500;
+                text-align: center;
+            }
+            .bl-warning.show { display: block; }
 
+            .bl-approval {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: #ffffff;
+                border: 1px solid #e4e4e7;
+                border-radius: 8px;
+                padding: 12px;
+                width: 300px;
+                z-index: 2147483646;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                color: #18181b;
+                -webkit-font-smoothing: antialiased;
+            }
+            .bl-approval-header {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 8px;
+                padding-bottom: 8px;
+                border-bottom: 1px solid #f4f4f5;
+            }
+            .bl-approval-header img {
+                width: 18px; height: 18px;
+                object-fit: contain;
+                border-radius: 4px;
+            }
+            .bl-approval-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 7px;
+                background: #f0fdfa;
+                color: #0d9488;
+                border: 1px solid #99f6e4;
+                border-radius: 4px;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+            }
+            .bl-approval-badge svg { flex-shrink: 0; }
+            .bl-approval-product {
+                font-size: 13px;
+                font-weight: 600;
+                color: #18181b;
+                line-height: 1.35;
+                margin-bottom: 4px;
+                word-break: break-word;
+                letter-spacing: -0.01em;
+            }
+            .bl-approval-country {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                font-size: 11px;
+                color: #71717a;
+                margin-bottom: 12px;
+            }
+            .bl-approval-actions {
+                display: flex;
+                gap: 6px;
+            }
+            .bl-btn {
+                flex: 1;
+                padding: 7px 10px;
+                border: 1px solid transparent;
+                border-radius: 5px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 5px;
+                font-family: inherit;
+                transition: all 0.12s ease;
+            }
+            .bl-btn svg { flex-shrink: 0; }
+            .bl-btn-acquire {
+                background: #18181b;
+                color: #ffffff;
+            }
+            .bl-btn-acquire:hover { background: #000000; }
+            .bl-btn-skip {
+                background: #ffffff;
+                color: #52525b;
+                border-color: #e4e4e7;
+            }
+            .bl-btn-skip:hover { background: #f4f4f5; color: #18181b; }
+        `;
+        document.head.appendChild(style);
+    };
     Orchestrator.prototype._startPeriodicTasks = function() {
         var self = this;
         this._statsTimer = setInterval(function() {
@@ -1870,42 +2063,50 @@ SafetyController.prototype.getStatus = function() {
         this._cleanupTimer = setInterval(function() { self.duplicateManager.cleanup(); }, 120000);
     };
 
-    Orchestrator.prototype._setupUI = function() {
+        Orchestrator.prototype._setupUI = function() {
         var existing = document.getElementById('bl-safety-status');
         if (existing) existing.remove();
         var self = this;
         var panel = document.createElement('div');
         panel.id = 'bl-safety-status';
+        panel.className = 'bl-panel';
+
         var savedPos = this._savedPanelPosition;
-        var defaultStyle = 'bottom:20px;left:20px;';
         if (savedPos && savedPos.top !== undefined) {
-            var maxX = window.innerWidth - 200, maxY = window.innerHeight - 150;
-            defaultStyle = 'top:' + Math.max(0, Math.min(savedPos.top, maxY)) + 'px;left:' + Math.max(0, Math.min(savedPos.left, maxX)) + 'px;';
+            var maxX = window.innerWidth - 220, maxY = window.innerHeight - 150;
+            panel.style.top = Math.max(0, Math.min(savedPos.top, maxY)) + 'px';
+            panel.style.left = Math.max(0, Math.min(savedPos.left, maxX)) + 'px';
+        } else {
+            panel.style.bottom = '20px';
+            panel.style.left = '20px';
         }
-        panel.style.cssText = 'position:fixed;' + defaultStyle + 'background:#fff;border:2px solid #02A699;border-radius:8px;padding:0;z-index:2147483647;font-family:-apple-system,Arial,sans-serif;font-size:11px;box-shadow:0 4px 16px rgba(0,0,0,0.15);width:250px;user-select:none;overflow:hidden;';
+
         var iconUrl = '';
         try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) {}
+
         panel.innerHTML =
-            '<div id="bl-panel-header" style="display:flex;align-items:center;gap:6px;padding:8px 10px;background:#02A699;color:#fff;cursor:move;touch-action:none;">' +
-                '<div style="width:18px;height:18px;">' + (iconUrl ? '<img src="' + iconUrl + '" style="width:18px;height:18px;object-fit:contain;border-radius:3px;" />' : '🎯') + '</div>' +
-                '<span style="font-weight:700;font-size:12px;flex:1;">BuyLead</span>' +
-                '<span id="bl-status-dot" style="width:8px;height:8px;border-radius:50%;background:#fff;"></span>' +
-                '<button id="bl-panel-toggle" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:18px;height:18px;border-radius:3px;cursor:pointer;font-size:12px;padding:0;">−</button>' +
+            '<div class="bl-panel-header" id="bl-panel-header">' +
+                (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
+                '<span class="bl-panel-title">BuyLead</span>' +
+                '<span class="bl-status-dot" id="bl-status-dot"></span>' +
+                '<button class="bl-panel-toggle" id="bl-panel-toggle" type="button">−</button>' +
             '</div>' +
-            '<div id="bl-panel-body" style="padding:8px 10px;">' +
-                '<div style="color:#666;font-size:10px;" id="bl-status-text">Init...</div>' +
-                '<div style="color:#666;font-size:10px;" id="bl-stats-text">Scanned: 0 | Acquired: 0</div>' +
-                '<div style="color:#999;font-size:9px;"  id="bl-connection-text">☁️ CRM</div>' +
-                '<div style="color:#999;font-size:9px;"  id="bl-country-text">🌍 Any</div>' +
-                '<div style="color:#999;font-size:9px;"  id="bl-rate-text">📊 0/60 min</div>' +
-                '<div style="color:#999;font-size:9px;"  id="bl-kw-text">KW: 0</div>' +
-                '<div style="color:#999;font-size:9px;"  id="bl-queue-text">Queue: 0</div>' +
-                '<div id="bl-warning-text" style="display:none;color:#ef7076;font-size:10px;font-weight:700;padding:4px 6px;background:#2a0e10;border-radius:4px;margin-top:6px;text-align:center;">⚠️ Filters not loaded — acquiring disabled</div>' +
+            '<div class="bl-panel-body" id="bl-panel-body">' +
+                '<div class="bl-row"><span id="bl-status-text" class="bl-strong">Init...</span></div>' +
+                '<div class="bl-row"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span></div>' +
+                '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
+                '<div class="bl-row"><span id="bl-country-text" class="bl-dim">Any country</span></div>' +
+                '<div class="bl-row"><span id="bl-rate-text" class="bl-dim">0/60 min</span></div>' +
+                '<div class="bl-row"><span id="bl-kw-text" class="bl-dim">KW: 0</span></div>' +
+                '<div class="bl-row"><span id="bl-queue-text" class="bl-dim">Queue: 0</span></div>' +
+                '<div class="bl-warning" id="bl-warning-text"></div>' +
             '</div>';
+
         document.body.appendChild(panel);
         this._safetyPanel = panel;
         if (this._panelCollapsed) this._setPanelCollapsed(true);
         this._setupDrag(panel);
+
         var toggleBtn = document.getElementById('bl-panel-toggle');
         if (toggleBtn) {
             toggleBtn.addEventListener('click', function(e) {
@@ -1999,7 +2200,8 @@ SafetyController.prototype.getStatus = function() {
             if (!self._safetyPanel) return;
             var dot = document.getElementById('bl-status-dot');
             var text = document.getElementById('bl-status-text');
-            var stats = document.getElementById('bl-stats-text');
+            var statsScanned = document.getElementById('bl-stat-scanned');
+            var statsAcquired = document.getElementById('bl-stat-acquired');
             var conn = document.getElementById('bl-connection-text');
             var countryEl = document.getElementById('bl-country-text');
             var rateEl = document.getElementById('bl-rate-text');
@@ -2016,7 +2218,8 @@ SafetyController.prototype.getStatus = function() {
                 else t = '⏹ Stopped';
                 text.textContent = t;
             }
-            if (stats) stats.textContent = 'Scanned: ' + self.stats.discovered + ' | Acquired: ' + self.stats.acquired;
+            if (statsScanned) statsScanned.textContent = self.stats.discovered;
+            if (statsAcquired) statsAcquired.textContent = self.stats.acquired;
             if (conn) {
                 var kws = self.keywordManager.getAllKeywords();
                 conn.textContent = (self._supabaseEnabled ? '☁️ CRM' : '📴 Local') + ' (P' + kws.product.length + ')';
@@ -2065,9 +2268,9 @@ SafetyController.prototype.getStatus = function() {
                         msg = '🛑 Filters failed to load — refresh page to retry';
                     }
                     warnEl.textContent = msg;
-                    warnEl.style.display = 'block';
+                    warnEl.classList.add('show');
                 } else {
-                    warnEl.style.display = 'none';
+                    warnEl.classList.remove('show');
                 }
             }
 
@@ -2255,23 +2458,47 @@ SafetyController.prototype.getStatus = function() {
         });
     };
 
-    Orchestrator.prototype._showApprovalUI = function(lead) {
+        Orchestrator.prototype._showApprovalUI = function(lead) {
         var existing = document.getElementById('bl_approval_' + lead.leadId);
         if (existing) existing.remove();
         var iconUrl = '';
         try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) {}
+
         var card = document.createElement('div');
         card.id = 'bl_approval_' + lead.leadId;
-        card.style.cssText = 'position:fixed;bottom:20px;right:20px;background:white;border:2px solid #02A699;border-radius:8px;padding:15px;max-width:350px;z-index:2147483646;box-shadow:0 4px 20px rgba(0,0,0,0.2);font-family:-apple-system,Arial,sans-serif;';
-        card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
-            (iconUrl ? '<img src="' + iconUrl + '" style="width:20px;height:20px;object-fit:contain;border-radius:4px;" />' : '') +
-            '<span style="font-weight:bold;color:#02A699;">⭐ Lead Ready</span></div>' +
-            '<div style="font-size:14px;font-weight:bold;">' + this._esc(lead.productName) + '</div>' +
-            '<div style="font-size:11px;color:#666;margin:4px 0;">🌍 ' + this._esc(lead.countryIso || 'Unknown') + '</div>' +
-            '<div style="display:flex;gap:8px;margin-top:8px;">' +
-            '<button style="flex:1;padding:8px;background:#02A699;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;" data-a="acq">✅ Acquire</button>' +
-            '<button style="flex:1;padding:8px;background:#e8ecf1;color:#333;border:none;border-radius:4px;cursor:pointer;font-weight:600;" data-a="skip">✖ Skip</button></div>';
+        card.className = 'bl-approval';
+
+        var countryFlag = '';
+        if (lead.countryIso && lead.countryIso.length === 2) {
+            try {
+                var codePoints = lead.countryIso.toUpperCase().split('').map(function(c) { return 127397 + c.charCodeAt(0); });
+                countryFlag = String.fromCodePoint.apply(null, codePoints);
+            } catch (e) {}
+        }
+
+        card.innerHTML =
+            '<div class="bl-approval-header">' +
+                (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
+                '<span class="bl-approval-badge">' +
+                    '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
+                    'Lead Ready' +
+                '</span>' +
+            '</div>' +
+            '<div class="bl-approval-product">' + this._esc(lead.productName) + '</div>' +
+            '<div class="bl-approval-country">' + (countryFlag ? countryFlag + ' ' : '') + this._esc(lead.countryIso || 'Unknown') + '</div>' +
+            '<div class="bl-approval-actions">' +
+                '<button class="bl-btn bl-btn-acquire" type="button" data-a="acq">' +
+                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+                    'Acquire' +
+                '</button>' +
+                '<button class="bl-btn bl-btn-skip" type="button" data-a="skip">' +
+                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>' +
+                    'Skip' +
+                '</button>' +
+            '</div>';
+
         document.body.appendChild(card);
+
         var self = this;
         card.querySelector('[data-a="acq"]').addEventListener('click', function() {
             self.actionAdapter.acquire(lead).then(function(r) {

@@ -1,24 +1,19 @@
 // config/config.js
 // Full CRUD for filters + keywords management
 // Developed by Keyn Labs
-// Version 7.0.0
+// Version 7.1.0
 // ============================================================================
-// CHANGELOG v7.0.0
-//   • DEFAULT_CONFIG mirrors bundle.js v6.2 (faster limits, scroll, cooldown)
-//   • saveFilter stops writing filter_config on new/edited rows
-//   • bulkSyncKeywords: parallel batches of 5, optional filter_config cleanup
-//   • renderFilterCard shows ⚠️ Legacy badge when filter_config is still used
-//   • getConfig reads/writes all new speed fields
-//   • All Supabase fetches get a 12s AbortController timeout
-//   • refreshCounts uses Promise.allSettled
-//   • Auto-migrate on first config-page open (initialized_v620)
+// CHANGELOG v7.1.0
+//   • Attio-style UI — removed emojis from all user-facing strings
+//   • Filter cards, empty states, toasts all text-only
+//   • All functionality preserved
 // ============================================================================
 
-console.log('⚙️ BuyLead Assistant Config v7.0.0');
+console.log('BuyLead Assistant Config v7.1.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
-var SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
-var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2aHVyb211YnVreWxzeHJzZml6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwODI4MDYsImV4cCI6MjEwMzY1ODgwNn0.29J2uGHxFhPtEqRZvnXjaYpL-x4I0uEc2TT8u9d5PVw';
+var SUPABASE_URL = 'https://chqewpjsibouqvqkxuli.supabase.co';
+var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNocWV3cGpzaWJvdXF2cWt4dWxpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEzODg5OTAsImV4cCI6MjEwNjk2NDk5MH0.b-M_MKu-yVjpNwFNwTEmWqksJhj-ffXcZ2Mr42AW1bE';
 
 var SB_HEADERS = {
     'apikey': SUPABASE_KEY,
@@ -36,19 +31,16 @@ var DEFAULT_CONFIG = {
     mode: 'AUTOMATIC',
     minScore: 60,
 
-    // Speed limits
     maxPerMinute: 60,
     maxPerHour: 400,
     maxPerDay: 2000,
     maxPerSession: 1000,
     cooldownMs: 0,
 
-    // Country
     strictCountryMode: false,
     allowedCountries: ['IN'],
     strictCountryRejectUnknown: true,
 
-    // Scoring
     scoreWeights: {
         base: 50,
         perProductKeyword: 10, maxProductBonus: 30,
@@ -60,7 +52,6 @@ var DEFAULT_CONFIG = {
     preferredStates: ['maharashtra'],
     preferredCountries: ['IN'],
 
-    // Navigator (speed-tuned)
     autoScroll: true,
     scrollSpeed: 900,
     scrollDelayMs: 40,
@@ -72,13 +63,11 @@ var DEFAULT_CONFIG = {
     autoReloadOnComplete: true,
     autoReloadDelayMs: 100,
 
-    // Popup (speed-tuned)
     autoMinimize: true,
     popupTimeoutMs: 5000,
     confirmationAnswer: 'yes',
     purchaseAction: 'close',
 
-    // Connection
     supabaseEnabled: true
 };
 
@@ -164,10 +153,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-/**
- * If the storage schema is older than v6.20, seed the new defaults
- * while preserving the user's chosen mode + local keywords.
- */
 function autoMigrateIfNeeded() {
     return new Promise(function(resolve) {
         browserAPI.storage.local.get(
@@ -268,7 +253,6 @@ function setupModal() {
 // EVENT LISTENERS
 // ============================================================
 function setupEventListeners() {
-    // General
     document.getElementById('saveAllBtn').addEventListener('click', saveAll);
     document.getElementById('resetAllBtn').addEventListener('click', resetAllToDefaults);
     document.getElementById('saveKeywordsBtn').addEventListener('click', saveLocalKeywords);
@@ -287,7 +271,7 @@ function setupEventListeners() {
         browserAPI.storage.local.set({ supabaseEnabled: enabled }, function() {
             updateConfigSupabaseUI(enabled);
             browserAPI.runtime.sendMessage({ action: 'TOGGLE_SUPABASE', enabled: enabled });
-            showToast(enabled ? '☁️ Supabase ON' : '📴 Supabase OFF', 'success');
+            showToast(enabled ? 'Supabase ON' : 'Supabase OFF', 'success');
         });
     });
 
@@ -314,67 +298,67 @@ function setupEventListeners() {
         var btn = this;
         var orig = btn.textContent;
         btn.disabled = true;
-        btn.textContent = '⏳ Refreshing...';
+        btn.textContent = 'Refreshing...';
         refreshCounts().then(function() {
             btn.disabled = false;
             btn.textContent = orig;
         });
     });
 
-    // Data management buttons (data-action)
+    // Data management buttons
     var dataActions = {
         'clearDupCache': function() {
             if (!confirm('Clear the duplicate cache?')) return;
             browserAPI.runtime.sendMessage({ action: 'CLEAR_DUPLICATE_CACHE' }, function(r) {
-                showToast(r && r.success ? '✅ Duplicate cache cleared' : '⚠️ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'Duplicate cache cleared' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
             });
         },
         'clearAllLocal': function() {
             if (!confirm('Delete ALL local data? (config & keywords kept)')) return;
             if (!confirm('Confirm again?')) return;
             browserAPI.runtime.sendMessage({ action: 'CLEAR_ALL_LOCAL_DATA' }, function() {
-                showToast('🗑️ Local data cleared', 'success');
+                showToast('Local data cleared', 'success');
             });
         },
         'resetStats': function() {
             if (!confirm('Reset filter stats in Supabase?')) return;
             browserAPI.runtime.sendMessage({ action: 'SUPABASE_RESET_STATS' }, function(r) {
-                showToast(r && r.success ? '✅ Stats reset' : '❌ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'Stats reset' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
                 refreshCounts();
             });
         },
         'clearHistory': function() {
-            if (!confirm('⚠️ Delete ALL lead history from Supabase?')) return;
+            if (!confirm('Delete ALL lead history from Supabase?')) return;
             if (!confirm('Confirm again?')) return;
             browserAPI.runtime.sendMessage({ action: 'SUPABASE_CLEAR_HISTORY' }, function(r) {
-                showToast(r && r.success ? '✅ History deleted' : '❌ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'History deleted' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
                 refreshCounts();
             });
         },
         'clearLeads': function() {
-            if (!confirm('☢️ Delete ALL LEADS from Supabase?\nThis cascades to history.')) return;
+            if (!confirm('Delete ALL LEADS from Supabase?\nThis cascades to history.')) return;
             var txt = prompt('Type "DELETE ALL" to confirm:');
-            if (txt !== 'DELETE ALL') { showToast('❌ Cancelled', 'error'); return; }
+            if (txt !== 'DELETE ALL') { showToast('Cancelled', 'error'); return; }
             browserAPI.runtime.sendMessage({ action: 'SUPABASE_CLEAR_LEADS' }, function(r) {
-                showToast(r && r.success ? '🗑️ Leads deleted' : '❌ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'Leads deleted' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
                 refreshCounts();
             });
         },
         'clearBefore': function() {
             var dateStr = prompt('Delete leads before (YYYY-MM-DD):');
-            if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) { showToast('❌ Invalid date', 'error'); return; }
+            if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) { showToast('Invalid date', 'error'); return; }
             if (!confirm('Delete leads before ' + dateStr + '?')) return;
             browserAPI.runtime.sendMessage({ action: 'SUPABASE_CLEAR_BEFORE', date: dateStr + 'T00:00:00Z' }, function(r) {
-                showToast(r && r.success ? '✅ Deleted' : '❌ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'Deleted' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
                 refreshCounts();
             });
         },
         'clearFilters': function() {
-            if (!confirm('⚠️ Delete ALL filters from Supabase?\nThis removes all your filter configurations.')) return;
+            if (!confirm('Delete ALL filters from Supabase?\nThis removes all your filter configurations.')) return;
             var txt = prompt('Type "DELETE FILTERS" to confirm:');
-            if (txt !== 'DELETE FILTERS') { showToast('❌ Cancelled', 'error'); return; }
+            if (txt !== 'DELETE FILTERS') { showToast('Cancelled', 'error'); return; }
             browserAPI.runtime.sendMessage({ action: 'SUPABASE_CLEAR_FILTERS' }, function(r) {
-                showToast(r && r.success ? '🗑️ Filters deleted' : '❌ ' + (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
+                showToast(r && r.success ? 'Filters deleted' : (r ? r.error : 'Failed'), r && r.success ? 'success' : 'error');
                 loadFilters();
                 refreshCounts();
             });
@@ -403,18 +387,15 @@ function loadSupabaseSetting() {
 
 function updateConfigSupabaseUI(enabled) {
     var container = document.getElementById('connectionToggle');
-    var icon   = document.getElementById('configConnIcon');
     var label  = document.getElementById('configConnLabel');
     var desc   = document.getElementById('configConnDesc');
     if (!container) return;
     if (enabled) {
         container.classList.remove('offline');
-        icon.textContent = '☁️';
         label.textContent = 'Supabase Mode: ON';
         desc.textContent = 'Using CRM filters from Supabase';
     } else {
         container.classList.add('offline');
-        icon.textContent = '📴';
         label.textContent = 'Supabase Mode: OFF';
         desc.textContent = 'Offline mode - using local keywords only';
     }
@@ -424,13 +405,11 @@ function loadConfig() {
     browserAPI.storage.local.get(DEFAULT_CONFIG, function(config) {
         var m = Object.assign({}, DEFAULT_CONFIG, config);
 
-        // Mode
         document.querySelectorAll('.mode-btn').forEach(function(btn) {
             btn.classList.toggle('active', btn.dataset.mode === m.mode);
         });
         updateModeInfo(m.mode);
 
-        // Number inputs (all read from storage keys directly)
         var numberFields = {
             minScore: 'minScore',
             perMinute: 'maxPerMinute',
@@ -453,19 +432,16 @@ function loadConfig() {
             if (el) el.value = m[numberFields[domId]];
         });
 
-        // Checkboxes
         ['autoScroll', 'autoReloadOnComplete', 'autoMinimize'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.checked = m[id] !== false;
         });
 
-        // Selects
         ['confirmationAnswer', 'purchaseAction'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.value = m[id];
         });
 
-        // Scoring weights
         var w = Object.assign({}, DEFAULT_CONFIG.scoreWeights, m.scoreWeights || {});
         ['base', 'perProductKeyword', 'maxProductBonus', 'preferredState', 'countryMatch',
          'hasMobile', 'hasEmail', 'hasPhone', 'detailedRequirement', 'requirementLengthThreshold'].forEach(function(k) {
@@ -473,7 +449,6 @@ function loadConfig() {
             if (el) el.value = w[k];
         });
 
-        // Scoring penalties
         var p = Object.assign({}, DEFAULT_CONFIG.scorePenalties, m.scorePenalties || {});
         var pMap = { wrongCountry: 'pWrongCountry', wrongState: 'pWrongState', noContact: 'pNoContact' };
         Object.keys(pMap).forEach(function(k) {
@@ -481,7 +456,6 @@ function loadConfig() {
             if (el) el.value = p[k];
         });
 
-        // Country fields
         var elPC = document.getElementById('preferredCountries');
         if (elPC) elPC.value = (m.preferredCountries || DEFAULT_CONFIG.preferredCountries).join(', ');
         var elPS = document.getElementById('preferredStates');
@@ -511,16 +485,22 @@ function updateStrictCountryPreview() {
     var rejectUnknown = rejectEl.checked;
 
     if (!enabled) {
-        el.innerHTML = '🌍 <strong>Strict mode OFF</strong> — all countries accepted' +
+        el.innerHTML = '<strong>Strict mode OFF</strong> — all countries accepted' +
             (rejectUnknown ? ' <em style="font-size:10px;">(unknown still rejected)</em>' : '');
-        el.style.background = '#1e1810'; el.style.borderLeftColor = '#f5a623'; el.style.color = '#f5a623';
+        el.style.background = '#fffbeb';
+        el.style.borderLeftColor = '#d97706';
+        el.style.color = '#92400e';
     } else if (list.length === 0) {
-        el.innerHTML = '⚠️ <strong>Strict mode ON but no countries configured</strong> — ALL leads blocked';
-        el.style.background = '#1e1012'; el.style.borderLeftColor = '#ef7076'; el.style.color = '#ffb0b0';
+        el.innerHTML = '<strong>Strict mode ON but no countries configured</strong> — ALL leads blocked';
+        el.style.background = '#fef2f2';
+        el.style.borderLeftColor = '#dc2626';
+        el.style.color = '#b91c1c';
     } else {
-        el.innerHTML = '🌍 <strong>STRICT MODE ON</strong> — Only: <strong style="color:#02A699;">' + list.join(', ') + '</strong>' +
+        el.innerHTML = '<strong>STRICT MODE ON</strong> — Only: <strong>' + list.join(', ') + '</strong>' +
             (rejectUnknown ? '<br><em style="font-size:10px;">Unknown countries also rejected</em>' : '');
-        el.style.background = '#0f1f1e'; el.style.borderLeftColor = '#02A699'; el.style.color = '#02A699';
+        el.style.background = '#f0fdfa';
+        el.style.borderLeftColor = '#0d9488';
+        el.style.color = '#0f766e';
     }
 }
 
@@ -545,12 +525,12 @@ async function loadFilters(forceRefresh) {
     if (!container) return;
 
     if (!supabaseEnabled) {
-        container.innerHTML = '<div class="empty-state">📴 Supabase is OFF — filters not available</div>';
+        container.innerHTML = '<div class="empty-state">Supabase is OFF — filters not available</div>';
         if (countEl) countEl.textContent = '0';
         return;
     }
 
-    container.innerHTML = '<div class="empty-state">⏳ Loading filters...</div>';
+    container.innerHTML = '<div class="empty-state">Loading filters...</div>';
 
     try {
         var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?select=*&order=id.asc', {
@@ -562,14 +542,14 @@ async function loadFilters(forceRefresh) {
         if (countEl) countEl.textContent = filters.length;
 
         if (filters.length === 0) {
-            container.innerHTML = '<div class="empty-state">📭 No filters yet. Click "➕ Add New Filter" to create one.</div>';
+            container.innerHTML = '<div class="empty-state">No filters yet. Click "Add New Filter" to create one.</div>';
             return;
         }
 
         container.innerHTML = filters.map(renderFilterCard).join('');
         bindFilterActions();
     } catch (err) {
-        container.innerHTML = '<div class="empty-state error">❌ Failed: ' + escapeHtml(err.message) + '</div>';
+        container.innerHTML = '<div class="empty-state error">Failed: ' + escapeHtml(err.message) + '</div>';
         if (countEl) countEl.textContent = '0';
     }
 }
@@ -581,7 +561,6 @@ function renderFilterCard(f) {
     var rk = Array.isArray(f.required_keywords) ? f.required_keywords : (config.required_keywords || []);
     var lk = Array.isArray(f.location_keywords) ? f.location_keywords : [];
 
-    // Fallback to legacy config if new columns are empty
     if (pk.length === 0 && Array.isArray(config.product_names))     pk = config.product_names;
     if (nk.length === 0 && Array.isArray(config.negative_keywords)) nk = config.negative_keywords;
     if (rk.length === 0 && Array.isArray(config.required_keywords)) rk = config.required_keywords;
@@ -591,7 +570,6 @@ function renderFilterCard(f) {
             .concat(Array.isArray(config.states)    ? config.states    : []);
     }
 
-    // Detect legacy-only rows
     var isLegacy = (!f.product_keywords || f.product_keywords.length === 0) &&
                    f.filter_config &&
                    (config.product_names && config.product_names.length > 0);
@@ -601,11 +579,11 @@ function renderFilterCard(f) {
 
     function pillList(arr, emptyMsg) {
         if (!arr || arr.length === 0) {
-            return '<span style="color:#555;font-style:italic;">' + emptyMsg + '</span>';
+            return '<span style="color:#a1a1aa;font-style:italic;">' + emptyMsg + '</span>';
         }
         return arr.slice(0, 30).map(function(k) {
             return '<span class="kw-pill">' + escapeHtml(String(k)) + '</span>';
-        }).join('') + (arr.length > 30 ? ' <span style="color:#666;">+' + (arr.length - 30) + ' more</span>' : '');
+        }).join('') + (arr.length > 30 ? ' <span style="color:#71717a;">+' + (arr.length - 30) + ' more</span>' : '');
     }
 
     return '' +
@@ -615,34 +593,34 @@ function renderFilterCard(f) {
                     '<div class="filter-name">' +
                         escapeHtml(f.filter_name || 'Unnamed Filter') +
                         '<span class="filter-badge ' + (isActive ? 'active' : 'inactive') + '">' +
-                            (isActive ? '✓ Active' : '✗ Inactive') +
+                            (isActive ? 'Active' : 'Inactive') +
                         '</span>' +
-                        (isRunning ? '<span class="filter-badge running">🟢 Running</span>' : '') +
-                        (isLegacy  ? '<span class="filter-badge" style="background:#1e1810;color:#f5a623;border:1px solid #f5a623;">⚠️ Legacy</span>' : '') +
+                        (isRunning ? '<span class="filter-badge running">Running</span>' : '') +
+                        (isLegacy  ? '<span class="filter-badge legacy">Legacy</span>' : '') +
                     '</div>' +
-                    '<div class="filter-meta">ID: ' + f.id + ' • Client: ' + escapeHtml(f.client_id || 'default') + '</div>' +
+                    '<div class="filter-meta">ID: ' + f.id + ' · Client: ' + escapeHtml(f.client_id || 'default') + '</div>' +
                 '</div>' +
             '</div>' +
 
             '<div class="filter-kw-section">' +
-                '<div class="filter-kw-row"><span class="filter-kw-label">📦 PRODUCT</span><span class="filter-kw-value">' + pillList(pk, '(empty — matches any product)') + '</span></div>' +
-                '<div class="filter-kw-row"><span class="filter-kw-label">🚫 NEGATIVE</span><span class="filter-kw-value">' + pillList(nk, '(none)') + '</span></div>' +
-                '<div class="filter-kw-row"><span class="filter-kw-label">✅ REQUIRED</span><span class="filter-kw-value">' + pillList(rk, '(none)') + '</span></div>' +
-                '<div class="filter-kw-row"><span class="filter-kw-label">🌍 LOCATION</span><span class="filter-kw-value">' + pillList(lk, '(none)') + '</span></div>' +
+                '<div class="filter-kw-row"><span class="filter-kw-label">Product</span><span class="filter-kw-value">' + pillList(pk, '(empty — matches any product)') + '</span></div>' +
+                '<div class="filter-kw-row"><span class="filter-kw-label">Negative</span><span class="filter-kw-value">' + pillList(nk, '(none)') + '</span></div>' +
+                '<div class="filter-kw-row"><span class="filter-kw-label">Required</span><span class="filter-kw-value">' + pillList(rk, '(none)') + '</span></div>' +
+                '<div class="filter-kw-row"><span class="filter-kw-label">Location</span><span class="filter-kw-value">' + pillList(lk, '(none)') + '</span></div>' +
             '</div>' +
 
             '<div class="filter-stats">' +
-                '<span>📊 Scanned: <strong>' + (f.stats_scanned || 0) + '</strong></span>' +
-                '<span>✅ Matched: <strong>' + (f.stats_matched || 0) + '</strong></span>' +
-                '<span>📞 Clicked: <strong>' + (f.stats_clicked || 0) + '</strong></span>' +
-                '<span>📦 P-KW: <strong>' + pk.length + '</strong></span>' +
-                '<span>🌍 L-KW: <strong>' + lk.length + '</strong></span>' +
+                '<span>Scanned: <strong>' + (f.stats_scanned || 0) + '</strong></span>' +
+                '<span>Matched: <strong>' + (f.stats_matched || 0) + '</strong></span>' +
+                '<span>Clicked: <strong>' + (f.stats_clicked || 0) + '</strong></span>' +
+                '<span>P-KW: <strong>' + pk.length + '</strong></span>' +
+                '<span>L-KW: <strong>' + lk.length + '</strong></span>' +
             '</div>' +
 
             '<div class="filter-actions">' +
-                '<button class="btn-tiny btn-edit"   data-action="edit"   data-id="' + f.id + '">✏️ Edit</button>' +
-                '<button class="btn-tiny btn-toggle" data-action="toggle" data-id="' + f.id + '" data-active="' + isActive + '">' + (isActive ? '⏸ Disable' : '▶ Enable') + '</button>' +
-                '<button class="btn-tiny btn-delete" data-action="delete" data-id="' + f.id + '">🗑️ Delete</button>' +
+                '<button class="btn-tiny btn-edit"   data-action="edit"   data-id="' + f.id + '">Edit</button>' +
+                '<button class="btn-tiny btn-toggle" data-action="toggle" data-id="' + f.id + '" data-active="' + isActive + '">' + (isActive ? 'Disable' : 'Enable') + '</button>' +
+                '<button class="btn-tiny btn-delete" data-action="delete" data-id="' + f.id + '">Delete</button>' +
             '</div>' +
         '</div>';
 }
@@ -675,7 +653,7 @@ async function editFilter(id) {
         if (arr.length === 0) throw new Error('Filter not found');
         openFilterModal(arr[0]);
     } catch (err) {
-        showToast('❌ Failed to load filter: ' + err.message, 'error');
+        showToast('Failed to load filter: ' + err.message, 'error');
     }
 }
 
@@ -738,25 +716,22 @@ async function saveFilter() {
     var locationKw = parseTextarea('editLocationKeywords');
 
     if (!name) {
-        showToast('❌ Filter name is required', 'error');
+        showToast('Filter name is required', 'error');
         return;
     }
 
     var saveBtn = document.getElementById('filterModalSave');
     var orig = saveBtn.textContent;
     saveBtn.disabled = true;
-    saveBtn.textContent = '⏳ Saving...';
+    saveBtn.textContent = 'Saving...';
 
     try {
-        // Split location keywords into countries + states
         var countries = locationKw.filter(function(l) {
             return /^(in|us|uk|gb|ae|sa|ru|cn|au|ca|de|fr|jp|br|mx|it|es|kr|nl|za|sg|th|vn|id|my|ph|tr|eg|il|pk|bd|lk|np|india|usa|uk|uae)$/i.test(l)
                 || l.length === 2;
         });
         var states = locationKw.filter(function(l) { return countries.indexOf(l) === -1; });
 
-        // v7: filter_config is NO LONGER written on new/edited rows.
-        // The keyword columns are the single source of truth.
         var row = {
             filter_name: name,
             client_id: clientId,
@@ -792,14 +767,14 @@ async function saveFilter() {
         var wasEditing = !!editingFilterId;
         editingFilterId = null;
 
-        showToast(wasEditing ? '✅ Filter updated' : '✅ Filter created', 'success');
+        showToast(wasEditing ? 'Filter updated' : 'Filter created', 'success');
 
         await loadFilters(true);
         refreshCounts();
 
         browserAPI.runtime.sendMessage({ action: 'REFRESH_FILTERS' });
     } catch (err) {
-        showToast('❌ Save failed: ' + err.message, 'error');
+        showToast('Save failed: ' + err.message, 'error');
     } finally {
         saveBtn.disabled = false;
         saveBtn.textContent = orig;
@@ -814,16 +789,16 @@ async function toggleFilter(id, isActive) {
             body: JSON.stringify({ is_active: isActive, updated_at: new Date().toISOString() })
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        showToast(isActive ? '▶ Filter enabled' : '⏸ Filter disabled', 'success');
+        showToast(isActive ? 'Filter enabled' : 'Filter disabled', 'success');
         await loadFilters(true);
         browserAPI.runtime.sendMessage({ action: 'REFRESH_FILTERS' });
     } catch (err) {
-        showToast('❌ ' + err.message, 'error');
+        showToast(err.message, 'error');
     }
 }
 
 async function deleteFilter(id) {
-    if (!confirm('⚠️ Delete filter #' + id + ' permanently?')) return;
+    if (!confirm('Delete filter #' + id + ' permanently?')) return;
     if (!confirm('This cannot be undone. Continue?')) return;
 
     try {
@@ -840,12 +815,12 @@ async function deleteFilter(id) {
             var errText = await res.text();
             throw new Error('HTTP ' + res.status + ': ' + errText.substring(0, 200));
         }
-        showToast('🗑️ Filter deleted', 'success');
+        showToast('Filter deleted', 'success');
         await loadFilters(true);
         refreshCounts();
         browserAPI.runtime.sendMessage({ action: 'REFRESH_FILTERS' });
     } catch (err) {
-        showToast('❌ Delete failed: ' + err.message, 'error');
+        showToast('Delete failed: ' + err.message, 'error');
     }
 }
 
@@ -865,7 +840,7 @@ async function bulkSyncKeywords() {
     var btn = document.getElementById('bulkSyncBtn');
     var orig = btn.textContent;
     btn.disabled = true;
-    btn.textContent = '⏳ Syncing...';
+    btn.textContent = 'Syncing...';
 
     try {
         var res = await sbFetch(SUPABASE_URL + '/rest/v1/filters?select=*', {
@@ -912,17 +887,17 @@ async function bulkSyncKeywords() {
             });
 
             await Promise.all(promises);
-            btn.textContent = '⏳ Syncing... ' + Math.min(i + BATCH, filters.length) + '/' + filters.length;
+            btn.textContent = 'Syncing... ' + Math.min(i + BATCH, filters.length) + '/' + filters.length;
         }
 
         showToast(
-            '✅ Sync complete: ' + success + ' updated, ' + failed + ' failed' +
+            'Sync complete: ' + success + ' updated, ' + failed + ' failed' +
             (shouldClearLegacy ? ' (legacy cleared)' : ''),
             'success'
         );
         await loadFilters(true);
     } catch (err) {
-        showToast('❌ Sync failed: ' + err.message, 'error');
+        showToast('Sync failed: ' + err.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = orig;
@@ -930,15 +905,15 @@ async function bulkSyncKeywords() {
 }
 
 // ============================================================
-// COUNTS — allSettled so one failure doesn't blank the rest
+// COUNTS
 // ============================================================
 async function refreshCounts() {
     var el1 = document.getElementById('countLeads');
     var el2 = document.getElementById('countHistory');
     var el3 = document.getElementById('countFilters');
-    if (el1) el1.textContent = '⏳';
-    if (el2) el2.textContent = '⏳';
-    if (el3) el3.textContent = '⏳';
+    if (el1) el1.textContent = '...';
+    if (el2) el2.textContent = '...';
+    if (el3) el3.textContent = '...';
 
     try {
         var results = await Promise.allSettled([
@@ -976,7 +951,6 @@ function getConfig() {
     var c = Object.assign({}, DEFAULT_CONFIG);
     c.mode = activeMode ? activeMode.dataset.mode : 'AUTOMATIC';
 
-    // Number fields (DOM id → storage key)
     var numberFields = {
         minScore: 'minScore',
         perMinute: 'maxPerMinute',
@@ -999,7 +973,6 @@ function getConfig() {
         if (el) c[numberFields[domId]] = safeInt(el.value, DEFAULT_CONFIG[numberFields[domId]]);
     });
 
-    // Checkboxes
     ['autoScroll', 'autoReloadOnComplete', 'autoMinimize'].forEach(function(id) {
         var el = document.getElementById(id);
         if (el) c[id] = el.checked;
@@ -1012,7 +985,6 @@ function getConfig() {
 
     c.supabaseEnabled = supabaseEnabled;
 
-    // Scoring weights
     c.scoreWeights = {
         base: safeInt(document.getElementById('wBase').value, 50),
         perProductKeyword: safeInt(document.getElementById('wPerProductKeyword').value, 10),
@@ -1062,16 +1034,15 @@ function saveAll() {
     var c = getConfig();
     var kw = getLocalKeywords();
     if (c.strictCountryMode && c.allowedCountries.length === 0) {
-        showToast('❌ Add at least one country before enabling strict mode', 'error');
+        showToast('Add at least one country before enabling strict mode', 'error');
         return;
     }
     c.keywords = kw;
     c.userSetMode = true;
     browserAPI.storage.local.set(c, function() {
-        // Single message with full config (bundle.js handles UPDATE_FULL_CONFIG)
         browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: c });
         browserAPI.runtime.sendMessage({ action: 'UPDATE_KEYWORDS', keywords: kw });
-        showToast('✅ All settings saved!', 'success');
+        showToast('All settings saved!', 'success');
     });
 }
 
@@ -1087,7 +1058,7 @@ function saveScoring() {
         strictCountryRejectUnknown: c.strictCountryRejectUnknown
     }, function() {
         browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: c });
-        showToast('✅ Scoring & country saved!', 'success');
+        showToast('Scoring & country saved!', 'success');
     });
 }
 
@@ -1104,7 +1075,7 @@ function resetScoring() {
     }, function() {
         loadConfig();
         browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: getConfig() });
-        showToast('✅ Reset', 'success');
+        showToast('Reset', 'success');
     });
 }
 
@@ -1112,7 +1083,7 @@ function saveLocalKeywords() {
     var k = getLocalKeywords();
     browserAPI.storage.local.set({ keywords: k }, function() {
         browserAPI.runtime.sendMessage({ action: 'UPDATE_KEYWORDS', keywords: k });
-        showToast('✅ Local keywords saved!', 'success');
+        showToast('Local keywords saved!', 'success');
     });
 }
 
@@ -1122,7 +1093,7 @@ function resetLocalKeywords() {
     browserAPI.storage.local.set({ keywords: e }, function() {
         loadKeywords();
         browserAPI.runtime.sendMessage({ action: 'UPDATE_KEYWORDS', keywords: e });
-        showToast('✅ Cleared', 'success');
+        showToast('Cleared', 'success');
     });
 }
 
@@ -1138,6 +1109,6 @@ function resetAllToDefaults() {
     browserAPI.storage.local.set(seed, function() {
         loadConfig();
         browserAPI.runtime.sendMessage({ action: 'UPDATE_FULL_CONFIG', config: seed });
-        showToast('✅ Reset to defaults', 'success');
+        showToast('Reset to defaults', 'success');
     });
 }
