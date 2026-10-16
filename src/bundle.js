@@ -149,32 +149,38 @@ console.log('🔗 https://keynlabs.vercel.app/');
     // LEAD ID GENERATOR
     // ============================================================
     function LeadIdGenerator() {}
-    LeadIdGenerator.prototype.generateFromElement = function(element) {
-        var dataId = element.getAttribute('data-lead-id');
-        if (dataId) return 'dm_' + dataId;
-        //var id = element.getAttribute('id');
-        //if (id && id.length > 3) return 'id_' + id;
-        var links = element.querySelectorAll('a[href]');
-        for (var i = 0; i < links.length; i++) {
-            var href = links[i].getAttribute('href') || '';
-            var match = href.match(/(?:buyerid|leadid|blid|queryid)[=\/](\d+)/i);
-            if (match) return 'lnk_' + match[1];
-        }
-        // Fall back to product + location hash
-        var productEl = element.querySelector('[class*="BuyLdC"] span.SLC_f18, span.SLC_f18');
-        var productText = productEl ? productEl.textContent.trim() : '';
-        var locEl = element.querySelector('[class*="BuyLdC_time_loc"] strong, [class*="BuyLdC_time_loc"]');
-        var locationText = locEl ? locEl.textContent.trim() : '';
-        var combined = productText + '|' + locationText;
-        if (combined.length < 5) return null;
-        var hash = 0;
-        for (var j = 0; j < combined.length; j++) {
-            var chr = combined.charCodeAt(j);
-            hash = ((hash << 5) - hash) + chr;
-            hash = hash & hash;
-        }
-        return 'hash_' + Math.abs(hash).toString(36);
-    };
+LeadIdGenerator.prototype.generateFromElement = function(element) {
+    var dataId = element.getAttribute('data-lead-id');
+    if (dataId) return 'dm_' + dataId;
+
+    var links = element.querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) {
+        var href = links[i].getAttribute('href') || '';
+        var match = href.match(/(?:buyerid|leadid|blid|queryid)[=\/](\d+)/i);
+        if (match) return 'lnk_' + match[1];
+    }
+
+    // Fall back to product + location hash
+    var productEl = element.querySelector('.BLbp_title')
+                 || element.querySelector('[class*="BuyLdC"] span.SLC_f18')
+                 || element.querySelector('span.SLC_f18');
+    var productText = productEl ? productEl.textContent.trim() : '';
+
+    var locEl = element.querySelector('.BLbp_hdrLeft strong.BuyLdC_tltpw')
+             || element.querySelector('[class*="BuyLdC_time_loc"] strong');
+    var locationText = locEl ? locEl.textContent.trim() : '';
+
+    var combined = productText + '|' + locationText;
+    if (combined.length < 5) return null;
+
+    var hash = 0;
+    for (var j = 0; j < combined.length; j++) {
+        var chr = combined.charCodeAt(j);
+        hash = ((hash << 5) - hash) + chr;
+        hash = hash & hash;
+    }
+    return 'hash_' + Math.abs(hash).toString(36);
+};
 
     // ============================================================
     // PAGE NAVIGATOR (SPEED-TUNED)
@@ -1221,7 +1227,11 @@ SafetyController.prototype.getStatus = function() {
         if (this._scanning || !this._running) return;
         this._scanning = true;
         try {
-            var cards = document.querySelectorAll('[class*="BuyLdC_cont"]');
+            var MAX_CARDS = 7;
+var cards = document.querySelectorAll('[class*="BuyLdC_cont"]');
+if (cards.length > MAX_CARDS) {
+    cards = Array.prototype.slice.call(cards, 0, MAX_CARDS);
+}
             var currentIds = {};
             var newCards = [];
             var idGen = this._idGen;
@@ -1293,8 +1303,8 @@ SafetyController.prototype.getStatus = function() {
             for (var i = 0; i < items.length; i++) {
                 var label = items[i].querySelector('span.SLC_c0');
                 if (!label) continue;
-                var labelText = (label.textContent || '').trim().toLowerCase();
-                if (labelText === 'quantity' || labelText === 'qty') {
+var labelText = (label.textContent || '').trim().toLowerCase();
+if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer filled details') {
                     var strong = items[i].querySelector('strong');
                     if (strong) {
                         var parsed = parseQuantityString(strong.textContent);
@@ -1318,10 +1328,11 @@ SafetyController.prototype.getStatus = function() {
     Parser.prototype.parseCard = function(el, leadId) {
         try {
             // --- PRODUCT NAME (title only) ---
-            var productEl = el.querySelector('[class*="BuyLdC"] span.SLC_f18, span.SLC_f18');
+           var productEl = el.querySelector('.BLbp_title')
+             || el.querySelector('[class*="BuyLdC"] span.SLC_f18');
             if (!productEl) {
-                productEl = el.querySelector('[class*="BuyLdC"] .SLC_f18');
-            }
+            productEl = el.querySelector('[class*="BuyLdC"] .SLC_f18');
+           }
             var productName = productEl ? productEl.textContent.trim() : '';
             if (!productName || productName.length < 2) {
                 this.logger.debug('Card skipped — no product name', { leadId: leadId });
@@ -1337,7 +1348,9 @@ SafetyController.prototype.getStatus = function() {
                                  // --- LOCATION ---
             // India card has TWO <strong> for city/state, PLUS one <strong> for time ("11 hrs ago").
             // Location strongs have a tooltip span (.BuyLdC_tltp); time strong does NOT.
-            var locEls = el.querySelectorAll('[class*="BuyLdC_time_loc"] strong');
+            var locEls = el.querySelectorAll('.BLbp_hdrLeft strong.BuyLdC_tltpw')
+                     .length ? el.querySelectorAll('.BLbp_hdrLeft strong.BuyLdC_tltpw')
+                             : el.querySelectorAll('[class*="BuyLdC_time_loc"] strong');
             var locParts = [];
             for (var li = 0; li < locEls.length; li++) {
                 // Skip time strong — it has no tooltip span
@@ -1352,11 +1365,12 @@ SafetyController.prototype.getStatus = function() {
 
             // 1) flag alt attribute
             try {
-                var flagImg = el.querySelector('img[src*="country-flags"], img[src*="flag"]');
-                if (flagImg && flagImg.alt) {
-                    var alt = flagImg.alt.trim().toUpperCase();
-                    if (/^[A-Z]{2}$/.test(alt)) countryIso = alt;
-                }
+                var flagImg = el.querySelector('img[src*="country-flags"]')
+           || el.querySelector('img[src*="flag"]');
+if (flagImg && flagImg.alt) {
+    var alt = flagImg.alt.trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(alt)) countryIso = alt;
+}
                 // 2) fallback: parse ISO from flag image src (e.g. .../in_flag_s.png → IN)
                 if (!countryIso && flagImg && flagImg.src) {
                     var srcMatch = flagImg.src.match(/\/([a-z]{2})_flag[_s]*\.png/i);
@@ -1391,22 +1405,44 @@ SafetyController.prototype.getStatus = function() {
 
             // --- CONTACT AVAILABILITY ---
             var contact = { mobile: null, email: null, phone: null };
-            var availSec = el.querySelector('[class*="Available"], [class*="SLC_aifs"]');
-            if (availSec) {
-                var at = availSec.textContent.toLowerCase();
-                if (at.indexOf('mobile') !== -1 || at.indexOf('call') !== -1) contact.mobile = 'available';
-                if (at.indexOf('email') !== -1) contact.email = 'available';
-                if (at.indexOf('whatsapp') !== -1) contact.phone = 'available';
-            }
+            // New UI: chips in .BLbp_chips
+var chips = el.querySelectorAll('.BLbp_chip');
+if (chips.length > 0) {
+    for (var ci = 0; ci < chips.length; ci++) {
+        var chipText = (chips[ci].textContent || '').toLowerCase();
+        if (chipText.indexOf('phone') !== -1 || chipText.indexOf('mobile') !== -1) contact.mobile = 'available';
+        if (chipText.indexOf('email') !== -1) contact.email = 'available';
+        if (chipText.indexOf('whatsapp') !== -1) contact.phone = 'available';
+    }
+}
+// Fallback: old UI
+if (!contact.mobile && !contact.email && !contact.phone) {
+    var availSec = el.querySelector('[class*="Available"], [class*="SLC_aifs"]');
+    if (availSec) {
+        var at = availSec.textContent.toLowerCase();
+        if (at.indexOf('mobile') !== -1 || at.indexOf('call') !== -1) contact.mobile = 'available';
+        if (at.indexOf('email') !== -1) contact.email = 'available';
+        if (at.indexOf('whatsapp') !== -1) contact.phone = 'available';
+    }
+}
 
             // --- MESSAGE TEXT (buyer's requirement only — NOT title) ---
             var messageText = '';
-            var msgEl = el.querySelector('[class*="BuyLdC_msg"], [class*="SLC_f14"], [class*="SLC_f13"]');
-            if (msgEl) messageText = msgEl.textContent.trim();
+var msgEl = el.querySelector('.BLbp_desc')
+         || el.querySelector('[class*="BuyLdC_msg"]');
+if (msgEl) {
+    var emEl = msgEl.querySelector('em');
+    messageText = (emEl ? emEl.textContent : msgEl.textContent).trim();
+    // Strip "Buyer Searched for " prefix if present
+    messageText = messageText.replace(/^buyer\s+searched\s+for\s+/i, '').trim();
+}
 
             // --- CATEGORY (informational, never matched against) ---
-            var mcatEl = el.querySelector('[class*="BuyLdC_mcat"], [class*="mcat"]');
-            var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
+           var mcatEl = el.querySelector('[class*="BuyLdC_Mcat"]')
+          || el.querySelector('[class*="BuyLdC_mcat"]')
+          || el.querySelector('[class*="mcat"]')
+          || el.querySelector('[class*="Mcat"]');
+var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
             // Optional contact detail extraction (mobile numbers, emails)
             var senderMobile = null, senderEmail = null;
