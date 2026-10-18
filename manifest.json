@@ -14,13 +14,16 @@
   ],
   "host_permissions": [
     "https://seller.indiamart.com/*",
+    "https://app.indiamart.com/*",
     "https://zvhuromubukylsxrsfiz.supabase.co/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "https://seller.indiamart.com/bltxn/*",
-        "https://seller.indiamart.com/bltxn"
+        "https://seller.indiamart.com/bltxn",
+        "https://app.indiamart.com/buyleads*",
+        "https://app.indiamart.com/buyleads"
       ],
       "js": [
         "src/supabase-service.js",
@@ -59,7 +62,8 @@
         "debug/debug.js"
       ],
       "matches": [
-        "https://seller.indiamart.com/*"
+        "https://seller.indiamart.com/*",
+        "https://app.indiamart.com/*"
       ]
     }
   ],
@@ -69,7 +73,8 @@
   "incognito": "not_allowed",
   "externally_connectable": {
     "matches": [
-      "https://seller.indiamart.com/*"
+      "https://seller.indiamart.com/*",
+      "https://app.indiamart.com/*"
     ]
   },
   "declarative_net_request": {

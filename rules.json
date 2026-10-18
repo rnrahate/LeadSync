@@ -8,7 +8,8 @@
     "condition": {
       "urlFilter": "||google-analytics.com",
       "initiatorDomains": [
-        "seller.indiamart.com"
+        "seller.indiamart.com",
+        "app.indiamart.com"
       ],
       "resourceTypes": [
         "script",
@@ -26,7 +27,8 @@
     "condition": {
       "urlFilter": "||googletagmanager.com",
       "initiatorDomains": [
-        "seller.indiamart.com"
+        "seller.indiamart.com",
+        "app.indiamart.com"
       ],
       "resourceTypes": [
         "script",
@@ -43,7 +45,8 @@
     "condition": {
       "urlFilter": "||doubleclick.net",
       "initiatorDomains": [
-        "seller.indiamart.com"
+        "seller.indiamart.com",
+        "app.indiamart.com"
       ],
       "resourceTypes": [
         "script",
@@ -60,7 +63,8 @@
     "condition": {
       "urlFilter": "||clarity.ms",
       "initiatorDomains": [
-        "seller.indiamart.com"
+        "seller.indiamart.com",
+        "app.indiamart.com"
       ],
       "resourceTypes": [
         "script",

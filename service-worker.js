@@ -66,7 +66,6 @@ var DEFAULT_CONFIG = {
     maxReloadsPerSession: 999999,
     autoReloadOnComplete: false,
     autoReloadDelayMs: 100,
-    liveScanWaitMs: 30000,
 
     // Popup (speed-tuned)
     autoMinimize: true,

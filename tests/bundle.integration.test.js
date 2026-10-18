@@ -538,8 +538,182 @@ setTimeout(() => {
             orch.actionAdapter.acquire = originalAcquire;
             console.log('  ✅ PASS: Account limitation (INSUFFICIENT_BALANCE) notification and BLOCKED state verified');
 
-            console.log('\n=== ALL BUNDLE INTEGRATION TESTS PASSED ===\n');
-            process.exit(0);
+            // 16. Test Issue 1: Scan-Cycle Counter Reset & Distinct Lead Counting
+            const scannedStatEl = global.document.getElementById('bl-stat-scanned');
+            orch.startNewCycle('test-cycle-1');
+            assert.strictEqual(orch.stats.cycleScanned, 0, 'Cycle scanned counter must start at 0');
+            assert.strictEqual(scannedStatEl.textContent, '0', 'BL panel Scanned must display 0');
+
+            // Simulate 5 distinct leads scanned in cycle 1
+            orch._onCardsDetected([
+                { id: 'lead_c1', element: new MockElement('div') },
+                { id: 'lead_c2', element: new MockElement('div') },
+                { id: 'lead_c3', element: new MockElement('div') },
+                { id: 'lead_c4', element: new MockElement('div') },
+                { id: 'lead_c5', element: new MockElement('div') }
+            ]);
+            assert.strictEqual(orch.stats.cycleScanned, 5, 'Must report exactly 5 distinct leads scanned in cycle 1');
+            assert.strictEqual(scannedStatEl.textContent, '5', 'BL panel Scanned must display 5');
+
+            // Duplicate observer callbacks / rerenders in cycle 1 must NOT increment counter
+            orch._onCardsDetected([
+                { id: 'lead_c1', element: new MockElement('div') },
+                { id: 'lead_c3', element: new MockElement('div') }
+            ]);
+            assert.strictEqual(orch.stats.cycleScanned, 5, 'Duplicate callbacks in same cycle must NOT increment count');
+            assert.strictEqual(scannedStatEl.textContent, '5', 'BL panel Scanned remains 5');
+
+            // Start a genuinely new cycle -> Counter must reset to 0
+            orch.startNewCycle('test-cycle-2');
+            assert.strictEqual(orch.stats.cycleScanned, 0, 'New cycle must reset Scanned counter to 0');
+            assert.strictEqual(scannedStatEl.textContent, '0', 'BL panel Scanned must display 0 at start of new cycle');
+
+            // Scan 3 distinct leads in cycle 2 -> Must display 3, NOT 8!
+            orch._onCardsDetected([
+                { id: 'lead_c6', element: new MockElement('div') },
+                { id: 'lead_c7', element: new MockElement('div') },
+                { id: 'lead_c8', element: new MockElement('div') }
+            ]);
+            assert.strictEqual(orch.stats.cycleScanned, 3, 'Cycle 2 must report 3 distinct leads, never carry over previous cycle');
+            assert.strictEqual(scannedStatEl.textContent, '3', 'BL panel Scanned must display 3, not 8');
+            console.log('  ✅ PASS: Issue 1 verified: Scanned counter resets to 0 for each new cycle (5 -> 0 -> 3, not 8)');
+
+            // 17. Test Issue 2: Scanner IDLE State with 0 Eligible Filters & Explicit Pause
+            // Clear all active filters to reach 0 eligible filters
+            orch.keywordManager._activeFilters = [];
+            assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 0, 'Should have 0 eligible filters');
+            orch._updateScannerLifecycleState('test_zero_filters');
+
+            assert.strictEqual(orch._scannerState, 'IDLE', 'Scanner state must be IDLE when 0 eligible filters exist');
+            assert.strictEqual(orch.scanner._running, false, 'Observer must be disconnected in IDLE state');
+            assert.strictEqual(orch.navigator._running, false, 'Navigator must be stopped in IDLE state');
+
+            // Scanner _scan must return early in IDLE state
+            const scanResult = orch.scanner._scan();
+            assert.strictEqual(scanResult, false, '_scan() must do nothing and return false when in IDLE state');
+
+            // Add an eligible filter -> Scanner should auto-transition from IDLE to SCANNING
+            orch.keywordManager._activeFilters.push({
+                id: 'f_active_new',
+                name: 'Paracetamol Active',
+                product_keywords: ['Paracetamol 650mg'],
+                target_lead_count: 2,
+                is_active: true
+            });
+            assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 1, 'Now 1 eligible filter');
+            orch._updateScannerLifecycleState('test_filter_added');
+
+            assert.strictEqual(orch._scannerState, 'SCANNING', 'Scanner must automatically resume to SCANNING when filter is added');
+            assert.strictEqual(orch.scanner._running, true, 'Observer must be active after resuming');
+
+            // Test User Explicit Pause: emergencyStop must NOT be overridden by adding filters
+            orch.emergencyStop();
+            assert.strictEqual(orch._isPaused, true, 'Scanner must be paused by user');
+            assert.strictEqual(orch._scannerState, 'PAUSED', 'Scanner state must be PAUSED');
+            assert.strictEqual(orch.scanner._running, false, 'Observer must be stopped while paused');
+
+            // Adding another filter while paused must NOT resume scanner
+            orch.keywordManager._activeFilters.push({
+                id: 'f_active_2',
+                name: 'Aspirin Active',
+                product_keywords: ['Aspirin 100mg'],
+                target_lead_count: 2,
+                is_active: true
+            });
+            orch._updateScannerLifecycleState('test_filter_added_while_paused');
+            assert.strictEqual(orch._isPaused, true, 'Must remain paused');
+            assert.strictEqual(orch._scannerState, 'PAUSED', 'State must remain PAUSED');
+            assert.strictEqual(orch.scanner._running, false, 'Observer must remain stopped while paused');
+
+            // Resume by user
+            orch.resume();
+            assert.strictEqual(orch._isPaused, false, 'User resume clears pause flag');
+            assert.strictEqual(orch._scannerState, 'SCANNING', 'Scanner transitions to SCANNING upon user resume');
+            assert.strictEqual(orch.scanner._running, true, 'Observer is reconnected upon user resume');
+
+            // In-flight safety check: if filter becomes ineligible while in-flight, _processLead aborts
+            const obsoleteLead = {
+                leadId: 'lead-obsolete-test',
+                filterId: 'f_obsolete',
+                productName: 'Obsolete Product'
+            };
+            // Note f_obsolete is NOT in _activeFilters, so isFilterEligible('f_obsolete') is false
+            let acquireCalledForObsolete = false;
+            orch.actionAdapter.acquire = () => {
+                acquireCalledForObsolete = true;
+                return Promise.resolve({ success: true });
+            };
+            orch._processLead(obsoleteLead).then(() => {
+                assert.strictEqual(acquireCalledForObsolete, false, 'Acquisition must not be attempted for ineligible filter');
+                assert.strictEqual(orch.stateMachine.getState('lead-obsolete-test'), 'FILTERED_OUT', 'Lead must be FILTERED_OUT');
+                console.log('  ✅ PASS: Issue 2 verified: Scanner IDLE with 0 filters, auto-resume on eligible filter, user PAUSE respected, in-flight safety enforced');
+
+                // 18. Test Issue 3: Filter Type Compatibility in KeywordManager
+                // 18.1 Match Mode 'all' (AND) multi-keyword filter
+                orch.keywordManager._activeFilters = [{
+                    id: 'f_multi_all',
+                    name: 'Voltfast Multi',
+                    product_keywords: ['Voltfast', '50mg Powder'],
+                    match_mode: 'all',
+                    target_lead_count: 2,
+                    is_active: true
+                }];
+                const partialMatch = orch.keywordManager.evaluateFilters({
+                    productName: 'Voltfast Sachets'
+                });
+                assert.strictEqual(partialMatch.passed, false, 'Match mode "all" must reject lead missing one required keyword');
+
+                const fullMatch = orch.keywordManager.evaluateFilters({
+                    productName: 'Voltfast 50mg Powder Sachets'
+                });
+                assert.strictEqual(fullMatch.passed, true, 'Match mode "all" must accept lead with all required keywords');
+
+                // 18.2 Foreign country matching with ISO code resolution
+                orch.keywordManager._activeFilters = [{
+                    id: 'f_foreign_country',
+                    name: 'Bangladesh Lead Filter',
+                    product_keywords: ['Surgical Gloves'],
+                    filter_config: {
+                        locations: ['BANGLADESH']
+                    },
+                    target_lead_count: 2,
+                    is_active: true
+                }];
+                const bdLeadMatch = orch.keywordManager.evaluateFilters({
+                    productName: 'Surgical Gloves Latex',
+                    countryIso: 'BD'
+                });
+                assert.strictEqual(bdLeadMatch.passed, true, 'Lead with countryIso "BD" must match filter configured with "BANGLADESH"');
+
+                // 18.3 Strict Contact Channels (AND logic)
+                orch.keywordManager._activeFilters = [{
+                    id: 'f_strict_contact',
+                    name: 'Strict Contact Filter',
+                    product_keywords: ['Thermometer'],
+                    filter_config: {
+                        require_mobile: true,
+                        require_email: true
+                    },
+                    target_lead_count: 2,
+                    is_active: true
+                }];
+                const mobileOnlyLead = orch.keywordManager.evaluateFilters({
+                    productName: 'Digital Thermometer',
+                    senderMobile: '9123456789'
+                });
+                assert.strictEqual(mobileOnlyLead.passed, false, 'Lead missing required email must be rejected when both mobile and email are required');
+
+                const bothContactsLead = orch.keywordManager.evaluateFilters({
+                    productName: 'Digital Thermometer',
+                    senderMobile: '9123456789',
+                    senderEmail: 'buyer@test.com'
+                });
+                assert.strictEqual(bothContactsLead.passed, true, 'Lead satisfying both required contact channels must be accepted');
+                console.log('  ✅ PASS: Issue 3 verified: Match Mode "all", Foreign Country ISO mapping, and strict contact channels');
+
+                console.log('\n=== ALL BUNDLE INTEGRATION TESTS PASSED ===\n');
+                process.exit(0);
+            });
         });
     } catch (err) {
         console.error('Assertion error:', err);

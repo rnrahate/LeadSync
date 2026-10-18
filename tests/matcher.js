@@ -106,6 +106,72 @@ function wordBoundaryMatch(haystackNorm, needleNorm) {
     }
 }
 
+var COUNTRY_CODE_MAP = {
+    'IN': ['india'],
+    'US': ['usa', 'united states', 'united states of america', 'america'],
+    'GB': ['uk', 'united kingdom', 'great britain', 'england', 'britain', 'gb'],
+    'UK': ['uk', 'united kingdom', 'great britain', 'england', 'britain', 'gb'],
+    'AE': ['uae', 'united arab emirates', 'dubai', 'sharjah', 'abu dhabi'],
+    'BD': ['bangladesh'],
+    'CA': ['canada'],
+    'DE': ['germany', 'deutschland'],
+    'FR': ['france'],
+    'AU': ['australia'],
+    'JP': ['japan'],
+    'CN': ['china'],
+    'RU': ['russia'],
+    'SA': ['saudi arabia', 'saudi'],
+    'SG': ['singapore'],
+    'MY': ['malaysia'],
+    'NP': ['nepal'],
+    'LK': ['sri lanka'],
+    'PK': ['pakistan'],
+    'ID': ['indonesia'],
+    'TH': ['thailand'],
+    'VN': ['vietnam'],
+    'PH': ['philippines'],
+    'TR': ['turkey'],
+    'EG': ['egypt'],
+    'IT': ['italy'],
+    'ES': ['spain'],
+    'NL': ['netherlands', 'holland'],
+    'CH': ['switzerland'],
+    'ZA': ['south africa'],
+    'NZ': ['new zealand'],
+    'BR': ['brazil'],
+    'MX': ['mexico'],
+    'KR': ['south korea', 'korea'],
+    'KW': ['kuwait'],
+    'QA': ['qatar'],
+    'OM': ['oman'],
+    'BH': ['bahrain'],
+    'SE': ['sweden'],
+    'PL': ['poland'],
+    'NO': ['norway'],
+    'DK': ['denmark'],
+    'FI': ['finland'],
+    'IE': ['ireland'],
+    'BE': ['belgium'],
+    'AT': ['austria'],
+    'PT': ['portugal'],
+    'IL': ['israel']
+};
+
+var COUNTRY_NAME_TO_ISO = {};
+for (var isoCode in COUNTRY_CODE_MAP) {
+    var cNames = COUNTRY_CODE_MAP[isoCode];
+    for (var cn = 0; cn < cNames.length; cn++) {
+        COUNTRY_NAME_TO_ISO[cNames[cn]] = (isoCode === 'UK' ? 'GB' : isoCode);
+    }
+}
+COUNTRY_NAME_TO_ISO['bangladesh'] = 'BD';
+COUNTRY_NAME_TO_ISO['bd'] = 'BD';
+COUNTRY_NAME_TO_ISO['canada'] = 'CA';
+COUNTRY_NAME_TO_ISO['ca'] = 'CA';
+COUNTRY_NAME_TO_ISO['uk'] = 'GB';
+COUNTRY_NAME_TO_ISO['united kingdom'] = 'GB';
+COUNTRY_NAME_TO_ISO['gb'] = 'GB';
+
 function LeadMatcher() {
     this.minConfidenceScore = 60;
 }
@@ -117,7 +183,7 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
     var leadAttrs = extractAttributes(normProd);
 
     // 1. Negative keywords rejection
-    var negKws = filter.negativeKeywords || filter.negative_keywords || [];
+    var negKws = filter.negativeKeywords || filter.negative_keywords || (filter.filter_config && filter.filter_config.negative_keywords) || [];
     for (var i = 0; i < negKws.length; i++) {
         var negNorm = normalizeText(negKws[i]);
         if (negNorm && wordBoundaryMatch(normProd, negNorm)) {
@@ -129,11 +195,36 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
         }
     }
 
-    // 2. Check each product keyword / filter requirement for attribute conflicts
-    var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
-    var hasAnyAttrConflictAcrossAll = false;
-    var matchedAtLeastOneCompatibleSpec = false;
+    // 1.1 Required keywords check
+    var reqKws = filter.requiredKeywords || filter.required_keywords || (filter.filter_config && filter.filter_config.required_keywords) || [];
+    for (var rk = 0; rk < reqKws.length; rk++) {
+        var reqNorm = normalizeText(reqKws[rk]);
+        if (reqNorm && !wordBoundaryMatch(normProd, reqNorm)) {
+            return {
+                eligible: false,
+                reason: 'missing_required_keyword',
+                detail: 'Missing required keyword: ' + reqKws[rk]
+            };
+        }
+    }
 
+    // 1.2 Match Mode 'all' (AND) constraint
+    var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
+    var matchMode = filter.matchMode || (filter.filter_config && filter.filter_config.match_mode) || filter.match_mode || 'any';
+    if (matchMode === 'all' && prodKws.length > 1) {
+        for (var m = 0; m < prodKws.length; m++) {
+            var singleKwNorm = normalizeText(prodKws[m]);
+            if (singleKwNorm && !wordBoundaryMatch(normProd, singleKwNorm)) {
+                return {
+                    eligible: false,
+                    reason: 'missing_mandatory_keyword',
+                    detail: 'Match mode "all" requires: ' + prodKws[m]
+                };
+            }
+        }
+    }
+
+    // 2. Check each product keyword / filter requirement for attribute conflicts
     for (var j = 0; j < prodKws.length; j++) {
         var kwNorm = normalizeText(prodKws[j]);
         var kwAttrs = extractAttributes(kwNorm);
@@ -196,7 +287,16 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
     if (allowedCountries.length > 0 && lead.countryIso) {
         var cIso = lead.countryIso.toUpperCase().trim();
         for (var rc = 0; rc < allowedCountries.length; rc++) {
-            if (allowedCountries[rc].toUpperCase() === cIso) {
+            var rEntry = allowedCountries[rc];
+            var rIso = COUNTRY_NAME_TO_ISO[rEntry.toLowerCase()] || (rEntry.length === 2 ? rEntry.toUpperCase() : null);
+            if (rIso && rIso === cIso) {
+                return {
+                    eligible: false,
+                    reason: 'country_restricted',
+                    detail: 'Country ' + cIso + ' is restricted for this filter'
+                };
+            }
+            if (COUNTRY_CODE_MAP[cIso] && COUNTRY_CODE_MAP[cIso].indexOf(rEntry.toLowerCase()) !== -1) {
                 return {
                     eligible: false,
                     reason: 'country_restricted',
@@ -206,20 +306,35 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
         }
     }
 
-    // 4. Contact requirements
+    // 4. Contact requirements (ALL specified channels must be present)
     var reqMobile = filter.requireMobile || (filter.filter_config && filter.filter_config.require_mobile);
     var reqWhatsapp = filter.requireWhatsapp || (filter.filter_config && filter.filter_config.require_whatsapp);
     var reqEmail = filter.requireEmail || (filter.filter_config && filter.filter_config.require_email);
     if (reqMobile || reqWhatsapp || reqEmail) {
         var contact = lead.contact || {};
-        var hasContact = (reqMobile && (contact.mobile || lead.senderMobile)) ||
-                         (reqWhatsapp && (contact.phone || lead.senderMobile)) ||
-                         (reqEmail && (contact.email || lead.senderEmail));
-        if (!hasContact) {
+        var hasMobile = !!(contact.mobile || lead.senderMobile || lead.hasMobileVerified);
+        var hasWhatsapp = !!(contact.phone || lead.senderMobile || lead.hasWhatsapp);
+        var hasEmail = !!(contact.email || lead.senderEmail || lead.hasEmailVerified);
+
+        if (reqMobile && !hasMobile) {
             return {
                 eligible: false,
                 reason: 'missing_contact_info',
-                detail: 'Lead does not satisfy required contact channels'
+                detail: 'Lead does not satisfy required mobile contact channel'
+            };
+        }
+        if (reqWhatsapp && !hasWhatsapp) {
+            return {
+                eligible: false,
+                reason: 'missing_contact_info',
+                detail: 'Lead does not satisfy required whatsapp contact channel'
+            };
+        }
+        if (reqEmail && !hasEmail) {
+            return {
+                eligible: false,
+                reason: 'missing_contact_info',
+                detail: 'Lead does not satisfy required email contact channel'
             };
         }
     }
@@ -266,10 +381,14 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
         var score = 0;
         var reasons = [];
 
-        // Factor 1: Exact phrase match in lead product name (+30 points)
+        // Factor 1: Exact phrase match in lead product name (+35 points, +15 bonus for full exact match)
         if (normLead.indexOf(normKw) !== -1) {
-            score += 30;
-            reasons.push('exact_phrase_match (+30)');
+            score += 35;
+            reasons.push('exact_phrase_match (+35)');
+            if (normLead === normKw) {
+                score += 15;
+                reasons.push('full_exact_match (+15)');
+            }
         }
 
         // Factor 2: Query term coverage (+25 points max proportional to matched tokens)
@@ -299,6 +418,15 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
         if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf === leadAttrs.spf) {
             score += 15;
             reasons.push('spf_agreement (+15)');
+        }
+        if (kwAttrs.strengths.length > 0 && leadAttrs.strengths.length > 0) {
+            for (var st = 0; st < kwAttrs.strengths.length; st++) {
+                if (leadAttrs.strengths.indexOf(kwAttrs.strengths[st]) !== -1) {
+                    score += 15;
+                    reasons.push('strength_agreement (+15)');
+                    break;
+                }
+            }
         }
         if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
             for (var s = 0; s < kwAttrs.sizes.length; s++) {

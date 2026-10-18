@@ -74,9 +74,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         loadMoreWaitMs: 900,
         maxStuckLoops: 3,
         maxReloadsPerSession: 999999,
-        autoReloadOnComplete: true,
+        autoReloadOnComplete: false,
         autoReloadDelayMs: 100,
-        liveScanWaitMs: 2000,
 
         // ---- POPUP (v6.2 speed) ----
         autoMinimize: true,
@@ -235,8 +234,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._settings = {
             scrollSpeed: 900, scrollDelayMs: 40, bottomWaitMs: 500,
             loopIntervalMs: 250, loadMoreWaitMs: 900, maxStuckLoops: 3,
-            autoReloadOnComplete: true, autoReloadDelayMs: 100, maxReloadsPerSession: 999999,
-            liveScanWaitMs: 2000
+            autoReloadOnComplete: false, autoReloadDelayMs: 100, maxReloadsPerSession: 999999
         };
         this.RELOAD_STORAGE_KEY = 'bl_auto_reload_count';
     }
@@ -251,6 +249,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (config.autoReloadOnComplete !== undefined) this._settings.autoReloadOnComplete = config.autoReloadOnComplete;
         if (config.autoReloadDelayMs)    this._settings.autoReloadDelayMs = config.autoReloadDelayMs;
         if (config.maxReloadsPerSession) this._settings.maxReloadsPerSession = config.maxReloadsPerSession;
+        // liveScanWaitMs is obsolete: event-driven detection replaced the 2s full-rescan loop.
+        if (config.liveScanWaitMs !== undefined) {
+            try { if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) chrome.storage.local.remove('liveScanWaitMs'); } catch (e) {}
+        }
     };
 
     PageNavigator.prototype.start = function() {
@@ -301,6 +303,11 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         filterPromise.then(function() {
             if (!self._running) { self._loopInProgress = false; return; }
 
+            // Ensure a new scan cycle is started for this pass
+            if (self.orchestrator && self.orchestrator.startNewCycle) {
+                self.orchestrator.startNewCycle();
+            }
+
             // Ensure scanner resets per-pass cache so all unacquired leads in feed are evaluated
             if (self.orchestrator && self.orchestrator.scanner) {
                 self.orchestrator.scanner.resetEmitted();
@@ -313,18 +320,18 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 var reason = result && result.reason;
 
                 if (reason === 'age_limit_reached') {
-                    self.logger.info('⏳ Max lead age reached (' + (result.ageText || '') + '). Pausing 2s before rescanning top.');
+                    self.logger.info('⏳ Max lead age reached (' + (result.ageText || '') + '). Returning to top for live updates.');
                     if (self.orchestrator && self.orchestrator.showTopToast) {
-                        self.orchestrator.showTopToast('info', 'Max Age Reached', 'Hit older leads (' + (result.ageText || '') + '). Rescanning top in 2s...', 2000);
+                        self.orchestrator.showTopToast('info', 'Max Age Reached', 'Hit older leads (' + (result.ageText || '') + '). Returning to top...', 1500);
                     }
                 } else {
-                    self.logger.info('🏁 Reached end of active leads list. Pausing 2s before rescanning top.');
+                    self.logger.info('🏁 Reached end of active leads list. Returning to top for live updates.');
                     if (self.orchestrator && self.orchestrator.showTopToast) {
-                        self.orchestrator.showTopToast('info', 'End of Feed Reached', 'Scanned all available leads. Rescanning top in 2s...', 2000);
+                        self.orchestrator.showTopToast('info', 'End of Feed Reached', 'Scanned available leads. Returning to top...', 1500);
                     }
                 }
 
-                // Phase 2: Pause 2 seconds at bottom for real-time cooldown, then jump to top and rescan
+                // Phase 2: Brief cooldown at bottom, then return to top for real-time monitoring
                 self._cooldownTimer = setTimeout(function() {
                     if (!self._running) { self._loopInProgress = false; return; }
                     try {
@@ -349,7 +356,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                         // Continuous scanning: immediately schedule next loop till user pauses
                         self._scheduleNextLoop();
                     }, 200);
-                }, self._settings.liveScanWaitMs || 2000);
+                }, self._settings.bottomWaitMs || 500);
             });
         });
     };
@@ -905,8 +912,74 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     }
 
+    var COUNTRY_CODE_MAP = {
+        'IN': ['india'],
+        'US': ['usa', 'united states', 'united states of america', 'america'],
+        'GB': ['uk', 'united kingdom', 'great britain', 'england', 'britain', 'gb'],
+        'UK': ['uk', 'united kingdom', 'great britain', 'england', 'britain', 'gb'],
+        'AE': ['uae', 'united arab emirates', 'dubai', 'sharjah', 'abu dhabi'],
+        'BD': ['bangladesh'],
+        'CA': ['canada'],
+        'DE': ['germany', 'deutschland'],
+        'FR': ['france'],
+        'AU': ['australia'],
+        'JP': ['japan'],
+        'CN': ['china'],
+        'RU': ['russia'],
+        'SA': ['saudi arabia', 'saudi'],
+        'SG': ['singapore'],
+        'MY': ['malaysia'],
+        'NP': ['nepal'],
+        'LK': ['sri lanka'],
+        'PK': ['pakistan'],
+        'ID': ['indonesia'],
+        'TH': ['thailand'],
+        'VN': ['vietnam'],
+        'PH': ['philippines'],
+        'TR': ['turkey'],
+        'EG': ['egypt'],
+        'IT': ['italy'],
+        'ES': ['spain'],
+        'NL': ['netherlands', 'holland'],
+        'CH': ['switzerland'],
+        'ZA': ['south africa'],
+        'NZ': ['new zealand'],
+        'BR': ['brazil'],
+        'MX': ['mexico'],
+        'KR': ['south korea', 'korea'],
+        'KW': ['kuwait'],
+        'QA': ['qatar'],
+        'OM': ['oman'],
+        'BH': ['bahrain'],
+        'SE': ['sweden'],
+        'PL': ['poland'],
+        'NO': ['norway'],
+        'DK': ['denmark'],
+        'FI': ['finland'],
+        'IE': ['ireland'],
+        'BE': ['belgium'],
+        'AT': ['austria'],
+        'PT': ['portugal'],
+        'IL': ['israel']
+    };
+
+    var COUNTRY_NAME_TO_ISO = {};
+    for (var isoCode in COUNTRY_CODE_MAP) {
+        var cNames = COUNTRY_CODE_MAP[isoCode];
+        for (var cn = 0; cn < cNames.length; cn++) {
+            COUNTRY_NAME_TO_ISO[cNames[cn]] = (isoCode === 'UK' ? 'GB' : isoCode);
+        }
+    }
+    COUNTRY_NAME_TO_ISO['bangladesh'] = 'BD';
+    COUNTRY_NAME_TO_ISO['bd'] = 'BD';
+    COUNTRY_NAME_TO_ISO['canada'] = 'CA';
+    COUNTRY_NAME_TO_ISO['ca'] = 'CA';
+    COUNTRY_NAME_TO_ISO['uk'] = 'GB';
+    COUNTRY_NAME_TO_ISO['united kingdom'] = 'GB';
+    COUNTRY_NAME_TO_ISO['gb'] = 'GB';
+
     function LeadMatcher() {
-        this.minConfidenceScore = 60;
+        this.minConfidenceScore = 50;
     }
 
     // Stage A: Hard Eligibility Constraints
@@ -916,7 +989,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         var leadAttrs = extractAttributes(normProd);
 
         // 1. Negative keywords rejection
-        var negKws = filter.negativeKeywords || filter.negative_keywords || [];
+        var negKws = filter.negativeKeywords || filter.negative_keywords || (filter.filter_config && filter.filter_config.negative_keywords) || [];
         for (var i = 0; i < negKws.length; i++) {
             var negNorm = normalizeText(negKws[i]);
             if (negNorm && wordBoundaryMatch(normProd, negNorm)) {
@@ -924,45 +997,89 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             }
         }
 
-        // 2. Hard attribute conflicts
+        // 1.1 Required keywords check
+        var reqKws = filter.requiredKeywords || filter.required_keywords || (filter.filter_config && filter.filter_config.required_keywords) || [];
+        for (var rk = 0; rk < reqKws.length; rk++) {
+            var reqNorm = normalizeText(reqKws[rk]);
+            if (reqNorm && !wordBoundaryMatch(normProd, reqNorm)) {
+                return { eligible: false, reason: 'missing_required_keyword', detail: 'Missing required keyword: ' + reqKws[rk] };
+            }
+        }
+
+        // 1.2 Match Mode 'all' (AND) constraint
         var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
-        for (var j = 0; j < prodKws.length; j++) {
-            var kwNorm = normalizeText(prodKws[j]);
-            var kwAttrs = extractAttributes(kwNorm);
-
-            // SPF conflict
-            if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf !== leadAttrs.spf) {
-                return { eligible: false, reason: 'attribute_conflict_spf', detail: 'Filter requires ' + kwAttrs.spf + ' but lead specifies ' + leadAttrs.spf };
-            }
-
-            // Size conflict
-            if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
-                var sizeConflict = true;
-                for (var s1 = 0; s1 < kwAttrs.sizes.length; s1++) {
-                    if (leadAttrs.sizes.indexOf(kwAttrs.sizes[s1]) !== -1) {
-                        sizeConflict = false;
-                        break;
-                    }
-                }
-                if (sizeConflict) {
-                    return { eligible: false, reason: 'attribute_conflict_size', detail: 'Filter requires ' + kwAttrs.sizes.join('/') + ' but lead specifies ' + leadAttrs.sizes.join('/') };
+        var matchMode = filter.matchMode || (filter.filter_config && filter.filter_config.match_mode) || filter.match_mode || 'any';
+        if (matchMode === 'all' && prodKws.length > 1) {
+            for (var m = 0; m < prodKws.length; m++) {
+                var singleKwNorm = normalizeText(prodKws[m]);
+                if (singleKwNorm && !wordBoundaryMatch(normProd, singleKwNorm)) {
+                    return { eligible: false, reason: 'missing_mandatory_keyword', detail: 'Match mode "all" requires: ' + prodKws[m] };
                 }
             }
+        }
 
-            // Form conflict (e.g. lotion vs gel)
+        // 2. Hard attribute conflicts
+        if (prodKws.length > 0) {
             var conflictingForms = [
                 ['gel', 'lotion'],
                 ['gel', 'cream'],
                 ['tablet', 'syrup'],
                 ['capsule', 'syrup']
             ];
-            for (var c = 0; c < conflictingForms.length; c++) {
-                var pair = conflictingForms[c];
-                if (kwAttrs.forms.indexOf(pair[0]) !== -1 && leadAttrs.forms.indexOf(pair[1]) !== -1) {
-                    return { eligible: false, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[0] + ' but lead specifies conflicting form ' + pair[1] };
+
+            function checkKwConflict(kwNorm) {
+                var kwAttrs = extractAttributes(kwNorm);
+                // SPF conflict
+                if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf !== leadAttrs.spf) {
+                    return { hasConflict: true, reason: 'attribute_conflict_spf', detail: 'Filter requires ' + kwAttrs.spf + ' but lead specifies ' + leadAttrs.spf };
                 }
-                if (kwAttrs.forms.indexOf(pair[1]) !== -1 && leadAttrs.forms.indexOf(pair[0]) !== -1) {
-                    return { eligible: false, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[1] + ' but lead specifies conflicting form ' + pair[0] };
+                // Size conflict
+                if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
+                    var sizeConflict = true;
+                    for (var s1 = 0; s1 < kwAttrs.sizes.length; s1++) {
+                        if (leadAttrs.sizes.indexOf(kwAttrs.sizes[s1]) !== -1) {
+                            sizeConflict = false;
+                            break;
+                        }
+                    }
+                    if (sizeConflict) {
+                        return { hasConflict: true, reason: 'attribute_conflict_size', detail: 'Filter requires ' + kwAttrs.sizes.join('/') + ' but lead specifies ' + leadAttrs.sizes.join('/') };
+                    }
+                }
+                // Form conflict
+                for (var c = 0; c < conflictingForms.length; c++) {
+                    var pair = conflictingForms[c];
+                    if (kwAttrs.forms.indexOf(pair[0]) !== -1 && leadAttrs.forms.indexOf(pair[1]) !== -1) {
+                        return { hasConflict: true, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[0] + ' but lead specifies conflicting form ' + pair[1] };
+                    }
+                    if (kwAttrs.forms.indexOf(pair[1]) !== -1 && leadAttrs.forms.indexOf(pair[0]) !== -1) {
+                        return { hasConflict: true, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[1] + ' but lead specifies conflicting form ' + pair[0] };
+                    }
+                }
+                return { hasConflict: false };
+            }
+
+            if (matchMode === 'all') {
+                for (var j = 0; j < prodKws.length; j++) {
+                    var conf = checkKwConflict(normalizeText(prodKws[j]));
+                    if (conf.hasConflict) {
+                        return { eligible: false, reason: conf.reason, detail: conf.detail };
+                    }
+                }
+            } else {
+                var hasCompatible = false;
+                var lastConf = null;
+                for (var k = 0; k < prodKws.length; k++) {
+                    var c = checkKwConflict(normalizeText(prodKws[k]));
+                    if (!c.hasConflict) {
+                        hasCompatible = true;
+                        break;
+                    } else {
+                        lastConf = c;
+                    }
+                }
+                if (!hasCompatible && lastConf) {
+                    return { eligible: false, reason: lastConf.reason, detail: lastConf.detail };
                 }
             }
         }
@@ -1006,10 +1123,14 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             var score = 0;
             var reasons = [];
 
-            // Factor 1: Exact phrase match (+30)
+            // Factor 1: Exact phrase match (+35 points, +15 bonus for full exact match)
             if (normLead.indexOf(normKw) !== -1) {
-                score += 30;
-                reasons.push('exact_phrase_match (+30)');
+                score += 35;
+                reasons.push('exact_phrase_match (+35)');
+                if (normLead === normKw) {
+                    score += 15;
+                    reasons.push('full_exact_match (+15)');
+                }
             }
 
             // Factor 2: Token coverage (+25 max)
@@ -1033,10 +1154,19 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
 
             if (coverage >= 0.7) totalKeywordsMatched++;
 
-            // Factor 3: Attribute agreement (+15 SPF, +15 size, +10 form)
+            // Factor 3: Attribute agreement (+15 SPF, +15 strength, +15 size, +10 form)
             if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf === leadAttrs.spf) {
                 score += 15;
                 reasons.push('spf_agreement (+15)');
+            }
+            if (kwAttrs.strengths && leadAttrs.strengths && kwAttrs.strengths.length > 0 && leadAttrs.strengths.length > 0) {
+                for (var st = 0; st < kwAttrs.strengths.length; st++) {
+                    if (leadAttrs.strengths.indexOf(kwAttrs.strengths[st]) !== -1) {
+                        score += 15;
+                        reasons.push('strength_agreement (+15)');
+                        break;
+                    }
+                }
             }
             if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
                 for (var s = 0; s < kwAttrs.sizes.length; s++) {
@@ -1161,25 +1291,54 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
 
     KeywordManager.prototype.getActiveFilterCount = function() {
         var self = this;
-        if (this._activeFilters && this._activeFilters.length > 0) {
+        if (this._supabaseEnabled) {
+            if (!this._activeFilters || this._activeFilters.length === 0) {
+                return 0;
+            }
             return this._activeFilters.filter(function(f) {
-                if (f.isActive === false) return false;
+                if (f.isActive === false || f.is_active === false || f.deleted_at || f.is_deleted) return false;
                 var buyers = self._filterCompletedBuyers.get(f.id);
                 var count = buyers ? buyers.size : 0;
                 var target = 2;
                 if (typeof f.targetQuantity === 'number' && f.targetQuantity > 0) {
                     target = Math.min(2, f.targetQuantity);
+                } else if (typeof f.target_lead_count === 'number' && f.target_lead_count > 0) {
+                    target = Math.min(2, f.target_lead_count);
+                } else if (f.filter_config && typeof f.filter_config.target_quantity === 'number' && f.filter_config.target_quantity > 0) {
+                    target = Math.min(2, f.filter_config.target_quantity);
                 }
                 return count < target;
             }).length;
-        }
-        if (this._supabaseKeywords && this._supabaseKeywords.product && this._supabaseKeywords.product.length > 0) {
-            return this._supabaseKeywords.product.length;
         }
         if (this._localKeywords && this._localKeywords.product && this._localKeywords.product.length > 0) {
             return this._localKeywords.product.length;
         }
         return 0;
+    };
+
+    KeywordManager.prototype.isFilterEligible = function(filterId) {
+        if (!filterId) return false;
+        var self = this;
+        if (this._activeFilters && this._activeFilters.length > 0) {
+            for (var i = 0; i < this._activeFilters.length; i++) {
+                var f = this._activeFilters[i];
+                if (String(f.id) === String(filterId)) {
+                    if (f.isActive === false || f.is_active === false || f.deleted_at || f.is_deleted) return false;
+                    var buyers = self._filterCompletedBuyers.get(f.id);
+                    var count = buyers ? buyers.size : 0;
+                    var target = 2;
+                    if (typeof f.targetQuantity === 'number' && f.targetQuantity > 0) {
+                        target = Math.min(2, f.targetQuantity);
+                    } else if (typeof f.target_lead_count === 'number' && f.target_lead_count > 0) {
+                        target = Math.min(2, f.target_lead_count);
+                    } else if (f.filter_config && typeof f.filter_config.target_quantity === 'number' && f.filter_config.target_quantity > 0) {
+                        target = Math.min(2, f.filter_config.target_quantity);
+                    }
+                    return count < target;
+                }
+            }
+        }
+        return false;
     };
 
     KeywordManager.prototype.reserveSlot = function(filterId, leadId) {
@@ -1208,6 +1367,9 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
         this.releaseReservation(filterId, lead ? (lead.leadId || lead.id) : null);
         this._persistCompletedBuyers();
+        if (this.orchestrator && typeof this.orchestrator._updateScannerLifecycleState === 'function') {
+            this.orchestrator._updateScannerLifecycleState('filter_completed');
+        }
     };
 
     KeywordManager.prototype._persistCompletedBuyers = function() {
@@ -1307,32 +1469,55 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
 
             var prodNames = [].concat(
                 Array.isArray(cfg.product_names) ? cfg.product_names : [],
-                Array.isArray(f.product_keywords) ? f.product_keywords : []
+                Array.isArray(cfg.product_keywords) ? cfg.product_keywords : [],
+                Array.isArray(cfg.keywords) ? cfg.keywords : [],
+                Array.isArray(f.product_keywords) ? f.product_keywords : [],
+                Array.isArray(f.keywords) ? f.keywords : []
             );
             var negNames = [].concat(
                 Array.isArray(cfg.negative_keywords) ? cfg.negative_keywords : [],
+                Array.isArray(cfg.excluded_keywords) ? cfg.excluded_keywords : [],
                 Array.isArray(f.negative_keywords) ? f.negative_keywords : []
             );
+            var reqNames = [].concat(
+                Array.isArray(cfg.required_keywords) ? cfg.required_keywords : [],
+                Array.isArray(cfg.must_have_keywords) ? cfg.must_have_keywords : [],
+                Array.isArray(f.required_keywords) ? f.required_keywords : []
+            );
+            var locNames = [].concat(
+                Array.isArray(cfg.countries) ? cfg.countries : [],
+                Array.isArray(cfg.states)    ? cfg.states    : [],
+                Array.isArray(cfg.cities)    ? cfg.cities    : [],
+                Array.isArray(cfg.locations) ? cfg.locations : [],
+                Array.isArray(cfg.sender_locations) ? cfg.sender_locations : [],
+                Array.isArray(f.location_keywords) ? f.location_keywords : [],
+                Array.isArray(f.sender_locations) ? f.sender_locations : []
+            );
+            var restCountries = [].concat(
+                Array.isArray(cfg.restricted_countries) ? cfg.restricted_countries : [],
+                Array.isArray(f.restricted_countries) ? f.restricted_countries : []
+            );
+
+            var normKeywords = uniqNorm(prodNames);
+            var isFilterValid = normKeywords.length > 0 || locNames.length > 0;
+            var isDeleted = !!f.deleted_at || f.is_deleted === true;
 
             rules.push({
                 id: f.id,
-                name: f.filter_name || ('filter_' + f.id),
-                keywords:         uniqNorm(prodNames),
-                matchMode:        cfg.match_mode === 'all' ? 'all' : 'any',
+                name: f.filter_name || f.name || ('filter_' + f.id),
+                keywords:         normKeywords,
+                matchMode:        (cfg.match_mode === 'all' || f.match_mode === 'all') ? 'all' : 'any',
                 negativeKeywords: uniqNorm(negNames),
-                locations: uniqNorm([].concat(
-                    Array.isArray(cfg.countries) ? cfg.countries : [],
-                    Array.isArray(cfg.states)    ? cfg.states    : [],
-                    Array.isArray(cfg.cities)    ? cfg.cities    : [],
-                    Array.isArray(f.location_keywords) ? f.location_keywords : []
-                )),
-                restrictedCountries: uniqNorm(cfg.restricted_countries),
-                requireMobile:   cfg.require_mobile   === true,
-                requireWhatsapp: cfg.require_whatsapp === true,
-                requireEmail:    cfg.require_email    === true,
-                quantityUnit:    typeof cfg.quantity_unit === 'string' ? cfg.quantity_unit.toLowerCase() : '',
-                minQuantity:     (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : 0,
-                isActive:        f.is_active !== false,
+                requiredKeywords: uniqNorm(reqNames),
+                locations:        uniqNorm(locNames),
+                restrictedCountries: uniqNorm(restCountries),
+                requireMobile:   cfg.require_mobile   === true || f.require_mobile === true,
+                requireWhatsapp: cfg.require_whatsapp === true || f.require_whatsapp === true,
+                requireEmail:    cfg.require_email    === true || f.require_email === true,
+                quantityUnit:    typeof (cfg.quantity_unit || f.quantity_unit) === 'string' ? (cfg.quantity_unit || f.quantity_unit).toLowerCase().trim() : '',
+                minQuantity:     (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : ((typeof f.min_quantity === 'number' && f.min_quantity > 0) ? f.min_quantity : 0),
+                targetQuantity:  (typeof cfg.target_quantity === 'number' && cfg.target_quantity > 0) ? cfg.target_quantity : ((typeof f.target_lead_count === 'number' && f.target_lead_count > 0) ? f.target_lead_count : ((typeof f.target_quantity === 'number' && f.target_quantity > 0) ? f.target_quantity : 2)),
+                isActive:        f.is_active !== false && !isDeleted && isFilterValid,
                 rawFilter:       f,
                 _indianStates:   INDIAN_STATES
             });
@@ -1425,9 +1610,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (lead.country) locParts.push(normalizeText(lead.country));
 
         function locationMatches(rule) {
-            if (!rule.locations || rule.locations.length === 0) return true;
-            for (var i = 0; i < rule.locations.length; i++) {
-                var entry = rule.locations[i];
+            var rawLocs = rule.locations || (rule.filter_config && (rule.filter_config.locations || rule.filter_config.countries || rule.filter_config.sender_locations)) || rule.sender_locations || [];
+            if (!rawLocs || rawLocs.length === 0) return true;
+            for (var i = 0; i < rawLocs.length; i++) {
+                var entry = String(rawLocs[i]).toLowerCase().trim();
                 if (entry === 'india' || entry === 'in') {
                     if (leadCountryIso === 'IN') return true;
                     for (var p = 0; p < locParts.length; p++) {
@@ -1435,6 +1621,15 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                     }
                     continue;
                 }
+
+                // ISO and Country Name matching
+                var entryIso = COUNTRY_NAME_TO_ISO[entry] || (entry.length === 2 ? entry.toUpperCase() : null);
+                if (entryIso && leadCountryIso && entryIso === leadCountryIso) return true;
+                if (leadCountryIso && COUNTRY_CODE_MAP[leadCountryIso]) {
+                    var cNames = COUNTRY_CODE_MAP[leadCountryIso];
+                    if (cNames.indexOf(entry) !== -1) return true;
+                }
+
                 for (var q = 0; q < locParts.length; q++) {
                     if (locParts[q] === entry || locParts[q].indexOf(entry) !== -1 || entry.indexOf(locParts[q]) !== -1) return true;
                 }
@@ -1466,18 +1661,17 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             // 1. Restricted countries check
             if (r.restrictedCountries && r.restrictedCountries.length > 0) {
                 var restricted = false;
-                if (leadCountryIso) {
-                    for (var ri = 0; ri < r.restrictedCountries.length; ri++) {
-                        if (r.restrictedCountries[ri] === leadCountryIso.toLowerCase()) { restricted = true; break; }
+                for (var ri = 0; ri < r.restrictedCountries.length; ri++) {
+                    var rEntry = r.restrictedCountries[ri];
+                    var rIso = COUNTRY_NAME_TO_ISO[rEntry.toLowerCase()] || (rEntry.length === 2 ? rEntry.toUpperCase() : null);
+                    if (rIso && leadCountryIso && rIso === leadCountryIso) { restricted = true; break; }
+                    if (leadCountryIso && COUNTRY_CODE_MAP[leadCountryIso] && COUNTRY_CODE_MAP[leadCountryIso].indexOf(rEntry.toLowerCase()) !== -1) {
+                        restricted = true; break;
                     }
-                }
-                if (!restricted) {
-                    for (var li = 0; li < r.restrictedCountries.length; li++) {
-                        for (var lp = 0; lp < locParts.length; lp++) {
-                            if (r.restrictedCountries[li] === locParts[lp]) { restricted = true; break; }
-                        }
-                        if (restricted) break;
+                    for (var lp = 0; lp < locParts.length; lp++) {
+                        if (rEntry.toLowerCase() === locParts[lp]) { restricted = true; break; }
                     }
+                    if (restricted) break;
                 }
                 if (restricted) continue;
             }
@@ -1486,14 +1680,12 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             if (!locationMatches(r)) continue;
 
             // 3. Contact requirements
-            var anyRequired = r.requireMobile || r.requireWhatsapp || r.requireEmail;
-            if (anyRequired) {
-                var has = false;
-                if (r.requireMobile && (contact.mobile || lead.senderMobile)) has = true;
-                if (r.requireWhatsapp && (contact.phone || lead.senderMobile)) has = true;
-                if (r.requireEmail && (contact.email || lead.senderEmail)) has = true;
-                if (!has) continue;
-            }
+            var reqMobile = r.requireMobile || r.require_mobile || (r.filter_config && (r.filter_config.require_mobile || r.filter_config.requireMobile));
+            var reqWhatsapp = r.requireWhatsapp || r.require_whatsapp || (r.filter_config && (r.filter_config.require_whatsapp || r.filter_config.requireWhatsapp));
+            var reqEmail = r.requireEmail || r.require_email || (r.filter_config && (r.filter_config.require_email || r.filter_config.requireEmail));
+            if (reqMobile && !(contact.mobile || lead.senderMobile || lead.hasMobileVerified)) continue;
+            if (reqWhatsapp && !(contact.phone || lead.senderMobile || lead.hasWhatsapp)) continue;
+            if (reqEmail && !(contact.email || lead.senderEmail || lead.hasEmailVerified)) continue;
 
             // 4. Quantity filter
             if (r.quantityUnit && r.minQuantity > 0) {
@@ -1679,6 +1871,9 @@ SafetyController.prototype.getStatus = function() {
         this._states[id] = state;
         return Promise.resolve(state);
     };
+    LeadStateMachine.prototype.getState = function(id) {
+        return this._states[id];
+    };
     LeadStateMachine.prototype.getStats = function() {
         var s = {};
         for (var k in this._states) { var v = this._states[k]; s[v] = (s[v] || 0) + 1; }
@@ -1835,7 +2030,10 @@ SafetyController.prototype.getStatus = function() {
         }
     };
     Scanner.prototype._scan = function() {
-        if (this._scanning || !this._running) return;
+        if (this._scanning || !this._running) return false;
+        if (this.orchestrator && this.orchestrator.keywordManager && this.orchestrator.keywordManager.getActiveFilterCount() === 0) {
+            return false;
+        }
         this._scanning = true;
         try {
             // Auto-detect and click any "New Leads Available" banner to bring dynamic leads into portal DOM
@@ -2820,6 +3018,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
+    var SCANNER_STATES = {
+        IDLE: 'IDLE',
+        PAUSED: 'PAUSED',
+        INITIALIZING: 'INITIALIZING',
+        SCANNING: 'SCANNING'
+    };
+
     // ============================================================
     // ORCHESTRATOR
     // ============================================================
@@ -2835,7 +3040,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this.queue = new LeadQueue();
         this.duplicateManager = new DuplicateManager(this.supabase);
         this.keywordManager = new KeywordManager();
+        this.keywordManager.orchestrator = this;
         this.scanner = new Scanner();
+        this.scanner.orchestrator = this;
         this.parser = new Parser();
         this.popupManager = new PopupManager();
         this.actionAdapter = new ActionAdapter(this.popupManager);
@@ -2848,11 +3055,15 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             discovered: 0, parsed: 0, validated: 0, scored: 0,
             queued: 0, acquired: 0, rejected: 0, duplicate: 0, failed: 0,
             countryBlocked: 0, unique: 0, filtered: 0, contactFailed: 0,
-            dbSynced: 0, popupsHandled: 0, loopsCompleted: 0, loadMoreClicks: 0
+            dbSynced: 0, popupsHandled: 0, loopsCompleted: 0, loadMoreClicks: 0,
+            cycleScanned: 0
         };
 
         this._uniqueSeenIds = new Set();
         this._isPaused = false;
+        this._scannerState = SCANNER_STATES.IDLE;
+        this._currentCycleId = 'cycle_' + Date.now();
+        this._currentCycleSeenLeads = new Set();
         this._acquiredLeadIds = new Set();
         this._acquiredRecords = [];
         var selfAcq = this;
@@ -2961,17 +3172,83 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
             return Promise.resolve();
         }).then(function() {
-            self.scanner.startWatching(function(cards) { self._onCardsDetected(cards); });
-
-            if (self.config.autoScroll) self.navigator.start();
-
             self._initialized = true;
-            self.logger.info('✅ Ready — scanner started after filters loaded');
+            self._updateScannerLifecycleState('init');
+            self.logger.info('✅ Ready — initialized (scanner state: ' + self._scannerState + ')');
             self._broadcastStatus();
         });
     };
 
-               Orchestrator.prototype._syncSupabaseKeywords = function(retryAttempt) {
+    Orchestrator.prototype.startNewCycle = function(cycleId) {
+        this._currentCycleId = cycleId || ('cycle_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7));
+        this.stats.cycleScanned = 0;
+        if (this._currentCycleSeenLeads) {
+            this._currentCycleSeenLeads.clear();
+        } else {
+            this._currentCycleSeenLeads = new Set();
+        }
+        if (this.metrics) {
+            this.metrics.resetCycle(this._currentCycleId);
+        }
+        var statsScanned = document.getElementById('bl-stat-scanned');
+        if (statsScanned) statsScanned.textContent = '0';
+        this.logger.info('🔄 New scan cycle initialized: ' + this._currentCycleId + ' (Scanned counter reset to 0)');
+        this._broadcastStatus();
+        return this._currentCycleId;
+    };
+
+    Orchestrator.prototype._updateScannerLifecycleState = function(reason) {
+        var activeFilterCount = this.keywordManager ? this.keywordManager.getActiveFilterCount() : 0;
+
+        if (this._isPaused) {
+            this._scannerState = SCANNER_STATES.PAUSED;
+            if (this.scanner && this.scanner._running) {
+                this.scanner.stopWatching();
+            }
+            if (this.navigator && this.navigator._running) {
+                this.navigator.stop();
+            }
+            this._broadcastStatus();
+            return this._scannerState;
+        }
+
+        if (activeFilterCount === 0) {
+            var wasRunning = this.scanner && this.scanner._running;
+            this._scannerState = SCANNER_STATES.IDLE;
+            if (wasRunning) {
+                this.scanner.stopWatching();
+                this.logger.info('⏸ Scanner transitioned to IDLE: 0 eligible filters active. Observer disconnected. (' + (reason || '') + ')');
+            }
+            if (this.navigator && this.navigator._running) {
+                this.navigator.stop();
+            }
+            this._broadcastStatus();
+            return this._scannerState;
+        }
+
+        // Active filters exist (> 0) and user has not paused
+        if (this._scannerState === SCANNER_STATES.IDLE || this._scannerState === SCANNER_STATES.INITIALIZING || !this.scanner._running) {
+            this.logger.info('▶ Eligible filters detected (' + activeFilterCount + '). Transitioning from ' + this._scannerState + ' to SCANNING.');
+            this._scannerState = SCANNER_STATES.SCANNING;
+            this.startNewCycle();
+            var self = this;
+            if (this.scanner) {
+                this.scanner.startWatching(function(cards) {
+                    self._onCardsDetected(cards);
+                });
+                this.scanner._scan();
+            }
+            if (this.config.autoScroll && this.navigator && !this.navigator._running) {
+                this.navigator.start();
+            }
+            this._broadcastStatus();
+        } else {
+            this._scannerState = SCANNER_STATES.SCANNING;
+        }
+        return this._scannerState;
+    };
+
+    Orchestrator.prototype._syncSupabaseKeywords = function(retryAttempt) {
         var self = this;
         retryAttempt = retryAttempt || 0;
         var MAX_RETRIES = 5;
@@ -2999,7 +3276,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
             return self.duplicateManager.loadFromDb();
         }).then(function() {
-            
+            self._updateScannerLifecycleState('supabase_synced');
             self._broadcastStatus();
         }).catch(function(err) {
             self.logger.error('❌ Sync failed: ' + err.message);
@@ -3716,8 +3993,19 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     Orchestrator.prototype._onCardsDetected = function(cards) {
         var self = this;
         var newCards = cards || [];
-        this.stats.cycleScanned = (this.stats.cycleScanned || 0) + newCards.length;
-        this.logger.info('📋 Processing ' + newCards.length + ' new cards');
+        if (!this._currentCycleSeenLeads) {
+            this._currentCycleSeenLeads = new Set();
+        }
+        for (var cIdx = 0; cIdx < newCards.length; cIdx++) {
+            var cId = newCards[cIdx].id;
+            if (cId && !this._currentCycleSeenLeads.has(cId)) {
+                this._currentCycleSeenLeads.add(cId);
+            }
+        }
+        this.stats.cycleScanned = this._currentCycleSeenLeads.size;
+        var statsScanned = document.getElementById('bl-stat-scanned');
+        if (statsScanned) statsScanned.textContent = String(this.stats.cycleScanned);
+        this.logger.info('📋 Processing ' + newCards.length + ' new cards (cycleScanned: ' + this.stats.cycleScanned + ')');
 
         var kws = this.keywordManager.getAllKeywords();
         this.logger.info('Keywords: P=' + kws.product.length + ' N=' + kws.negative.length + ' R=' + kws.required.length);
@@ -3818,7 +4106,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (self._supabaseEnabled) self._saveLeadToDb(lead, true);
             } catch (e) {
                 self.stats.failed++;
-                this.logger.error('❌ Card error: ' + e.message + ' | ' + (cards[i] && cards[i].id));
+                self.logger.error('❌ Card error: ' + e.message + ' | ' + (cards[i] && cards[i].id));
             }
         }
     };
@@ -3858,6 +4146,15 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var self = this;
         return new Promise(function(resolve) {
             self.stateMachine.setState(lead.leadId, 'PROCESSING');
+
+            // Re-verify filter eligibility before acquiring
+            if (lead.filterId && self.keywordManager && !self.keywordManager.isFilterEligible(lead.filterId)) {
+                self.logger.info('Filter ' + lead.filterId + ' is no longer eligible. Aborting acquisition for ' + lead.leadId);
+                self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
+                self.stateMachine.setState(lead.leadId, 'FILTERED_OUT');
+                resolve();
+                return;
+            }
 
             var safety = self.safety.canAcquire();
             if (!safety.allowed) { resolve(); return; }
@@ -3901,6 +4198,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         }
                         if (lead.filterId) {
                             self.keywordManager.recordFilterSuccess(lead.filterId, lead);
+                            self._updateScannerLifecycleState('filter_success');
                         }
                         if (self._supabaseEnabled) {
                             var savePromise = lead._savePromise || self._saveLeadToDb(lead, true);
@@ -4322,12 +4620,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             var newSignature = JSON.stringify(newFilters.map(function(f) {
                 return {
                     id: f.id,
-                    name: f.name,
+                    name: f.name || f.filter_name,
                     keywords: f.product_keywords,
                     neg: f.negative_keywords,
                     loc: f.sender_locations,
                     act: f.is_active,
                     mode: f.match_mode,
+                    cfg: f.filter_config,
+                    del: f.deleted_at || f.is_deleted,
                     upd: f.updated_at
                 };
             }));
@@ -4359,6 +4659,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     self.scanner.resetEmitted();
                     self.scanner._scan();
                 }
+                self._updateScannerLifecycleState('dynamic_filter_changes');
                 return true;
             }
             return false;
@@ -4436,7 +4737,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
         }
 
-        // 4. Reset display counters
+        // 4. Reset display counters & initialize new scan cycle
+        this.startNewCycle();
         this.stats.unique = 0;
         this.stats.discovered = 0;
         this.stats.duplicate = 0;
@@ -4516,11 +4818,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 var filtersArray = self.supabase.getFilters();
                 self.keywordManager.extractFromSupabaseFilters(filtersArray);
                 self.supabase.updateFilterStatus(true);
+                self._updateScannerLifecycleState('supabase_toggled_on');
                 return self.duplicateManager.loadFromDb();
             }).then(function() { return true; });
         } else {
             this.supabase._filters = [];
             this.supabase._filtersLoaded = false;
+            this.keywordManager.extractFromSupabaseFilters([]);
+            this._updateScannerLifecycleState('supabase_toggled_off');
             return Promise.resolve(true);
         }
     };
@@ -4546,6 +4851,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
     Orchestrator.prototype.emergencyStop = function() {
         this._isPaused = true;
+        this._scannerState = SCANNER_STATES.PAUSED;
         this.safety.emergencyStopFn ? this.safety.emergencyStopFn() : this.safety.emergencyStop();
         if (this.scanner) this.scanner.stopWatching();
         if (this.popupManager) this.popupManager.cancel();
@@ -4559,16 +4865,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     Orchestrator.prototype.resume = function() {
         this._isPaused = false;
         this.safety.resume();
-        var self = this;
-        if (this.scanner) {
-            this.scanner.startWatching(function(cards) {
-                self._onCardsDetected(cards);
-            });
-            this.scanner._scan();
-        }
-        if (this.navigator) this.navigator.start();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(true);
-        this.logger.info('▶ RESUMED — Scanner & Navigator active');
+        this.logger.info('▶ RESUMED by user — evaluating eligible filters');
+        this._updateScannerLifecycleState('user_resume');
         this._broadcastStatus();
         return Promise.resolve(true);
     };
@@ -4679,6 +4978,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                             orchestrator.keywordManager.extractFromSupabaseFilters(filtersArray);
                             orchestrator.duplicateManager.clear();
                             orchestrator.scanner.resetEmitted();
+                            orchestrator._updateScannerLifecycleState('refresh_filters_message');
                             sendResponse({ success: true, count: filtersArray.length });
                         });
                     } else sendResponse({ success: false });

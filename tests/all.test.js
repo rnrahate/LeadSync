@@ -115,6 +115,89 @@ it('Scenario E: Candidate ranking correctly prefers the strongest valid candidat
     assert.strictEqual(ranked[1].lead.leadId, 'weak');
 });
 
+it('Scenario F: Match Mode "all" (AND) requires all configured keywords to be present', function() {
+    var multiFilter = {
+        id: 102,
+        name: 'Voltfast Multi-keyword Filter',
+        keywords: ['Voltfast', '50mg Powder'],
+        matchMode: 'all'
+    };
+    var partialLead = { leadId: 'lead_part', productName: 'Voltfast Sachets' };
+    var fullLead = { leadId: 'lead_full', productName: 'Voltfast 50mg Powder Sachets' };
+
+    var resPartial = matcher.evaluate(partialLead, multiFilter);
+    assert.strictEqual(resPartial.passed, false);
+    assert.strictEqual(resPartial.reason, 'missing_mandatory_keyword');
+
+    var resFull = matcher.evaluate(fullLead, multiFilter);
+    assert.strictEqual(resFull.passed, true);
+    assert.ok(resFull.score >= 70);
+});
+
+it('Scenario G: Enforces requiredKeywords / mustHaveKeywords regardless of product keywords', function() {
+    var reqFilter = {
+        id: 103,
+        name: 'Amoxicillin with required brand',
+        keywords: ['Amoxicillin 500mg'],
+        requiredKeywords: ['Novamox']
+    };
+    var unbrandedLead = { leadId: 'lead_generic', productName: 'Amoxicillin 500mg Capsules' };
+    var brandedLead = { leadId: 'lead_branded', productName: 'Novamox Amoxicillin 500mg Capsules' };
+
+    var resUnbranded = matcher.evaluate(unbrandedLead, reqFilter);
+    assert.strictEqual(resUnbranded.passed, false);
+    assert.strictEqual(resUnbranded.reason, 'missing_required_keyword');
+
+    var resBranded = matcher.evaluate(brandedLead, reqFilter);
+    assert.strictEqual(resBranded.passed, true);
+});
+
+it('Scenario H: Foreign country matching and restricted countries with ISO normalization', function() {
+    var countryFilter = {
+        id: 104,
+        name: 'India Only Sunscreen Filter',
+        keywords: ['Sunscreen 50g'],
+        restrictedCountries: ['Bangladesh', 'Pakistan']
+    };
+    var bdLead = { leadId: 'lead_bd', productName: 'Sunscreen 50g Cream', countryIso: 'BD' };
+    var inLead = { leadId: 'lead_in', productName: 'Sunscreen 50g Cream', countryIso: 'IN' };
+
+    var resBd = matcher.evaluate(bdLead, countryFilter);
+    assert.strictEqual(resBd.passed, false);
+    assert.strictEqual(resBd.reason, 'country_restricted');
+
+    var resIn = matcher.evaluate(inLead, countryFilter);
+    assert.strictEqual(resIn.passed, true);
+});
+
+it('Scenario I: Contact requirements enforce ALL specified contact channels (AND logic)', function() {
+    var contactFilter = {
+        id: 105,
+        name: 'Strict Contact Filter',
+        keywords: ['Paracetamol 650mg'],
+        requireMobile: true,
+        requireEmail: true
+    };
+    var onlyMobileLead = {
+        leadId: 'lead_mob_only',
+        productName: 'Paracetamol 650mg',
+        senderMobile: '9876543210'
+    };
+    var bothContactLead = {
+        leadId: 'lead_both_contact',
+        productName: 'Paracetamol 650mg',
+        senderMobile: '9876543210',
+        senderEmail: 'buyer@example.com'
+    };
+
+    var resMobOnly = matcher.evaluate(onlyMobileLead, contactFilter);
+    assert.strictEqual(resMobOnly.passed, false);
+    assert.strictEqual(resMobOnly.reason, 'missing_contact_info');
+
+    var resBoth = matcher.evaluate(bothContactLead, contactFilter);
+    assert.strictEqual(resBoth.passed, true);
+});
+
 // ------------------------------------------------------------
 // 3. CENTRALIZED PERFORMANCE METRICS
 // ------------------------------------------------------------
