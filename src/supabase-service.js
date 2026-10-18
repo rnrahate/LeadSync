@@ -20,7 +20,7 @@ const SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2aHVyb211YnVreWxzeHJzZml6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwODI4MDYsImV4cCI6MjEwMzY1ODgwNn0.29J2uGHxFhPtEqRZvnXjaYpL-x4I0uEc2TT8u9d5PVw';
 
 // Default network timeouts (ms)
-const TIMEOUT_READ   = 8000;
+const TIMEOUT_READ   = 15000;
 const TIMEOUT_WRITE  = 15000;
 const TIMEOUT_HEALTH = 5000;
 
@@ -38,9 +38,9 @@ class SupabaseService {
                 this._filters = [];
         this._filtersLoaded = false;
         this._filtersLastFetch = 0;
-        this._filtersTTL = 10000; // 10 seconds (in-memory TTL)
+        this._filtersTTL = 1000; // 1 second (ultra-low latency)
         this._filtersCacheKey = 'cached_filters_v1';
-        this._filtersCacheTTL = 20000; // 20 seconds
+        this._filtersCacheTTL = 2000; // 2 seconds
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
@@ -67,6 +67,66 @@ class SupabaseService {
     // ============================================================
     async _fetchWithTimeout(url, options, timeoutMs) {
         timeoutMs = timeoutMs || TIMEOUT_READ;
+
+        // Try service worker proxy first (bypasses webpage CSP/CORS on IndiaMART)
+        if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+            try {
+                var swResponse = await new Promise(function(resolve, reject) {
+                    var timer = setTimeout(function() {
+                        reject(new Error('Timeout after ' + timeoutMs + 'ms'));
+                    }, timeoutMs);
+
+                    var cleanOptions = options ? {
+                        method: options.method || 'GET',
+                        headers: options.headers || {},
+                        body: options.body || undefined
+                    } : undefined;
+
+                    chrome.runtime.sendMessage({
+                        action: 'SUPABASE_FETCH',
+                        url: url,
+                        options: cleanOptions,
+                        timeoutMs: timeoutMs
+                    }, function(response) {
+                        clearTimeout(timer);
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else if (!response) {
+                            reject(new Error('No response from service worker'));
+                        } else if (response.error) {
+                            reject(new Error(response.error));
+                        } else {
+                            resolve(response);
+                        }
+                    });
+                });
+
+                var headersMap = swResponse.headers || {};
+                return {
+                    ok: !!swResponse.ok,
+                    status: swResponse.status || 0,
+                    statusText: swResponse.statusText || '',
+                    headers: {
+                        get: function(name) {
+                            return headersMap[(name || '').toLowerCase()] || null;
+                        }
+                    },
+                    text: async function() {
+                        return swResponse.body || '';
+                    },
+                    json: async function() {
+                        return swResponse.body ? JSON.parse(swResponse.body) : null;
+                    }
+                };
+            } catch (swErr) {
+                // If service worker message fails or times out, seamlessly fall back to direct fetch without alarming warnings
+                if (this.logger && typeof this.logger.debug === 'function') {
+                    this.logger.debug('Service worker proxy unavailable (' + swErr.message + '), falling back to direct fetch');
+                }
+            }
+        }
+
+        // Direct fetch fallback
         var controller = new AbortController();
         var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
         try {
@@ -391,9 +451,14 @@ class SupabaseService {
     // ============================================================
     // LEADS - Update
     // ============================================================
-    async updateLead(uniqueQueryId, updates) {
+    async updateLead(idOrUniqueQueryId, updates) {
         try {
-            var url = this.url + '/rest/v1/leads?unique_query_id=eq.' + encodeURIComponent(uniqueQueryId);
+            var url = this.url + '/rest/v1/leads?';
+            if (typeof idOrUniqueQueryId === 'number' || (typeof idOrUniqueQueryId === 'string' && /^\d+$/.test(idOrUniqueQueryId))) {
+                url += 'id=eq.' + idOrUniqueQueryId;
+            } else {
+                url += 'unique_query_id=eq.' + encodeURIComponent(idOrUniqueQueryId);
+            }
             var body = Object.assign({}, updates, { updated_at: new Date().toISOString() });
 
             var response = await this._fetchWithTimeout(url, {
@@ -404,20 +469,20 @@ class SupabaseService {
 
             if (!response.ok) throw new Error('HTTP ' + response.status);
 
-            this._log('debug', '✏️ Lead updated', { uniqueQueryId: uniqueQueryId, updates: updates });
+            this._log('debug', '✏️ Lead updated', { identifier: idOrUniqueQueryId, updates: updates });
             return true;
         } catch (err) {
-            this._log('error', '❌ Failed to update lead', { error: err.message, uniqueQueryId: uniqueQueryId });
+            this._log('error', '❌ Failed to update lead', { error: err.message, identifier: idOrUniqueQueryId });
             return false;
         }
     }
 
-    async markLeadMatched(uniqueQueryId) {
-        return this.updateLead(uniqueQueryId, { is_matched: true, status: 'matched' });
+    async markLeadMatched(idOrUniqueQueryId) {
+        return this.updateLead(idOrUniqueQueryId, { is_matched: true, status: 'matched' });
     }
 
-    async markLeadContacted(uniqueQueryId) {
-        return this.updateLead(uniqueQueryId, {
+    async markLeadContacted(idOrUniqueQueryId) {
+        return this.updateLead(idOrUniqueQueryId, {
             is_contacted: true,
             status: 'contacted',
             updated_at: new Date().toISOString()

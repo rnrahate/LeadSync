@@ -68,7 +68,9 @@ var DEFAULT_CONFIG = {
     confirmationAnswer: 'yes',
     purchaseAction: 'close',
 
-    supabaseEnabled: true
+    supabaseEnabled: true,
+    stopSold: true,
+    skipSoldOut: true
 };
 
 var supabaseEnabled = true;

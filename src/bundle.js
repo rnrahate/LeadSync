@@ -86,7 +86,9 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
         supabaseEnabled: true,
         panelPosition: null,
-        panelCollapsed: false
+        panelCollapsed: false,
+        stopSold: true,
+        skipSoldOut: true
     };
 
     // ============================================================
@@ -2717,6 +2719,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 self._savedPanelPosition = self.config.panelPosition;
                 self._panelCollapsed = self.config.panelCollapsed || false;
 
+                // Stop Sold (persisted setting, shared with skipSoldOut alias)
+                if (c.stopSold !== undefined) {
+                    self.config.stopSold = !!c.stopSold;
+                } else if (c.skipSoldOut !== undefined) {
+                    self.config.stopSold = !!c.skipSoldOut;
+                } else {
+                    self.config.stopSold = true;
+                }
+                self.config.skipSoldOut = self.config.stopSold;
+
                 self.safety.setLimits({
                     perMinute:  self.config.maxPerMinute,
                     perHour:    self.config.maxPerHour,
@@ -2902,7 +2914,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 display: flex;
                 flex-direction: column;
                 gap: 4px;
-                width: 210px;
+                width: 220px;
+                box-sizing: border-box;
             }
             .bl-row {
                 display: flex;
@@ -2914,6 +2927,54 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
             .bl-row .bl-strong { color: #18181b; font-weight: 500; }
             .bl-row .bl-dim { color: #a1a1aa; }
+            .bl-stats-row {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 11px;
+                line-height: 1.4;
+                white-space: nowrap;
+            }
+            .bl-stat-group {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+            }
+            .bl-stop-sold-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 1px 0;
+            }
+            .bl-toggle-btn {
+                background: #f4f4f5;
+                border: 1px solid #e4e4e7;
+                border-radius: 4px;
+                padding: 2px 7px;
+                font-size: 10px;
+                font-weight: 600;
+                color: #18181b;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                font-family: inherit;
+                transition: all 0.12s ease;
+            }
+            .bl-toggle-btn:hover { background: #e4e4e7; }
+            .bl-toggle-btn .bl-indicator {
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                display: inline-block;
+                flex-shrink: 0;
+            }
+            .bl-toggle-btn .bl-indicator.active { background: #10b981; }
+            .bl-toggle-btn .bl-indicator.inactive { background: #a1a1aa; }
+            .bl-toggle-label {
+                font-size: 10px;
+                letter-spacing: 0.02em;
+            }
             .bl-warning {
                 display: none;
                 margin-top: 6px;
@@ -3189,7 +3250,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             '</div>' +
             '<div class="bl-panel-body" id="bl-panel-body">' +
                 '<div class="bl-row"><span id="bl-status-text" class="bl-strong">Init...</span></div>' +
-                '<div class="bl-row"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Matched</span> <span id="bl-stat-filtered" class="bl-strong">0</span></div>' +
+                '<div class="bl-row bl-stats-row">' +
+                    '<span class="bl-stat-group"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span></span>' +
+                    '<span class="bl-dim">·</span>' +
+                    '<span class="bl-stat-group"><span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span></span>' +
+                    '<span class="bl-dim">·</span>' +
+                    '<span class="bl-stat-group"><span class="bl-dim">Matched</span> <span id="bl-stat-filtered" class="bl-strong">0</span></span>' +
+                '</div>' +
+                '<div class="bl-row bl-stop-sold-row">' +
+                    '<span class="bl-dim">Stop Sold</span>' +
+                    '<button id="bl-stop-sold-btn" class="bl-toggle-btn" type="button" aria-pressed="true" title="Stop Sold: ON (Skipping sold-out leads)">' +
+                        '<span id="bl-stop-sold-indicator" class="bl-indicator active"></span>' +
+                        '<span id="bl-stop-sold-label" class="bl-toggle-label">ON</span>' +
+                    '</button>' +
+                '</div>' +
                 '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
                 '<div class="bl-row"><span id="bl-country-text" class="bl-dim">Any country</span></div>' +
                 '<div class="bl-row"><span id="bl-rate-text" class="bl-dim">0/60 min</span></div>' +
@@ -3226,6 +3300,17 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 var isCollapsed = document.getElementById('bl-panel-body').style.display === 'none';
                 self._setPanelCollapsed(!isCollapsed);
                 chrome.storage.local.set({ panelCollapsed: !isCollapsed });
+            });
+        }
+
+        // ── Stop Sold toggle button ──
+        var stopSoldBtn = document.getElementById('bl-stop-sold-btn');
+        if (stopSoldBtn) {
+            this._updateStopSoldUI();
+            stopSoldBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var current = self.config.stopSold !== false;
+                self.setStopSold(!current);
             });
         }
 
@@ -3271,10 +3356,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         if (filtersBtn) {
             filtersBtn.addEventListener('click', function(e) {
                 e.stopPropagation();
+                var crmFiltersUrl = 'https://ind-prtx-test.vercel.app/filters';
                 try {
-                    var url = chrome.runtime.getURL('config/index.html');
-                    window.open(url, '_blank');
-                } catch (err) {}
+                    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+                        chrome.runtime.sendMessage({ action: 'OPEN_TAB', url: crmFiltersUrl }, function() {
+                            if (chrome.runtime.lastError) {
+                                window.open(crmFiltersUrl, '_blank');
+                            }
+                        });
+                    } else {
+                        window.open(crmFiltersUrl, '_blank');
+                    }
+                } catch (err) {
+                    window.open(crmFiltersUrl, '_blank');
+                }
             });
         }
 
@@ -3429,10 +3524,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 var k2 = self.keywordManager.getAllKeywords();
                 kwEl.textContent = 'KW: P' + k2.product.length + ' N' + k2.negative.length + ' R' + k2.required.length;
             }
-                        if (qEl) {
+            if (qEl) {
                 var q = self.queue.getStatus();
                 qEl.textContent = 'Queue: ' + q.size + (q.processing ? ' (1 active)' : '');
             }
+
+            self._updateStopSoldUI();
 
                         var warnEl = document.getElementById('bl-warning-text');
             if (warnEl) {
@@ -3518,6 +3615,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (self._isLeadAcquired(lead, card)) {
                     self.stats.duplicate++;
                     self.logger.debug('🔒 Acquired lead excluded (same seller duplicate): ' + card.id + ' | "' + (lead.productName || '') + '"');
+                    continue;
+                }
+
+                // === STEP 0.1: STOP SOLD CHECK ===
+                // When Stop Sold is enabled (default: true), stop or exclude sold-out leads.
+                // When disabled, this restriction is not applied and eligible leads continue.
+                if (self.config.stopSold !== false && self._isLeadSoldOut(lead, card)) {
+                    self.stats.rejected++;
+                    if (self.lifecycle) self.lifecycle.transition(card.id, 'SKIPPED', { reason: 'sold_out' });
+                    self.logger.info('🛑 Sold-out lead skipped (Stop Sold enabled): ' + card.id + ' | "' + (lead.productName || '') + '"');
                     continue;
                 }
 
@@ -3826,6 +3933,84 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     Orchestrator.prototype.setAutoMinimize = function(v) { this.config.autoMinimize = v; this.actionAdapter.setAutoMinimize(v); chrome.storage.local.set({ autoMinimize: v }); };
     Orchestrator.prototype.setConfirmationAnswer = function(a) { this.config.confirmationAnswer = a; this.actionAdapter.setConfirmationAnswer(a); chrome.storage.local.set({ confirmationAnswer: a }); };
     Orchestrator.prototype.setPurchaseAction = function(a) { this.config.purchaseAction = a; this.actionAdapter.setPurchaseAction(a); chrome.storage.local.set({ purchaseAction: a }); };
+    Orchestrator.prototype.setStopSold = function(enabled) {
+        var val = !!enabled;
+        this.config.stopSold = val;
+        this.config.skipSoldOut = val;
+        this.logger.info('🛑 Stop Sold setting updated: ' + (val ? 'ENABLED' : 'DISABLED'));
+        chrome.storage.local.set({ stopSold: val, skipSoldOut: val });
+        this._updateStopSoldUI();
+        return Promise.resolve(val);
+    };
+
+    Orchestrator.prototype._updateStopSoldUI = function() {
+        var btn = document.getElementById('bl-stop-sold-btn');
+        var indicator = document.getElementById('bl-stop-sold-indicator');
+        var label = document.getElementById('bl-stop-sold-label');
+        var isEnabled = this.config.stopSold !== false;
+        if (btn) {
+            btn.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            btn.title = isEnabled ? 'Stop Sold: ON (Skipping sold-out leads)' : 'Stop Sold: OFF (Sold-out leads not filtered)';
+        }
+        if (indicator) {
+            if (isEnabled) {
+                indicator.classList.add('active');
+                indicator.classList.remove('inactive');
+            } else {
+                indicator.classList.remove('active');
+                indicator.classList.add('inactive');
+            }
+        }
+        if (label) {
+            label.textContent = isEnabled ? 'ON' : 'OFF';
+        }
+    };
+
+    Orchestrator.prototype._isLeadSoldOut = function(lead, card) {
+        if (!card && (!lead || !lead.raw)) {
+            if (lead && (lead.isSoldOut === true || lead.soldOut === true || lead.isSold === true)) return true;
+            return false;
+        }
+        var el = (card && card.element) || (lead && lead.raw && lead.raw.element);
+
+        // 1. Direct explicit property check on lead
+        if (lead && (lead.isSoldOut === true || lead.soldOut === true || lead.isSold === true)) {
+            return true;
+        }
+
+        if (!el) return false;
+
+        // 2. DOM Attribute checks on the card container
+        try {
+            if (el.getAttribute && (el.getAttribute('data-sold') === 'true' || el.getAttribute('data-status') === 'sold' || el.getAttribute('data-is-sold') === 'true')) {
+                return true;
+            }
+            if (el.className && typeof el.className === 'string') {
+                var cName = el.className.toLowerCase();
+                if (cName.indexOf('sold_out') !== -1 || cName.indexOf('soldout') !== -1 || cName.indexOf('lead_sold') !== -1) {
+                    return true;
+                }
+            }
+        } catch (e) {}
+
+        // 3. Check card buttons, badges, tags, and ribbons
+        try {
+            var badges = el.querySelectorAll('button, a, span, div, p, [class*="sold"], [class*="Sold"], [class*="tag"], [class*="badge"], [class*="ribbon"], [class*="status"], [class*="cta"], [class*="Cta"], [class*="btn"], [class*="Btn"]');
+            for (var i = 0; i < badges.length; i++) {
+                var b = badges[i];
+                var t = (b.textContent || '').trim().toLowerCase();
+                if (!t) continue;
+                if (t === 'sold' || t === 'sold out' || t === 'already sold' || t === 'quota exhausted' || t === 'lead sold' ||
+                    t.indexOf('sold out') !== -1 || t.indexOf('already sold') !== -1 || t.indexOf('quota exhausted') !== -1) {
+                    if (t.indexOf('unsold') === -1) {
+                        return true;
+                    }
+                }
+            }
+        } catch (e) {}
+
+        return false;
+    };
 
     // ============================================================
     // TOP-CENTER LIVE TELEMETRY TOASTS
@@ -4301,6 +4486,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             if (changes.mode && changes.mode.newValue) {
                 orchestrator.setMode(changes.mode.newValue);
             }
+            if (changes.stopSold !== undefined || changes.skipSoldOut !== undefined) {
+                var newStop = changes.stopSold !== undefined ? !!changes.stopSold.newValue : !!changes.skipSoldOut.newValue;
+                orchestrator.config.stopSold = newStop;
+                orchestrator.config.skipSoldOut = newStop;
+                if (orchestrator._updateStopSoldUI) {
+                    orchestrator._updateStopSoldUI();
+                }
+            }
         });
         chrome.runtime.onMessage.addListener(function(req, sender, sendResponse) {
             switch (req.action) {
@@ -4308,6 +4501,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 case 'GET_CONFIG':              sendResponse({ success: true, config: orchestrator.config }); return true;
                 case 'UPDATE_FULL_CONFIG':      orchestrator.updateFullConfig(req.config).then(function() { sendResponse({ success: true }); }); return true;
                 case 'SET_MODE':                orchestrator.setMode(req.mode).then(function() { sendResponse({ success: true, mode: req.mode }); }); return true;
+                case 'SET_STOP_SOLD':           orchestrator.setStopSold(req.enabled); sendResponse({ success: true }); break;
                 case 'SET_LIMITS':              orchestrator.setLimits(req.limits); sendResponse({ success: true }); break;
                 case 'SET_MIN_SCORE':           orchestrator.setMinScore(req.score); sendResponse({ success: true }); break;
                 case 'SET_AUTO_MINIMIZE':       orchestrator.setAutoMinimize(req.enabled); sendResponse({ success: true }); break;

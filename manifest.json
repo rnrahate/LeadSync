@@ -4,35 +4,34 @@
   "version": "4.2.0",
   "description": "Fast BuyLead automation with product-name gating, strict-country filter and full Supabase integration.",
   "homepage_url": "https://keynlabs.vercel.app/",
-
   "permissions": [
     "storage",
     "unlimitedStorage",
     "tabs",
     "alarms",
-    "notifications"
+    "notifications",
+    "declarativeNetRequest"
   ],
-
   "host_permissions": [
     "https://seller.indiamart.com/*",
     "https://zvhuromubukylsxrsfiz.supabase.co/*"
   ],
-
   "content_scripts": [
     {
       "matches": [
         "https://seller.indiamart.com/bltxn/*",
         "https://seller.indiamart.com/bltxn"
       ],
-      "js": ["src/supabase-service.js", "src/bundle.js"],
+      "js": [
+        "src/supabase-service.js",
+        "src/bundle.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-
   "background": {
     "service_worker": "service-worker.js"
   },
-
   "action": {
     "default_popup": "popup/index.html",
     "default_title": "BuyLead Assistant",
@@ -43,14 +42,12 @@
       "128": "plugin.png"
     }
   },
-
   "icons": {
     "16": "plugin.png",
     "32": "plugin.png",
     "48": "plugin.png",
     "128": "plugin.png"
   },
-
   "web_accessible_resources": [
     {
       "resources": [
@@ -61,19 +58,27 @@
         "debug/index.html",
         "debug/debug.js"
       ],
-      "matches": ["https://seller.indiamart.com/*"]
+      "matches": [
+        "https://seller.indiamart.com/*"
+      ]
     }
   ],
-
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
-
   "incognito": "not_allowed",
-
   "externally_connectable": {
     "matches": [
       "https://seller.indiamart.com/*"
+    ]
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
     ]
   }
 }

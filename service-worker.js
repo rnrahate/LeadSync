@@ -64,8 +64,9 @@ var DEFAULT_CONFIG = {
     loadMoreWaitMs: 900,
     maxStuckLoops: 3,
     maxReloadsPerSession: 999999,
-    autoReloadOnComplete: true,
+    autoReloadOnComplete: false,
     autoReloadDelayMs: 100,
+    liveScanWaitMs: 30000,
 
     // Popup (speed-tuned)
     autoMinimize: true,
@@ -75,7 +76,11 @@ var DEFAULT_CONFIG = {
 
     // Misc
     logs: [],
-    keywords: { product: [], negative: [], required: [], location: [] }
+    keywords: { product: [], negative: [], required: [], location: [] },
+
+    // Stop Sold (persisted setting)
+    stopSold: true,
+    skipSoldOut: true
 };
 
 // ============================================================
@@ -458,8 +463,14 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
         return true;
     }
 
-    if (request.action === 'GET_CACHED_STATUS') {
-        sendResponse({ success: true, status: cachedStatus });
+    if (request.action === 'GET_STATUS' || request.action === 'GET_CACHED_STATUS') {
+        if (cachedStatus) {
+            sendResponse(Object.assign({ success: true }, cachedStatus));
+        } else {
+            browserAPI.storage.local.get(['mode'], function(res) {
+                sendResponse({ success: true, mode: res.mode || 'AUTOMATIC' });
+            });
+        }
         return true;
     }
 
@@ -476,12 +487,56 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
         return true;
     }
 
+    // === PROXY SUPABASE FETCH (bypasses webpage CSP/CORS on IndiaMART) ===
+    if (request.action === 'SUPABASE_FETCH') {
+        (async function() {
+            var timeoutMs = request.timeoutMs || 15000;
+            var controller = new AbortController();
+            var timer = setTimeout(function() {
+                controller.abort();
+            }, timeoutMs);
+
+            try {
+                var fetchUrl = request.url;
+                var fetchOptions = Object.assign({}, request.options || {});
+                fetchOptions.signal = controller.signal;
+
+                var res = await fetch(fetchUrl, fetchOptions);
+                clearTimeout(timer);
+                var resText = await res.text();
+                var headersObj = {};
+                if (res.headers && typeof res.headers.forEach === 'function') {
+                    res.headers.forEach(function(val, key) {
+                        headersObj[key.toLowerCase()] = val;
+                    });
+                }
+                sendResponse({
+                    ok: res.ok,
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: headersObj,
+                    body: resText
+                });
+            } catch (fetchErr) {
+                clearTimeout(timer);
+                console.error('[SW] ❌ Proxy fetch error:', fetchErr.message || fetchErr);
+                sendResponse({
+                    ok: false,
+                    status: 0,
+                    statusText: fetchErr.name === 'AbortError' ? 'Proxy Timeout' : 'Network Error',
+                    error: fetchErr.name === 'AbortError' ? ('Timeout after ' + timeoutMs + 'ms') : (fetchErr.message || String(fetchErr))
+                });
+            }
+        })();
+        return true;
+    }
+
     // ============================================================
     // SUPABASE DIRECT OPERATIONS
     // ============================================================
-    if (request.action === 'SUPABASE_CLEAR_LEADS')    { sbClearAllLeads().then(sendResponse);       return true; }
-    if (request.action === 'SUPABASE_CLEAR_HISTORY')  { sbClearAllHistory().then(sendResponse);     return true; }
-    if (request.action === 'SUPABASE_CLEAR_FILTERS')  { sbClearAllFilters().then(sendResponse);     return true; }
+    if (request.action === 'SUPABASE_CLEAR_LEADS' || request.action === 'CLEAR_LEADS')    { sbClearAllLeads().then(sendResponse);       return true; }
+    if (request.action === 'SUPABASE_CLEAR_HISTORY' || request.action === 'CLEAR_HISTORY')  { sbClearAllHistory().then(sendResponse);     return true; }
+    if (request.action === 'SUPABASE_CLEAR_FILTERS' || request.action === 'CLEAR_FILTERS')  { sbClearAllFilters().then(sendResponse);     return true; }
     if (request.action === 'SUPABASE_RESET_STATS')    { sbResetFilterStats().then(sendResponse);    return true; }
     if (request.action === 'SUPABASE_CLEAR_BEFORE')   { sbClearLeadsBefore(request.date).then(sendResponse); return true; }
     if (request.action === 'SUPABASE_GET_COUNTS')     { sbGetTableCounts().then(sendResponse);      return true; }
@@ -643,6 +698,17 @@ browserAPI.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
         }
         push();
     });
+});
+
+// ============================================================
+// RUNTIME MESSAGING (tab opening, etc.)
+// ============================================================
+browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+    if (request && request.action === 'OPEN_TAB' && request.url) {
+        browserAPI.tabs.create({ url: request.url });
+        sendResponse({ success: true });
+        return true;
+    }
 });
 
 console.log('[SW] BuyLead Assistant v4.2.0 loaded');
