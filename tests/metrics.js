@@ -96,14 +96,37 @@ PerformanceMetrics.prototype.recordContactFailure = function(leadId, reason) {
     this._matches.delete(leadId);
 };
 
+PerformanceMetrics.prototype.resetCycle = function(cycleId) {
+    this._currentCycleId = cycleId || ('cycle_' + Date.now());
+    this._acquisitions = [];
+    this._attempts = 0;
+    this._failedAttempts = 0;
+    this._contacts = [];
+    this._failedContacts = 0;
+    this._completedAttempts = 0;
+    this._completedSuccesses = 0;
+};
+
+PerformanceMetrics.prototype.recordLeadAttemptCompleted = function(leadId, success) {
+    this._completedAttempts = (this._completedAttempts || 0) + 1;
+    if (success) {
+        this._completedSuccesses = (this._completedSuccesses || 0) + 1;
+    }
+};
+
 PerformanceMetrics.prototype.getSpeedPerAcquisition = function() {
     if (this._acquisitions.length === 0) {
         return {
             hasData: false,
             avgMs: 0,
             lastMs: 0,
-            sampleSize: 0,
-            text: '--'
+            averageMs: null,
+            formatted: '0s',
+            formattedAvg: '0s',
+            formattedLast: '0s',
+            text: '0s',
+            sampleCount: 0,
+            sampleSize: 0
         };
     }
 
@@ -117,41 +140,52 @@ PerformanceMetrics.prototype.getSpeedPerAcquisition = function() {
 
     var formatDuration = function(ms) {
         if (ms < 1000) return ms + 'ms';
-        return (ms / 1000).toFixed(2) + 's';
+        return (ms / 1000).toFixed(1) + 's';
     };
 
     return {
         hasData: true,
         avgMs: avg,
         lastMs: last,
+        averageMs: avg,
         sampleSize: sample.length,
+        sampleCount: sample.length,
+        formatted: formatDuration(avg),
         formattedAvg: formatDuration(avg),
         formattedLast: formatDuration(last),
-        text: formatDuration(avg) + (sample.length > 1 ? ' (last: ' + formatDuration(last) + ')' : '')
+        text: formatDuration(avg)
     };
 };
 
 PerformanceMetrics.prototype.getAcceptanceRate = function() {
-    if (this._attempts === 0) {
+    var totalAttempts = this._completedAttempts || this._attempts;
+    if (totalAttempts === 0) {
         return {
             hasData: false,
             percentage: 0,
+            ratePercent: 0,
             successful: 0,
+            successes: 0,
             attempts: 0,
-            text: '--'
+            formatted: '0%',
+            text: '0%'
         };
     }
 
-    var successful = this._acquisitions.length;
-    var rate = (successful / this._attempts) * 100;
+    var successful = this._completedSuccesses !== undefined && this._completedAttempts ? this._completedSuccesses : this._acquisitions.length;
+    var rate = (successful / totalAttempts) * 100;
     var pct = Math.min(100, Math.max(0, rate));
+    var rounded = Math.round(pct * 10) / 10;
 
     return {
         hasData: true,
-        percentage: parseFloat(pct.toFixed(1)),
+        percentage: parseFloat(rounded.toFixed(1)),
+        ratePercent: rounded,
         successful: successful,
-        attempts: this._attempts,
-        text: pct.toFixed(1) + '% (' + successful + '/' + this._attempts + ')'
+        successes: successful,
+        attempts: totalAttempts,
+        formatted: rounded.toFixed(1) + '%',
+        text: rounded.toFixed(1) + '%'
     };
 };
 

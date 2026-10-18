@@ -264,12 +264,17 @@ setTimeout(() => {
             'bl-age-refresh',
             'bl-stat-dup',
             'bl-stat-soldout',
-            'bl-stat-fail'
+            'bl-stat-fail',
+            'bl-country-text',
+            'bl-rate-text',
+            'bl-kw-text',
+            'bl-queue-text',
+            'bl-refresh-btn'
         ];
         obsoleteIds.forEach(id => {
             assert.strictEqual(global.document.getElementById(id), null, `Obsolete element #${id} must NOT be in DOM`);
         });
-        console.log('  ✅ PASS: All 9 obsolete UI elements absent from BL panel DOM');
+        console.log('  ✅ PASS: All 14 obsolete UI elements absent from BL panel DOM');
 
         // 5. Verify Active Filter Count calculation
         const activeCount = orch.keywordManager.getActiveFilterCount();
@@ -434,8 +439,108 @@ setTimeout(() => {
         assert.strictEqual(global.window._lastOpenedUrl, 'https://ind-prtx-test.vercel.app/filters', 'Filters button must navigate to CRM/Filters URL');
         console.log('  ✅ PASS: Filters button navigates to https://ind-prtx-test.vercel.app/filters');
 
-        console.log('\n=== ALL BUNDLE INTEGRATION TESTS PASSED ===\n');
-        process.exit(0);
+        // 12. Test Phase 6 & Phase 11: Two Distinct Buyers per Filter Quota & Deduplication
+        // Release card-sold-test-2 queued earlier in the test to start with clean in-flight state
+        orch.keywordManager.releaseReservation('f1', 'card-sold-test-2');
+        assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 1, 'Initially 1 active filter');
+        
+        // Buyer 1 successfully completes filter f1
+        orch.keywordManager.recordFilterSuccess('f1', { leadId: 'lead-buyer-1', senderMobile: '9876543210' });
+        assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 1, 'Filter f1 still remaining after 1 distinct buyer');
+
+        // Same Buyer 1 submits another lead matching f1 -> must be rejected because same buyer cannot fill 2 slots
+        const dupBuyerMatch = orch.keywordManager.evaluateFilters({ productName: 'SPF 50 Gel Sunscreen 50g', senderMobile: '9876543210' });
+        assert.strictEqual(dupBuyerMatch.passed, false, 'Same buyer must NOT be permitted to fill multiple slots for the same filter');
+
+        // Distinct Buyer 2 matches f1 -> must be allowed
+        const buyer2Match = orch.keywordManager.evaluateFilters({ productName: 'SPF 50 Gel Sunscreen 50g', senderMobile: '9876543211' });
+        assert.strictEqual(buyer2Match.passed, true, 'Distinct buyer 2 must match active filter');
+        assert.strictEqual(buyer2Match.filterId, 'f1');
+
+        // Distinct Buyer 2 successfully completes filter f1
+        orch.keywordManager.recordFilterSuccess('f1', { leadId: 'lead-buyer-2', senderMobile: '9876543211' });
+        assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 0, 'Filter f1 complete after 2 distinct buyers; remaining count becomes 0');
+
+        // Third distinct buyer 3 submits lead matching f1 -> must be rejected because quota of 2 is reached
+        const buyer3Match = orch.keywordManager.evaluateFilters({ productName: 'SPF 50 Gel Sunscreen 50g', senderMobile: '9876543212' });
+        assert.strictEqual(buyer3Match.passed, false, 'Third buyer must be rejected when filter reached quota of 2');
+        console.log('  ✅ PASS: Max 2 distinct buyers per filter quota & buyer deduplication verified');
+
+        // 13. Test In-Flight Reservation Mechanism
+        orch.keywordManager._activeFilters.push({
+            id: 'f2',
+            name: 'Aloe Vera Gel',
+            product_keywords: ['Aloe Vera Gel'],
+            target_lead_count: 2,
+            is_active: true
+        });
+        assert.strictEqual(orch.keywordManager.getActiveFilterCount(), 1, '1 active filter f2 remaining');
+
+        // Reserve 2 in-flight slots for f2
+        orch.keywordManager.reserveSlot('f2', 'card-inflight-1');
+        orch.keywordManager.reserveSlot('f2', 'card-inflight-2');
+
+        // Filter f2 should now reject incoming leads because in-flight + completed = 2
+        const inFlightBlocked = orch.keywordManager.evaluateFilters({ productName: 'Aloe Vera Gel', senderMobile: '9876543299' });
+        assert.strictEqual(inFlightBlocked.passed, false, 'Candidate must be blocked when in-flight capacity is fully reserved');
+
+        // Release reservation when one attempt fails
+        orch.keywordManager.releaseReservation('f2', 'card-inflight-1');
+        const afterReleaseMatch = orch.keywordManager.evaluateFilters({ productName: 'Aloe Vera Gel', senderMobile: '9876543299' });
+        assert.strictEqual(afterReleaseMatch.passed, true, 'Candidate can match after released in-flight reservation');
+        orch.keywordManager.releaseReservation('f2', 'card-inflight-2');
+        console.log('  ✅ PASS: In-flight capacity reservation and release verified');
+
+        // 14. Test Phase 9 & 10: Cycle Reset & Real Metric Formatting
+        orch.metrics.resetCycle('cycle-gravitas-test');
+        assert.strictEqual(orch.metrics.getSpeedPerAcquisition().formatted, '0s', 'Speed must reset to 0s at cycle start');
+        assert.strictEqual(orch.metrics.getAcceptanceRate().formatted, '0%', 'Acceptance must reset to 0% at cycle start');
+
+        // Add 1 completed success and 1 completed failure
+        orch.metrics.recordLeadAttemptCompleted('lead-test-succ', true);
+        orch.metrics.recordLeadAttemptCompleted('lead-test-fail', false);
+        const cycleAcc = orch.metrics.getAcceptanceRate();
+        assert.strictEqual(cycleAcc.formatted, '50.0%', 'Acceptance must accurately compute 1/2 = 50.0%');
+        console.log('  ✅ PASS: Cycle reset to 0s / 0% and verified completion rate verified');
+
+        // 15. Test Phase 12: Account Limitation Handling (Insufficient Balance / Subscription)
+        const warnEl = global.document.getElementById('bl-warning-text');
+        assert.ok(warnEl, '#bl-warning-text must exist in BL panel DOM');
+
+        // Simulate lead processing with INSUFFICIENT_BALANCE failure
+        const balanceLead = {
+            leadId: 'lead-balance-fail',
+            filterId: 'f2',
+            productName: 'Aloe Vera Gel',
+            senderMobile: '9998887776'
+        };
+        orch.keywordManager.reserveSlot('f2', balanceLead.leadId);
+        orch.lifecycle.transition(balanceLead.leadId, 'DETECTED');
+        orch.lifecycle.transition(balanceLead.leadId, 'MATCHED');
+        
+        // Mock adapter failing with INSUFFICIENT_BALANCE
+        const originalAcquire = orch.actionAdapter.acquire;
+        orch.actionAdapter.acquire = () => Promise.resolve({
+            success: false,
+            code: 'INSUFFICIENT_BALANCE',
+            message: 'Insufficient BuyLead Balance. Please recharge.'
+        });
+
+        orch._processLead(balanceLead).then(() => {
+            assert.strictEqual(orch.lifecycle.getState('lead-balance-fail'), 'BLOCKED', 'Lead state must transition to BLOCKED');
+            assert.ok(warnEl.textContent.includes('Insufficient BuyLead Balance'), 'Warning text must show account failure');
+            assert.ok(warnEl.classList.contains('show'), 'Warning text must be visible');
+            // Ensure slot reservation was released
+            const f2InFlight = orch.keywordManager._filterInFlight.get('f2');
+            assert.ok(!f2InFlight || !f2InFlight.has('lead-balance-fail'), 'In-flight reservation must be released on failure');
+            
+            // Restore adapter
+            orch.actionAdapter.acquire = originalAcquire;
+            console.log('  ✅ PASS: Account limitation (INSUFFICIENT_BALANCE) notification and BLOCKED state verified');
+
+            console.log('\n=== ALL BUNDLE INTEGRATION TESTS PASSED ===\n');
+            process.exit(0);
+        });
     } catch (err) {
         console.error('Assertion error:', err);
         process.exit(1);

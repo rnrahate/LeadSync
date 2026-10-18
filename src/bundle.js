@@ -1142,11 +1142,36 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._supabaseEnabled = true;
         this.matcher = new LeadMatcher();
         this._activeFilters = [];
+        this._filterCompletedBuyers = new Map(); // filterId -> Set of distinct buyerIds
+        this._filterInFlight = new Map();        // filterId -> Set of in-flight leadIds
     }
 
+    KeywordManager.prototype.getBuyerId = function(lead) {
+        if (!lead) return null;
+        var mobile = (lead.senderMobile || (lead.contact && lead.contact.mobile) || lead.senderPhone || (lead.contact && lead.contact.phone) || '').replace(/\D+/g, '');
+        if (mobile && mobile.length >= 7) return 'tel_' + mobile.slice(-10);
+        var email = (lead.senderEmail || (lead.contact && lead.contact.email) || '').toLowerCase().trim();
+        if (email && email.indexOf('@') !== -1) return 'email_' + email;
+        var name = (lead.senderName || (lead.contact && lead.contact.name) || lead.sellerName || '').toLowerCase().trim();
+        var loc = (lead.city || lead.state || lead.location || '').toLowerCase().trim();
+        if (name) return 'name_' + name + (loc ? '_' + loc : '');
+        if (lead.leadId || lead.id || lead.queryId || lead.uniqueId) return 'lead_' + (lead.leadId || lead.id || lead.queryId || lead.uniqueId);
+        return null;
+    };
+
     KeywordManager.prototype.getActiveFilterCount = function() {
+        var self = this;
         if (this._activeFilters && this._activeFilters.length > 0) {
-            return this._activeFilters.filter(function(f) { return f.isActive !== false; }).length;
+            return this._activeFilters.filter(function(f) {
+                if (f.isActive === false) return false;
+                var buyers = self._filterCompletedBuyers.get(f.id);
+                var count = buyers ? buyers.size : 0;
+                var target = 2;
+                if (typeof f.targetQuantity === 'number' && f.targetQuantity > 0) {
+                    target = Math.min(2, f.targetQuantity);
+                }
+                return count < target;
+            }).length;
         }
         if (this._supabaseKeywords && this._supabaseKeywords.product && this._supabaseKeywords.product.length > 0) {
             return this._supabaseKeywords.product.length;
@@ -1155,6 +1180,46 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             return this._localKeywords.product.length;
         }
         return 0;
+    };
+
+    KeywordManager.prototype.reserveSlot = function(filterId, leadId) {
+        if (!filterId || !leadId) return;
+        if (!this._filterInFlight.has(filterId)) {
+            this._filterInFlight.set(filterId, new Set());
+        }
+        this._filterInFlight.get(filterId).add(leadId);
+    };
+
+    KeywordManager.prototype.releaseReservation = function(filterId, leadId) {
+        if (!filterId || !leadId) return;
+        if (this._filterInFlight.has(filterId)) {
+            this._filterInFlight.get(filterId).delete(leadId);
+        }
+    };
+
+    KeywordManager.prototype.recordFilterSuccess = function(filterId, lead) {
+        if (!filterId) return;
+        var buyerId = this.getBuyerId(lead);
+        if (!this._filterCompletedBuyers.has(filterId)) {
+            this._filterCompletedBuyers.set(filterId, new Set());
+        }
+        if (buyerId) {
+            this._filterCompletedBuyers.get(filterId).add(buyerId);
+        }
+        this.releaseReservation(filterId, lead ? (lead.leadId || lead.id) : null);
+        this._persistCompletedBuyers();
+    };
+
+    KeywordManager.prototype._persistCompletedBuyers = function() {
+        var out = {};
+        this._filterCompletedBuyers.forEach(function(buyerSet, fId) {
+            out[fId] = Array.from(buyerSet);
+        });
+        try {
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set({ filterCompletedBuyers: out });
+            }
+        } catch (e) {}
     };
 
     KeywordManager.prototype.setSupabaseEnabled = function(enabled) {
@@ -1173,7 +1238,16 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     KeywordManager.prototype.loadKeywords = function() {
         var self = this;
         return new Promise(function(resolve) {
-            chrome.storage.local.get(['keywords', 'supabaseEnabled'], function(result) {
+            chrome.storage.local.get(['keywords', 'supabaseEnabled', 'filterCompletedBuyers'], function(result) {
+                if (result && result.filterCompletedBuyers) {
+                    try {
+                        for (var fId in result.filterCompletedBuyers) {
+                            if (Array.isArray(result.filterCompletedBuyers[fId])) {
+                                self._filterCompletedBuyers.set(fId, new Set(result.filterCompletedBuyers[fId]));
+                            }
+                        }
+                    } catch (e) {}
+                }
                 self._localKeywords = {
                     product:  (result.keywords && result.keywords.product)  || [],
                     negative: (result.keywords && result.keywords.negative) || [],
@@ -1369,9 +1443,25 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
 
         var candidateMatches = [];
+        var buyerId = self.getBuyerId(lead);
 
         for (var i = 0; i < activeRules.length; i++) {
             var r = activeRules[i];
+
+            // 0. Filter Quota & Distinct Buyer check: max 2 distinct buyers per filter
+            var completedBuyers = self._filterCompletedBuyers.get(r.id);
+            var completedCount = completedBuyers ? completedBuyers.size : 0;
+            var target = 2;
+            if (typeof r.targetQuantity === 'number' && r.targetQuantity > 0) {
+                target = Math.min(2, r.targetQuantity);
+            }
+            if (completedCount >= target) continue;
+
+            var inFlight = self._filterInFlight.get(r.id);
+            var inFlightCount = inFlight ? inFlight.size : 0;
+            if (completedCount + inFlightCount >= target) continue;
+
+            if (buyerId && completedBuyers && completedBuyers.has(buyerId)) continue;
 
             // 1. Restricted countries check
             if (r.restrictedCountries && r.restrictedCountries.length > 0) {
@@ -1649,11 +1739,12 @@ SafetyController.prototype.getStatus = function() {
         this._running = false;
         this._callback = null;
         this._observer = null;
+        this._targetNode = null;
         this._topSentinel = null;
         this._scanTimer = null;
         this._knownLeads = {};
         this._debounceMs = 25; // ultra-low latency reaction
-        this._fallbackMs = 800; // fast fallback poll
+        this._reconciliationFallbackMs = 15000; // 15s secondary reconciliation check (Phase 8)
         this._idGen = new LeadIdGenerator();
         this._scanning = false;
         this._scanPending = false;
@@ -1689,29 +1780,59 @@ SafetyController.prototype.getStatus = function() {
         } catch (e) {}
         return false;
     };
-    Scanner.prototype.startWatching = function(cb) {
-        if (this._running) return;
-        this._callback = cb;
-        this._running = true;
+    Scanner.prototype._setupObserver = function() {
+        if (this._observer) {
+            try { this._observer.disconnect(); } catch (e) {}
+            this._observer = null;
+        }
         var container = document.querySelector('#bl_listing, [class*="bl_listing"], [class*="BuyLdC_cont"], [class*="BLbp_card"]');
         var targetNode = container ? (container.parentElement || container) : (document.body || document.documentElement);
+        this._targetNode = targetNode;
+
         var self2 = this;
         this._observer = new MutationObserver(function() {
             if (self2._scanPending) return;
             self2._scanPending = true;
-            setTimeout(function() { self2._scanPending = false; self2._scan(); }, self2._debounceMs);
+            setTimeout(function() {
+                self2._scanPending = false;
+                self2._scan();
+            }, self2._debounceMs);
         });
+
         if (targetNode) {
-            this._observer.observe(targetNode, { childList: true, subtree: true });
+            this._observer.observe(targetNode, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-sold', 'class', 'style'] });
         }
-        this._scanTimer = setInterval(function() { self2._scan(); }, this._fallbackMs);
-        this.logger.info('✅ Scanner started');
-        setTimeout(function() { self2._scan(); }, 200);
+    };
+    Scanner.prototype.startWatching = function(cb) {
+        if (this._running) return;
+        this._callback = cb;
+        this._running = true;
+        var self2 = this;
+
+        this._setupObserver();
+
+        // Secondary reconciliation fallback: 15 seconds (conservative, low-overhead secondary fallback)
+        this._scanTimer = setInterval(function() {
+            if (self2._targetNode && !document.contains(self2._targetNode)) {
+                self2.logger.info('🔄 Lead container replaced — reattaching observer');
+                self2._setupObserver();
+            }
+            self2._scan();
+        }, this._reconciliationFallbackMs);
+
+        this.logger.info('✅ Real-time event-driven scanner started (MutationObserver primary, 15s reconciliation fallback)');
+        setTimeout(function() { self2._scan(); }, 50);
     };
     Scanner.prototype.stopWatching = function() {
         this._running = false;
-        if (this._observer) { this._observer.disconnect(); this._observer = null; }
-        if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
+        if (this._observer) {
+            try { this._observer.disconnect(); } catch (e) {}
+            this._observer = null;
+        }
+        if (this._scanTimer) {
+            clearInterval(this._scanTimer);
+            this._scanTimer = null;
+        }
     };
     Scanner.prototype._scan = function() {
         if (this._scanning || !this._running) return;
@@ -2202,13 +2323,25 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         clearInterval(interval);
                         log.info('⏱️ Popup dialog detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
                         var text = (popup.textContent || '').toLowerCase();
-                        var isPurchase = text.indexOf('purchase buylead') !== -1 ||
+                        var isInsufficientBalance = text.indexOf('insufficient balance') !== -1 ||
+                            text.indexOf('buy points') !== -1 ||
+                            text.indexOf('recharge') !== -1 ||
+                            text.indexOf('balance exhausted') !== -1 ||
+                            text.indexOf('points required') !== -1 ||
+                            text.indexOf('purchase buylead') !== -1 ||
                             text.indexOf("to view buyer's contact details") !== -1 ||
                             text.indexOf('per buylead') !== -1 ||
                             (text.indexOf('buy') !== -1 && text.indexOf('₹') !== -1);
 
-                        if (isPurchase) {
-                            // Paywall popup: points needed, do NOT treat as acquired
+                        var isSubscriptionRequired = text.indexOf('subscription expired') !== -1 ||
+                            text.indexOf('missing subscription') !== -1 ||
+                            text.indexOf('renew subscription') !== -1 ||
+                            text.indexOf('upgrade plan') !== -1 ||
+                            text.indexOf('subscription required') !== -1;
+
+                        if (isInsufficientBalance || isSubscriptionRequired) {
+                            var code = isSubscriptionRequired ? 'SUBSCRIPTION_REQUIRED' : 'INSUFFICIENT_BALANCE';
+                            var msg = isSubscriptionRequired ? 'Subscription inactive or expired — renew subscription' : 'Insufficient BuyLead balance — recharge required';
                             var closeBtn = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
                             if (!closeBtn) {
                                 var allBtns = popup.querySelectorAll('button, span');
@@ -2219,8 +2352,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                             }
                             if (closeBtn) { try { simulateClick(closeBtn); } catch(e) {} }
                             document.body.style.overflow = '';
-                            log.warn('⚠️ BuyLead purchase required (paywall modal detected)', { leadId: lead.leadId });
-                            resolve({ success: false, action: 'points_required', message: 'BuyLead purchase points required' });
+                            log.warn('⚠️ Account limitation detected: ' + code, { leadId: lead.leadId });
+                            resolve({ success: false, code: code, action: 'account_blocked', message: msg });
                             return;
                         }
 
@@ -2407,13 +2540,34 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._activeFiltersCount = 0;
         this._detections = new Map(); // leadId -> timestamp
         this._matches = new Map();    // leadId -> timestamp
+        this._currentCycleId = 'cycle_' + Date.now();
         this._attempts = 0;           // total eligible acquisition attempts
         this._acquisitions = [];      // [{ leadId, durationMs, timestamp }]
         this._failedAttempts = 0;
         this._contacts = [];          // [{ leadId, durationMs, timestamp }]
         this._failedContacts = 0;
+        this._completedAttempts = 0;
+        this._completedSuccesses = 0; // successfully acquired AND contacted leads
         this._sampleLimit = 20;
     }
+
+    PerformanceMetrics.prototype.resetCycle = function(cycleId) {
+        this._currentCycleId = cycleId || ('cycle_' + Date.now());
+        this._acquisitions = [];
+        this._attempts = 0;
+        this._failedAttempts = 0;
+        this._contacts = [];
+        this._failedContacts = 0;
+        this._completedAttempts = 0;
+        this._completedSuccesses = 0;
+    };
+
+    PerformanceMetrics.prototype.recordLeadAttemptCompleted = function(leadId, success) {
+        this._completedAttempts = (this._completedAttempts || 0) + 1;
+        if (success) {
+            this._completedSuccesses = (this._completedSuccesses || 0) + 1;
+        }
+    };
 
     PerformanceMetrics.prototype.setActiveFiltersCount = function(count) {
         this._activeFiltersCount = Math.max(0, parseInt(count, 10) || 0);
@@ -2485,9 +2639,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     PerformanceMetrics.prototype.getSpeedPerAcquisition = function() {
         if (this._acquisitions.length === 0) {
             return {
+                hasData: false,
+                avgMs: 0,
+                lastMs: 0,
                 averageMs: null,
-                formatted: '---',
-                sampleCount: 0
+                formatted: '0s',
+                formattedAvg: '0s',
+                formattedLast: '0s',
+                text: '0s',
+                sampleCount: 0,
+                sampleSize: 0
             };
         }
         var sample = this._acquisitions.slice(-this._sampleLimit);
@@ -2496,30 +2657,50 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             total += sample[i].durationMs;
         }
         var avgMs = Math.round(total / sample.length);
+        var lastMs = Math.round(sample[sample.length - 1].durationMs);
         var formatted = avgMs < 1000 ? (avgMs + 'ms') : ((avgMs / 1000).toFixed(1) + 's');
+        var formattedLast = lastMs < 1000 ? (lastMs + 'ms') : ((lastMs / 1000).toFixed(1) + 's');
         return {
+            hasData: true,
+            avgMs: avgMs,
+            lastMs: lastMs,
             averageMs: avgMs,
             formatted: formatted,
-            sampleCount: sample.length
+            formattedAvg: formatted,
+            formattedLast: formattedLast,
+            text: formatted,
+            sampleCount: sample.length,
+            sampleSize: sample.length
         };
     };
 
     PerformanceMetrics.prototype.getAcceptanceRate = function() {
-        if (this._attempts === 0) {
+        var totalAttempts = this._completedAttempts || this._attempts;
+        if (totalAttempts === 0) {
             return {
-                ratePercent: null,
-                formatted: '---',
+                hasData: false,
+                percentage: 0,
+                ratePercent: 0,
+                successful: 0,
                 successes: 0,
-                attempts: 0
+                attempts: 0,
+                formatted: '0%',
+                text: '0%'
             };
         }
-        var successes = this._acquisitions.length;
-        var rate = (successes / this._attempts) * 100;
+        var successes = this._completedSuccesses !== undefined && this._completedAttempts ? this._completedSuccesses : this._acquisitions.length;
+        var rate = (successes / totalAttempts) * 100;
+        var pct = Math.min(100, Math.max(0, rate));
+        var rounded = Math.round(pct * 10) / 10;
         return {
-            ratePercent: Math.min(100, Math.round(rate * 10) / 10),
-            formatted: Math.min(100, Math.round(rate * 10) / 10).toFixed(1) + '%',
+            hasData: true,
+            percentage: parseFloat(rounded.toFixed(1)),
+            ratePercent: rounded,
+            successful: successes,
             successes: successes,
-            attempts: this._attempts
+            attempts: totalAttempts,
+            formatted: rounded.toFixed(1) + '%',
+            text: rounded.toFixed(1) + '%'
         };
     };
 
@@ -2930,15 +3111,17 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             .bl-stats-row {
                 display: flex;
                 align-items: center;
-                gap: 5px;
-                font-size: 11px;
+                justify-content: flex-start;
+                gap: 4px;
+                font-size: 10.5px;
                 line-height: 1.4;
                 white-space: nowrap;
+                overflow: hidden;
             }
             .bl-stat-group {
                 display: inline-flex;
                 align-items: center;
-                gap: 3px;
+                gap: 2px;
             }
             .bl-stop-sold-row {
                 display: flex;
@@ -3132,31 +3315,24 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
 
             /* ── Panel control row & buttons ── */
-            .bl-ctrl-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 4px 0; }
+            .bl-ctrl-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
             .bl-ctrl-btn {
-                font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px;
-                border: none; cursor: pointer; transition: all 0.15s ease; line-height: 1.4;
+                font-size: 11px; font-weight: 600; padding: 5px 8px; border-radius: 4px;
+                border: none; cursor: pointer; transition: all 0.15s ease; line-height: 1.3;
+                display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 1;
             }
             .bl-ctrl-stop   { background: #ef4444; color: #fff; }
             .bl-ctrl-stop:hover { background: #dc2626; }
             .bl-ctrl-resume { background: #22c55e; color: #fff; }
             .bl-ctrl-resume:hover { background: #16a34a; }
-            .bl-ctrl-refresh {
-                background: #eff6ff !important;
-                color: #2563eb !important;
-                border: 1px solid #bfdbfe !important;
-            }
-            .bl-ctrl-refresh:hover {
-                background: #dbeafe !important;
-                color: #1d4ed8 !important;
-            }
             .bl-ctrl-filters {
                 background: #18181b !important;
                 color: #ffffff !important;
                 border: 1px solid #27272a !important;
                 display: inline-flex !important;
                 align-items: center !important;
-                gap: 4px !important;
+                justify-content: center !important;
+                gap: 5px !important;
             }
             .bl-ctrl-filters:hover {
                 background: #09090b !important;
@@ -3169,6 +3345,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 padding: 1px 5px;
                 border-radius: 10px;
                 font-weight: 700;
+                line-height: 1.2;
             }
 
             /* Performance metrics cards below Resume */
@@ -3176,7 +3353,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                gap: 5px;
+                gap: 6px;
                 padding: 3px 0;
                 margin-top: 2px;
             }
@@ -3265,24 +3442,22 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     '</button>' +
                 '</div>' +
                 '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
-                '<div class="bl-row"><span id="bl-country-text" class="bl-dim">Any country</span></div>' +
-                '<div class="bl-row"><span id="bl-rate-text" class="bl-dim">0/60 min</span></div>' +
-                '<div class="bl-row"><span id="bl-kw-text" class="bl-dim">KW: 0</span></div>' +
-                '<div class="bl-row"><span id="bl-queue-text" class="bl-dim">Queue: 0</span></div>' +
                 '<div class="bl-row bl-ctrl-row">' +
                     '<button id="bl-stop-btn" class="bl-ctrl-btn bl-ctrl-stop" type="button">⏸ Pause</button>' +
                     '<button id="bl-resume-btn" class="bl-ctrl-btn bl-ctrl-resume" type="button" style="display:none">▶ Resume</button>' +
-                    '<button id="bl-refresh-btn" class="bl-ctrl-btn bl-ctrl-refresh" type="button" title="Restart scan from top without reloading webpage">🔄 Refresh</button>' +
-                    '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">⚡ Filters (<span id="bl-filters-count">0</span>)</button>' +
+                    '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">' +
+                        '<span>⚡ Filters</span>' +
+                        '<span id="bl-filters-count" class="bl-badge">0</span>' +
+                    '</button>' +
                 '</div>' +
                 '<div class="bl-row bl-metrics-row">' +
                     '<div class="bl-metric-card" title="Average elapsed time between lead detection and verified acquisition">' +
-                        '<span class="bl-metric-label">Acq Speed:</span>' +
-                        '<span id="bl-stat-speed" class="bl-metric-val">---</span>' +
+                        '<span class="bl-metric-label">Speed:</span>' +
+                        '<span id="bl-stat-speed" class="bl-metric-val">0s</span>' +
                     '</div>' +
-                    '<div class="bl-metric-card" title="Verified successful acquisitions divided by eligible acquisition attempts">' +
+                    '<div class="bl-metric-card" title="Verified successful acquisitions divided by eligible completed attempts">' +
                         '<span class="bl-metric-label">Acceptance:</span>' +
-                        '<span id="bl-stat-acceptance" class="bl-metric-val">---</span>' +
+                        '<span id="bl-stat-acceptance" class="bl-metric-val">0%</span>' +
                     '</div>' +
                 '</div>' +
                 '<div class="bl-warning" id="bl-warning-text"></div>' +
@@ -3327,27 +3502,6 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             resumeBtn.addEventListener('click', function(e) {
                 e.stopPropagation();
                 self.resume();
-            });
-        }
-
-        // ── Refresh scan button ──
-        var refreshBtn = document.getElementById('bl-refresh-btn');
-        if (refreshBtn) {
-            refreshBtn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                if (e.shiftKey) {
-                    self.showTopToast('refresh', 'Reloading Webpage', 'Full portal reload with automatic scan resume...', 2000);
-                    sessionStorage.setItem('bl_last_reload_flag', 'from_reload');
-                    setTimeout(function() { window.location.reload(); }, 200);
-                    return;
-                }
-                self.restartScan();
-            });
-            refreshBtn.addEventListener('dblclick', function(e) {
-                e.stopPropagation();
-                self.showTopToast('refresh', 'Reloading Webpage', 'Full portal reload with automatic scan resume...', 2000);
-                sessionStorage.setItem('bl_last_reload_flag', 'from_reload');
-                setTimeout(function() { window.location.reload(); }, 200);
             });
         }
 
@@ -3460,10 +3614,6 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             var statsScanned = document.getElementById('bl-stat-scanned');
             var statsAcquired = document.getElementById('bl-stat-acquired');
             var conn = document.getElementById('bl-connection-text');
-            var countryEl = document.getElementById('bl-country-text');
-            var rateEl = document.getElementById('bl-rate-text');
-            var kwEl = document.getElementById('bl-kw-text');
-            var qEl  = document.getElementById('bl-queue-text');
 
             var modeLabel = self.config.mode === 'AUTOMATIC' ? '[AUTO]' : (self.config.mode === 'ASSISTED' ? '[ASSIST]' : '[' + self.config.mode + ']');
             if (dot) dot.style.background = s.emergencyStop ? '#ef7076' : (s.cooldown ? '#fff5cc' : '#fff');
@@ -3477,7 +3627,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 else t += '⏹ Stopped';
                 text.textContent = t;
             }
-            if (statsScanned)  statsScanned.textContent  = self.stats.unique || self.stats.discovered;
+            if (statsScanned) statsScanned.textContent = self.stats.cycleScanned !== undefined ? self.stats.cycleScanned : (self.stats.unique || self.stats.discovered || 0);
             if (statsAcquired) statsAcquired.textContent = self.stats.acquired;
 
             var filtEl = document.getElementById('bl-stat-filtered');
@@ -3500,33 +3650,6 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 var kws = self.keywordManager.getAllKeywords();
                 conn.textContent = (self._supabaseEnabled ? '☁️ CRM' : '📴 Local') + ' (P' + kws.product.length + ')';
                 conn.style.color = self._supabaseEnabled ? '#02A699' : '#f5a623';
-            }
-            if (countryEl) {
-                if (self.config.strictCountryMode) {
-                    countryEl.textContent = '🌍 STRICT: ' + (self.config.allowedCountries.join(', ') || '—');
-                    countryEl.style.color = '#02A699';
-                    countryEl.style.fontWeight = '700';
-                } else {
-                    countryEl.textContent = '🌍 Any country';
-                    countryEl.style.color = '#999';
-                    countryEl.style.fontWeight = '400';
-                }
-            }
-            if (rateEl) {
-                var c = s.counters;
-                var lim = s.limits;
-                rateEl.textContent = '📊 ' + c.minute + '/' + lim.perMinute + ' min | ' + c.hour + '/' + lim.perHour + ' hr';
-                var nearLimit = (c.minute >= lim.perMinute) || (c.hour >= lim.perHour);
-                rateEl.style.color = nearLimit ? '#f5a623' : '#999';
-                rateEl.style.fontWeight = nearLimit ? '700' : '400';
-            }
-            if (kwEl) {
-                var k2 = self.keywordManager.getAllKeywords();
-                kwEl.textContent = 'KW: P' + k2.product.length + ' N' + k2.negative.length + ' R' + k2.required.length;
-            }
-            if (qEl) {
-                var q = self.queue.getStatus();
-                qEl.textContent = 'Queue: ' + q.size + (q.processing ? ' (1 active)' : '');
             }
 
             self._updateStopSoldUI();
@@ -3592,14 +3715,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // ============================================================
     Orchestrator.prototype._onCardsDetected = function(cards) {
         var self = this;
-        this.logger.info('📋 Processing ' + cards.length + ' new cards');
+        var newCards = cards || [];
+        this.stats.cycleScanned = (this.stats.cycleScanned || 0) + newCards.length;
+        this.logger.info('📋 Processing ' + newCards.length + ' new cards');
 
         var kws = this.keywordManager.getAllKeywords();
         this.logger.info('Keywords: P=' + kws.product.length + ' N=' + kws.negative.length + ' R=' + kws.required.length);
 
-        for (var i = 0; i < cards.length; i++) {
+        for (var i = 0; i < newCards.length; i++) {
             try {
-                var card = cards[i];
+                var card = newCards[i];
                 var raw = self.parser.parseCard(card.element, card.id);
                 if (!raw) { self.stats.failed++; continue; }
                 var lead = self.parser.normalize(raw);
@@ -3650,6 +3775,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"');
                     // NOTE: Do NOT markSeen() in duplicateManager — unacquired leads must remain available for rescan!
                     continue;
+                }
+
+                if (kw.filterId) {
+                    lead.filterId = kw.filterId;
+                    self.keywordManager.reserveSlot(kw.filterId, card.id);
                 }
 
                 if (self.metrics) self.metrics.recordMatch(card.id, Date.now());
@@ -3759,36 +3889,65 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
                     if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACT_PENDING');
 
-                    if (self.showTopToast) {
-                        self.showTopToast('contacted', 'Lead Acquired & Contacted', (lead.productName || 'Lead') + ' (' + (lead.senderMobile || 'Contacted') + ')', 2000);
-                    }
-
-                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACTED');
-                    if (self.metrics) self.metrics.recordContactSuccess(lead.leadId, Date.now());
-
-                    if (self._supabaseEnabled) {
-                        var savePromise = lead._savePromise || self._saveLeadToDb(lead, true);
-                        Promise.resolve(savePromise).then(function() {
-                            return self.supabase.markLeadContacted(lead._dbId || lead.uniqueQueryId);
-                        }).then(function() {
-                            if (lead._dbId) {
-                                return self.supabase.insertLeadHistory(lead._dbId, 'CONTACTED', { score: 'auto', mode: self.config.mode }, new Date().toISOString());
-                            }
-                        }).catch(function(err) {
-                            self.logger.warn('Failed to update lead contacted status', { error: err && err.message });
-                        });
+                    var contactSuccess = true;
+                    if (contactSuccess) {
+                        if (self.showTopToast) {
+                            self.showTopToast('contacted', 'Lead Acquired & Contacted', (lead.productName || 'Lead') + ' (' + (lead.senderMobile || 'Contacted') + ')', 2000);
+                        }
+                        if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACTED');
+                        if (self.metrics) {
+                            self.metrics.recordContactSuccess(lead.leadId, Date.now());
+                            self.metrics.recordLeadAttemptCompleted(lead.leadId, true);
+                        }
+                        if (lead.filterId) {
+                            self.keywordManager.recordFilterSuccess(lead.filterId, lead);
+                        }
+                        if (self._supabaseEnabled) {
+                            var savePromise = lead._savePromise || self._saveLeadToDb(lead, true);
+                            Promise.resolve(savePromise).then(function() {
+                                return self.supabase.markLeadContacted(lead._dbId || lead.uniqueQueryId);
+                            }).then(function() {
+                                if (lead._dbId) {
+                                    return self.supabase.insertLeadHistory(lead._dbId, 'CONTACTED', { score: 'auto', mode: self.config.mode }, new Date().toISOString());
+                                }
+                            }).catch(function(err) {
+                                self.logger.warn('Failed to update lead contacted status', { error: err && err.message });
+                            });
+                        }
+                    } else {
+                        if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACT_FAILED');
+                        if (self.metrics) {
+                            self.metrics.recordContactFailure(lead.leadId, 'contact_failed');
+                            self.metrics.recordLeadAttemptCompleted(lead.leadId, false);
+                        }
+                        if (lead.filterId) {
+                            self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
+                        }
                     }
                 } else if (result && result.simulated) {
                     self.stateMachine.setState(lead.leadId, 'DRY_RUN');
+                    if (lead.filterId) self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
                 } else {
                     self.stats.failed++;
                     var errMsg = (result && result.message) || 'Acquisition failed';
-                    self.stateMachine.setState(lead.leadId, 'FAILED', { error: errMsg });
-                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'ACQUISITION_FAILED');
-                    if (self.metrics) self.metrics.recordAcquisitionFailure(lead.leadId, errMsg);
+                    var isAccountBlock = result && (result.code === 'INSUFFICIENT_BALANCE' || result.code === 'SUBSCRIPTION_REQUIRED');
+                    self.stateMachine.setState(lead.leadId, isAccountBlock ? 'BLOCKED' : 'FAILED', { error: errMsg });
+                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, isAccountBlock ? 'BLOCKED' : 'ACQUISITION_FAILED');
+                    if (self.metrics) {
+                        self.metrics.recordAcquisitionFailure(lead.leadId, errMsg);
+                        self.metrics.recordLeadAttemptCompleted(lead.leadId, false);
+                    }
+                    if (lead.filterId) self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
                     self.logger.error('❌ Failed: ' + errMsg, { leadId: lead.leadId });
                     if (self.showTopToast) {
-                        self.showTopToast('failed', 'Contact Dropped / Failed', (lead.productName || 'Lead') + ' — ' + errMsg);
+                        self.showTopToast('failed', isAccountBlock ? 'Account Action Needed' : 'Contact Dropped / Failed', (lead.productName || 'Lead') + ' — ' + errMsg, isAccountBlock ? 6000 : 3000);
+                    }
+                    if (isAccountBlock) {
+                        var warnEl = document.getElementById('bl-warning-text');
+                        if (warnEl) {
+                            warnEl.textContent = '🛑 ' + errMsg;
+                            warnEl.classList.add('show');
+                        }
                     }
                 }
                 self._broadcastStatus();
