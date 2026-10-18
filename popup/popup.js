@@ -33,12 +33,15 @@ var _pendingLocal = {
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
-    initializeDefaultMode().then(function() {
-        loadAllSettings();
-        setupEventListeners();
-        updateStatus();
-        statusUpdateInterval = setInterval(updateStatus, 800);
-    });
+    // 1. Immediately wire all event listeners (0ms click response)
+    setupEventListeners();
+    // 2. Immediately load settings and apply saved mode UI
+    loadAllSettings();
+    // 3. Immediately query status and begin polling
+    updateStatus();
+    statusUpdateInterval = setInterval(updateStatus, 800);
+    // 4. Ensure default mode without delaying UI
+    initializeDefaultMode();
 });
 
 function initializeDefaultMode() {
@@ -46,24 +49,18 @@ function initializeDefaultMode() {
         browserAPI.storage.local.get(
             ['mode', 'userSetMode', 'initialized_v620'],
             function(result) {
-                if (!result.initialized_v620) {
+                var effectiveMode = result.mode || 'AUTOMATIC';
+                if (!result.mode || !result.initialized_v620) {
                     browserAPI.storage.local.set({
-                        mode: 'AUTOMATIC',
-                        userSetMode: false,
+                        mode: effectiveMode,
+                        userSetMode: !!result.userSetMode,
                         initialized_v620: true
                     }, function() {
-                        setModeInContent('AUTOMATIC').finally(function() { resolve(); });
+                        setModeInContent(effectiveMode).finally(function() { resolve(); });
                     });
                     return;
                 }
-
-                if (!result.userSetMode) {
-                    browserAPI.storage.local.set({ mode: 'AUTOMATIC', userSetMode: false }, function() {
-                        setModeInContent('AUTOMATIC').finally(function() { resolve(); });
-                    });
-                } else {
-                    setModeInContent(result.mode || 'MONITOR').finally(function() { resolve(); });
-                }
+                setModeInContent(effectiveMode).finally(function() { resolve(); });
             }
         );
     });
@@ -74,11 +71,12 @@ function initializeDefaultMode() {
 // ============================================================
 function loadAllSettings() {
     browserAPI.storage.local.get([
+        'mode',
         'supabaseEnabled', 'confirmationAnswer', 'autoMinimize',
-        'purchaseAction', 'autoScroll',
         'strictCountryMode', 'allowedCountries', 'strictCountryRejectUnknown',
         'maxPerMinute', 'cooldownMs'
     ], function(result) {
+        if (result.mode) applyModeUI(result.mode);
         supabaseEnabled = result.supabaseEnabled !== false;
         updateSupabaseUI(supabaseEnabled);
 
@@ -196,12 +194,17 @@ function updateSpeedUI(perMinute, cooldownMs) {
 // ============================================================
 // EVENT LISTENERS
 // ============================================================
+
+
 function setupEventListeners() {
-    // Mode buttons
+    // Mode buttons (ultra-responsive 1-click handler)
     document.querySelectorAll('.mode-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var mode = this.dataset.mode;
-            setMode(mode);
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var targetBtn = this.closest('.mode-btn') || this;
+            var mode = targetBtn.getAttribute('data-mode') || (targetBtn.dataset && targetBtn.dataset.mode);
+            if (mode) setMode(mode);
         });
     });
 
@@ -285,6 +288,8 @@ function setupEventListeners() {
         });
     }
 
+
+
     // Purchase toggle
     var purchaseToggle = document.getElementById('purchaseToggle');
     if (purchaseToggle) {
@@ -365,13 +370,62 @@ function setupEventListeners() {
 // ============================================================
 // MODE
 // ============================================================
+var _currentMode = "AUTOMATIC";
+var _lastModeChangeTime = 0;
+
+function applyModeUI(mode) {
+    if (!mode) return;
+    _currentMode = mode;
+
+    var buttons = document.querySelectorAll(".mode-btn");
+    for (var i = 0; i < buttons.length; i++) {
+        var b = buttons[i];
+        var m = b.getAttribute("data-mode") || (b.dataset && b.dataset.mode);
+        if (m === mode) {
+            b.classList.add("active");
+        } else {
+            b.classList.remove("active");
+        }
+    }
+
+    var badge = document.getElementById("modeBadge");
+    if (badge) {
+        badge.textContent = mode;
+        badge.className = "badge badge-" + mode.toLowerCase().replace("_", "");
+    }
+
+    var autoNotice = document.getElementById("autoNotice");
+    if (autoNotice) {
+        if (mode === "AUTOMATIC") {
+            autoNotice.classList.remove("hidden");
+        } else {
+            autoNotice.classList.add("hidden");
+        }
+    }
+
+    var safetyEl = document.getElementById("safetyStatus");
+    if (safetyEl) {
+        if (mode === "MONITOR") { safetyEl.textContent = "Monitor"; safetyEl.style.color = "#71717a"; }
+        else if (mode === "DRY_RUN") { safetyEl.textContent = "Dry Run"; safetyEl.style.color = "#d97706"; }
+        else if (mode === "AUTOMATIC") { safetyEl.textContent = "Auto"; safetyEl.style.color = "#18181b"; }
+        else if (mode === "ASSISTED") { safetyEl.textContent = "Assisted"; safetyEl.style.color = "#0d9488"; }
+    }
+}
+
 function setMode(mode) {
-    browserAPI.storage.local.set({ mode: mode, userSetMode: true }, function() {
-        setModeInContent(mode).then(function() {
-            showToast('Mode: ' + mode, 'success');
-            updateStatus();
-        });
-    });
+    if (!mode) return;
+
+    // 1. INSTANT OPTIMISTIC UI (0ms latency — instant 1-click visual response)
+    _currentMode = mode;
+    _lastModeChangeTime = Date.now();
+    applyModeUI(mode);
+    showToast('Mode: ' + mode, 'success');
+
+    // 2. Persist to storage immediately
+    browserAPI.storage.local.set({ mode: mode, userSetMode: true });
+
+    // 3. Notify content script & background
+    setModeInContent(mode);
 }
 
 function setModeInContent(mode) {
@@ -464,7 +518,15 @@ function updateStatus() {
         }
 
         var data = response;
-        var currentMode = data.mode || 'MONITOR';
+        var currentMode = data.mode || _currentMode || 'AUTOMATIC';
+
+        // Anti-race guard: If user recently switched mode within the last 2500ms, do NOT let a stale poll revert it!
+        if (_lastModeChangeTime && (Date.now() - _lastModeChangeTime < 2500)) {
+            currentMode = _currentMode;
+        } else {
+            _currentMode = currentMode;
+        }
+        applyModeUI(currentMode);
 
         // Mode badge
         var badge = document.getElementById('modeBadge');
@@ -591,10 +653,7 @@ function updateStatus() {
             }
         }
 
-        // Mode button highlight
-        document.querySelectorAll('.mode-btn').forEach(function(btn) {
-            btn.classList.toggle('active', btn.dataset.mode === currentMode);
-        });
+        // Mode button highlight handled uniformly by applyModeUI(currentMode)
     });
 }
 
@@ -646,3 +705,12 @@ window.addEventListener('unload', function() {
         statusUpdateInterval = null;
     }
 });
+if (typeof browserAPI !== 'undefined' && browserAPI.storage && browserAPI.storage.onChanged) {
+    browserAPI.storage.onChanged.addListener(function(changes, area) {
+        if (area === 'local' && changes.mode && changes.mode.newValue) {
+            if (!_lastModeChangeTime || (Date.now() - _lastModeChangeTime >= 2500)) {
+                applyModeUI(changes.mode.newValue);
+            }
+        }
+    });
+}

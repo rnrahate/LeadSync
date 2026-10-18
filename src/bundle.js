@@ -1,3 +1,4 @@
+
 // src/bundle.js
 // IndiaMART BuyLead Assistant - v6.2.0
 // ============================================================================
@@ -150,17 +151,39 @@ console.log('🔗 https://keynlabs.vercel.app/');
     // ============================================================
     function LeadIdGenerator() {}
 LeadIdGenerator.prototype.generateFromElement = function(element) {
-    var dataId = element.getAttribute('data-lead-id');
+    // 1. Direct lead / enquiry ID attributes
+    var dataId = element.getAttribute('data-lead-id')
+              || element.getAttribute('data-query-id')
+              || element.getAttribute('data-buyer-id')
+              || element.getAttribute('data-glusr-id')
+              || element.getAttribute('data-blid');
     if (dataId) return 'dm_' + dataId;
 
+    var elemId = element.getAttribute('id') || '';
+    var idMatch = elemId.match(/(?:BLCard|BLbp|card)[_\-]?(\d+)/i);
+    // Real IndiaMART enquiry/lead IDs have 6+ digits; small numbers (e.g. id_BLCard1) are DOM indices, not lead IDs
+    if (idMatch && idMatch[1].length >= 6) return 'cid_' + idMatch[1];
+
+    // 2. Links with lead / buyer IDs
     var links = element.querySelectorAll('a[href]');
     for (var i = 0; i < links.length; i++) {
         var href = links[i].getAttribute('href') || '';
-        var match = href.match(/(?:buyerid|leadid|blid|queryid)[=\/](\d+)/i);
+        var match = href.match(/(?:buyerid|glusrid|leadid|blid|queryid)[=\/](\d+)/i);
         if (match) return 'lnk_' + match[1];
     }
 
-    // Fall back to product + location hash
+    // 3. Button attributes (data-click-data, data-query-id, data-lead-id)
+    var btn = element.querySelector('button, a, [role="button"]');
+    if (btn) {
+        var btnData = btn.getAttribute('data-click-data') || '';
+        var btnMatch = btnData.match(/"(?:queryid|buyerid|leadid|glusrid)"\s*:\s*"?(\d+)"?/i)
+                    || btnData.match(/(?:queryid|buyerid|leadid|glusrid)=(\d+)/i);
+        if (btnMatch) return 'btn_' + btnMatch[1];
+        var btnDirectId = btn.getAttribute('data-query-id') || btn.getAttribute('data-lead-id');
+        if (btnDirectId) return 'btn_' + btnDirectId;
+    }
+
+    // 4. Distinguish by Product + Location + Seller / Buyer + Quantity + Requirement
     var productEl = element.querySelector('.BLbp_title')
                  || element.querySelector('[class*="BuyLdC"] span.SLC_f18')
                  || element.querySelector('span.SLC_f18');
@@ -170,7 +193,16 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
              || element.querySelector('[class*="BuyLdC_time_loc"] strong');
     var locationText = locEl ? locEl.textContent.trim() : '';
 
-    var combined = productText + '|' + locationText;
+    var sellerEl = element.querySelector('.BLbp_byrName, .BLbp_buyer, [class*="buyer"], [class*="byr_name"], [class*="buyerName"], [class*="company"], [class*="comp_name"], [class*="senderName"], .BLbp_member, .BLbp_byrInfo, .SLC_byr, [class*="byrInfo"]');
+    var sellerText = sellerEl ? sellerEl.textContent.trim() : '';
+
+    var descEl = element.querySelector('.BLbp_desc, [class*="BuyLdC_msg"], [class*="desc"]');
+    var descText = descEl ? descEl.textContent.trim() : '';
+
+    var qtyEl = element.querySelector('.BLbp_qty, [class*="quantity"], [class*="qty"]');
+    var qtyText = qtyEl ? qtyEl.textContent.trim() : '';
+
+    var combined = productText + '|' + locationText + '|' + sellerText + '|' + qtyText + '|' + descText.substring(0, 60);
     if (combined.length < 5) return null;
 
     var hash = 0;
@@ -190,6 +222,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this.orchestrator = orchestrator;
         this._running = false;
         this._loopTimer = null;
+        this._startTimer = null;
+        this._cooldownTimer = null;
+        this._settleTimer = null;
+        this._stepTimer = null;
         this._loopInProgress = false;
         this._noMoreCount = 0;
         this._lastLeadCount = 0;
@@ -220,32 +256,100 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._running = true;
         var self = this;
         this.logger.info('▶ Bottom-loop navigator started');
-        setTimeout(function() { self._startLoop(); }, 800);
+        if (this._startTimer) { clearTimeout(this._startTimer); }
+        this._startTimer = setTimeout(function() { self._startLoop(); }, 400);
     };
 
     PageNavigator.prototype.stop = function() {
         this._running = false;
         this._loopInProgress = false;
-        if (this._loopTimer) { clearTimeout(this._loopTimer); this._loopTimer = null; }
-        this.logger.info('⏹ Bottom-loop navigator stopped');
+        if (this._loopTimer)     { clearTimeout(this._loopTimer);     this._loopTimer = null; }
+        if (this._startTimer)    { clearTimeout(this._startTimer);    this._startTimer = null; }
+        if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null; }
+        if (this._settleTimer)   { clearTimeout(this._settleTimer);   this._settleTimer = null; }
+        if (this._stepTimer)     { clearTimeout(this._stepTimer);     this._stepTimer = null; }
+        this.logger.info('⏹ Bottom-loop navigator cleanly stopped (all timers cleared)');
     };
 
-        PageNavigator.prototype._startLoop = function() {
+    PageNavigator.prototype.restart = function() {
+        this.stop();
+        this._running = true;
+        this._loopInProgress = false;
+        var self = this;
+        this.logger.info('🔄 Bottom-loop navigator restarted cleanly from top');
+        try {
+            window.scrollTo(0, 0);
+            window.dispatchEvent(new Event('scroll'));
+        } catch (e) {}
+        this._startTimer = setTimeout(function() {
+            self._startLoop();
+        }, 200);
+    };
+
+    PageNavigator.prototype._startLoop = function() {
         var self = this;
         if (!this._running || this._loopInProgress) return;
         this._loopInProgress = true;
 
-        // LIVE MODE: no scroll, no "Show more".
-        // Wait for scanner to process top cards, then reload for fresh leads.
-        setTimeout(function() {
+        // Check for dynamic filter changes before starting scan pass
+        var filterPromise = (self.orchestrator && self.orchestrator._checkDynamicFilterChanges)
+            ? self.orchestrator._checkDynamicFilterChanges()
+            : Promise.resolve(false);
+
+        filterPromise.then(function() {
             if (!self._running) { self._loopInProgress = false; return; }
-            self.logger.info('🔄 Live scan wait complete — reloading');
-            self._running = false;
-            self._loopInProgress = false;
-            self.orchestrator.stats.loopsCompleted++;
-            if (self._settings.autoReloadOnComplete) self._autoReloadPage();
-            else self._showFinalBanner();
-        }, self._settings.liveScanWaitMs);
+
+            // Ensure scanner resets per-pass cache so all unacquired leads in feed are evaluated
+            if (self.orchestrator && self.orchestrator.scanner) {
+                self.orchestrator.scanner.resetEmitted();
+                self.orchestrator.scanner._scan();
+            }
+
+            // Phase 1: Fast continuous scroll from topmost to bottom-most, scanning all leads
+            self._fastScrollToBottom(function(result) {
+                if (!self._running) { self._loopInProgress = false; return; }
+                var reason = result && result.reason;
+
+                if (reason === 'age_limit_reached') {
+                    self.logger.info('⏳ Max lead age reached (' + (result.ageText || '') + '). Pausing 2s before rescanning top.');
+                    if (self.orchestrator && self.orchestrator.showTopToast) {
+                        self.orchestrator.showTopToast('info', 'Max Age Reached', 'Hit older leads (' + (result.ageText || '') + '). Rescanning top in 2s...', 2000);
+                    }
+                } else {
+                    self.logger.info('🏁 Reached end of active leads list. Pausing 2s before rescanning top.');
+                    if (self.orchestrator && self.orchestrator.showTopToast) {
+                        self.orchestrator.showTopToast('info', 'End of Feed Reached', 'Scanned all available leads. Rescanning top in 2s...', 2000);
+                    }
+                }
+
+                // Phase 2: Pause 2 seconds at bottom for real-time cooldown, then jump to top and rescan
+                self._cooldownTimer = setTimeout(function() {
+                    if (!self._running) { self._loopInProgress = false; return; }
+                    try {
+                        window.scrollTo(0, 0);
+                        window.dispatchEvent(new Event('scroll'));
+                    } catch (e) {}
+
+                    // Allow 200ms to settle at top
+                    self._settleTimer = setTimeout(function() {
+                        if (!self._running) { self._loopInProgress = false; return; }
+
+                        // Scan at utmost top for new arrivals & click any new leads banner
+                        if (self.orchestrator && self.orchestrator.scanner) {
+                            self.orchestrator.scanner.resetEmitted();
+                            self.orchestrator.scanner._scan();
+                        }
+
+                        self._loopInProgress = false;
+                        if (self.orchestrator && self.orchestrator.stats) {
+                            self.orchestrator.stats.loopsCompleted++;
+                        }
+                        // Continuous scanning: immediately schedule next loop till user pauses
+                        self._scheduleNextLoop();
+                    }, 200);
+                }, self._settings.liveScanWaitMs || 2000);
+            });
+        });
     };
 
     PageNavigator.prototype._scheduleNextLoop = function() {
@@ -254,30 +358,72 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._loopTimer = setTimeout(function() { self._startLoop(); }, this._settings.loopIntervalMs);
     };
 
-    // Fast scroll: single rAF batch, minimal DOM reads.
+    // Fast scroll: continuous downward pass till end of active feed
     PageNavigator.prototype._fastScrollToBottom = function(done) {
         var self = this;
         var lastY = -1;
         var sameCount = 0;
-        var maxSame = 4;
+        var maxSame = 8;
 
         function step() {
-            if (!self._running) { done(); return; }
+            if (!self._running) { done({ reason: 'stopped' }); return; }
+
+            // SCAN on every downward step so all leads from utmost top to bottom-most are scanned!
+            if (self.orchestrator && self.orchestrator.scanner) {
+                self.orchestrator.scanner._scan();
+            }
+
             var docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
             var maxY = Math.max(0, docHeight - window.innerHeight);
             var curY = window.scrollY;
 
-            if (curY >= maxY - 5) { done(); return; }
+            // When near the bottom of currently loaded content
+            if (curY >= maxY - 40) {
+                // Final scan at current bottom
+                if (self.orchestrator && self.orchestrator.scanner) {
+                    self.orchestrator.scanner._scan();
+                }
+
+                // Try clicking "Show More / Load More" to continue scrolling further
+                var clicked = self._clickLoadMore();
+                if (clicked) {
+                    if (self.orchestrator && self.orchestrator.stats) self.orchestrator.stats.loadMoreClicks++;
+                    setTimeout(step, self._settings.loadMoreWaitMs || 800);
+                    return;
+                }
+
+                sameCount++;
+                if (sameCount >= maxSame) {
+                    done({ reason: 'end_of_list' });
+                    return;
+                }
+                setTimeout(step, 300);
+                return;
+            }
 
             var newY = Math.min(curY + self._settings.scrollSpeed, maxY);
-            try { window.scrollTo(0, newY); } catch (e) {}
+            try {
+                window.scrollTo(0, newY);
+                window.dispatchEvent(new Event('scroll'));
+            } catch (e) {}
 
             if (Math.abs(newY - lastY) < 5) {
                 sameCount++;
-                if (sameCount >= maxSame) { done(); return; }
-            } else { sameCount = 0; }
+                if (sameCount >= maxSame) {
+                    var loadMoreBtn = self._clickLoadMore();
+                    if (loadMoreBtn) {
+                        sameCount = 0;
+                        setTimeout(step, self._settings.loadMoreWaitMs || 800);
+                        return;
+                    }
+                    done({ reason: 'end_of_list' });
+                    return;
+                }
+            } else {
+                sameCount = 0;
+            }
             lastY = newY;
-            setTimeout(step, self._settings.scrollDelayMs);
+            self._stepTimer = setTimeout(step, self._settings.scrollDelayMs || 40);
         }
         step();
     };
@@ -669,7 +815,322 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     PopupManager.prototype.getCount = function() { return this._handledCount; };
 
     // ============================================================
-    // KEYWORD MANAGER — WORD-BOUNDARY MATCHING (v6.2)
+    // MATCHING ENGINE & KEYWORD NORMALIZATION (v6.3 - GRAVITAS)
+    // ============================================================
+    function normalizeText(text) {
+        if (!text) return '';
+        return String(text)
+            .normalize('NFKC')
+            .toLowerCase()
+            .replace(/(\d+)\s*(g|gm|gms|gram|grams|kg|kgs|ml|ltr|l|mg|mcg|oz|tab|tabs|tablet|tablets|cap|caps|capsule|capsules|pc|pcs|piece|pieces|box|boxes|strip|strips|vial|vials|bottle|bottles|pack|packs)\b/gi, '$1$2')
+            .replace(/\bspf\s*(\d+)\b/gi, 'spf$1')
+            .replace(/[^\w\s\-\.]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function tokenize(normalizedText) {
+        if (!normalizedText) return [];
+        return normalizedText.split(/\s+/).filter(function(t) { return t.length > 0; });
+    }
+
+    var COMMON_FORMS = [
+        'gel', 'cream', 'lotion', 'ointment', 'serum', 'oil', 'soap', 'facewash', 'face wash',
+        'tablet', 'capsule', 'syrup', 'injection', 'powder', 'drops', 'spray', 'solution', 'shampoo',
+        'sunscreen', 'cleanser', 'scrub', 'moisturizer', 'balm'
+    ];
+
+    var SYNONYM_MAP = {
+        'sunscreen': ['sun screen', 'sunblock', 'sun block', 'sun protection'],
+        'facewash': ['face wash', 'facial cleanser', 'cleanser'],
+        'moisturizer': ['moisturiser', 'moisturizing cream', 'cold cream'],
+        'tab': ['tablet', 'tablets'],
+        'cap': ['capsule', 'capsules'],
+        'inj': ['injection', 'injections'],
+        'syr': ['syrup']
+    };
+
+    function extractAttributes(normText) {
+        var attrs = { spf: null, strengths: [], sizes: [], forms: [] };
+        if (!normText) return attrs;
+
+        var spfMatch = normText.match(/\bspf(\d+)\b/);
+        if (spfMatch) attrs.spf = 'spf' + spfMatch[1];
+
+        var strengthMatches = normText.match(/\b\d+(?:mg|mcg|iu|%)\b/g);
+        if (strengthMatches) attrs.strengths = strengthMatches;
+
+        var sizeMatches = normText.match(/\b\d+(?:g|gm|kg|ml|l|ltr|oz)\b/g);
+        if (sizeMatches) attrs.sizes = sizeMatches;
+
+        for (var i = 0; i < COMMON_FORMS.length; i++) {
+            var f = COMMON_FORMS[i];
+            var rx = new RegExp('\\b' + f + '\\b', 'i');
+            if (rx.test(normText)) attrs.forms.push(f);
+        }
+        return attrs;
+    }
+
+    function wordBoundaryMatch(haystackNorm, needleNorm) {
+        if (!haystackNorm || !needleNorm) return false;
+        var needleTokens = tokenize(needleNorm);
+        var haystackTokens = tokenize(haystackNorm);
+        if (needleTokens.length === 0 || haystackTokens.length === 0) return false;
+
+        if (needleTokens.length === 1) {
+            var n = needleTokens[0];
+            for (var i = 0; i < haystackTokens.length; i++) {
+                var h = haystackTokens[i];
+                if (h === n) return true;
+                if (h === n + 's' || h === n + 'es') return true;
+                if (n.length >= 5 && h.length > n.length && h.indexOf(n) === 0) return true;
+            }
+            return false;
+        } else {
+            for (var k = 0; k < needleTokens.length; k++) {
+                var found = false;
+                var req = needleTokens[k];
+                for (var j = 0; j < haystackTokens.length; j++) {
+                    var tok = haystackTokens[j];
+                    if (tok === req || tok === req + 's' || tok === req + 'es') {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+    }
+
+    function LeadMatcher() {
+        this.minConfidenceScore = 60;
+    }
+
+    // Stage A: Hard Eligibility Constraints
+    LeadMatcher.prototype.checkEligibility = function(lead, filter) {
+        var rawProd = lead.productName || '';
+        var normProd = normalizeText(rawProd);
+        var leadAttrs = extractAttributes(normProd);
+
+        // 1. Negative keywords rejection
+        var negKws = filter.negativeKeywords || filter.negative_keywords || [];
+        for (var i = 0; i < negKws.length; i++) {
+            var negNorm = normalizeText(negKws[i]);
+            if (negNorm && wordBoundaryMatch(normProd, negNorm)) {
+                return { eligible: false, reason: 'negative_keyword_match', detail: 'Matched negative: ' + negKws[i] };
+            }
+        }
+
+        // 2. Hard attribute conflicts
+        var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
+        for (var j = 0; j < prodKws.length; j++) {
+            var kwNorm = normalizeText(prodKws[j]);
+            var kwAttrs = extractAttributes(kwNorm);
+
+            // SPF conflict
+            if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf !== leadAttrs.spf) {
+                return { eligible: false, reason: 'attribute_conflict_spf', detail: 'Filter requires ' + kwAttrs.spf + ' but lead specifies ' + leadAttrs.spf };
+            }
+
+            // Size conflict
+            if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
+                var sizeConflict = true;
+                for (var s1 = 0; s1 < kwAttrs.sizes.length; s1++) {
+                    if (leadAttrs.sizes.indexOf(kwAttrs.sizes[s1]) !== -1) {
+                        sizeConflict = false;
+                        break;
+                    }
+                }
+                if (sizeConflict) {
+                    return { eligible: false, reason: 'attribute_conflict_size', detail: 'Filter requires ' + kwAttrs.sizes.join('/') + ' but lead specifies ' + leadAttrs.sizes.join('/') };
+                }
+            }
+
+            // Form conflict (e.g. lotion vs gel)
+            var conflictingForms = [
+                ['gel', 'lotion'],
+                ['gel', 'cream'],
+                ['tablet', 'syrup'],
+                ['capsule', 'syrup']
+            ];
+            for (var c = 0; c < conflictingForms.length; c++) {
+                var pair = conflictingForms[c];
+                if (kwAttrs.forms.indexOf(pair[0]) !== -1 && leadAttrs.forms.indexOf(pair[1]) !== -1) {
+                    return { eligible: false, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[0] + ' but lead specifies conflicting form ' + pair[1] };
+                }
+                if (kwAttrs.forms.indexOf(pair[1]) !== -1 && leadAttrs.forms.indexOf(pair[0]) !== -1) {
+                    return { eligible: false, reason: 'attribute_conflict_form', detail: 'Filter requires ' + pair[1] + ' but lead specifies conflicting form ' + pair[0] };
+                }
+            }
+        }
+
+        return { eligible: true, reason: null };
+    };
+
+    // Stage B: Relevance Scoring (0 - 100)
+    LeadMatcher.prototype.computeScore = function(lead, filter) {
+        var rawProd = lead.productName || '';
+        var normLead = normalizeText(rawProd);
+        var leadTokens = tokenize(normLead);
+        var leadAttrs = extractAttributes(normLead);
+
+        var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
+        if (prodKws.length === 0) {
+            return { score: 0, matchedKeyword: null, confidence: 0, reasons: ['No product keywords configured'] };
+        }
+
+        var filterAllSizes = [];
+        for (var fIdx = 0; fIdx < prodKws.length; fIdx++) {
+            var fAttrs = extractAttributes(normalizeText(prodKws[fIdx]));
+            for (var si = 0; si < fAttrs.sizes.length; si++) {
+                if (filterAllSizes.indexOf(fAttrs.sizes[si]) === -1) filterAllSizes.push(fAttrs.sizes[si]);
+            }
+        }
+
+        var bestScore = 0;
+        var bestKw = null;
+        var bestReasons = [];
+        var totalKeywordsMatched = 0;
+
+        for (var i = 0; i < prodKws.length; i++) {
+            var rawKw = prodKws[i];
+            var normKw = normalizeText(rawKw);
+            var kwTokens = tokenize(normKw);
+            var kwAttrs = extractAttributes(normKw);
+
+            if (kwTokens.length === 0) continue;
+
+            var score = 0;
+            var reasons = [];
+
+            // Factor 1: Exact phrase match (+30)
+            if (normLead.indexOf(normKw) !== -1) {
+                score += 30;
+                reasons.push('exact_phrase_match (+30)');
+            }
+
+            // Factor 2: Token coverage (+25 max)
+            var matchedTokensCount = 0;
+            for (var t = 0; t < kwTokens.length; t++) {
+                var tok = kwTokens[t];
+                var matchedTok = false;
+                for (var lt = 0; lt < leadTokens.length; lt++) {
+                    var lTok = leadTokens[lt];
+                    if (lTok === tok || lTok === tok + 's' || lTok === tok + 'es') {
+                        matchedTok = true;
+                        break;
+                    }
+                }
+                if (matchedTok) matchedTokensCount++;
+            }
+            var coverage = matchedTokensCount / kwTokens.length;
+            var coveragePoints = Math.round(coverage * 25);
+            score += coveragePoints;
+            reasons.push('token_coverage (' + Math.round(coverage * 100) + '%: +' + coveragePoints + ')');
+
+            if (coverage >= 0.7) totalKeywordsMatched++;
+
+            // Factor 3: Attribute agreement (+15 SPF, +15 size, +10 form)
+            if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf === leadAttrs.spf) {
+                score += 15;
+                reasons.push('spf_agreement (+15)');
+            }
+            if (kwAttrs.sizes.length > 0 && leadAttrs.sizes.length > 0) {
+                for (var s = 0; s < kwAttrs.sizes.length; s++) {
+                    if (leadAttrs.sizes.indexOf(kwAttrs.sizes[s]) !== -1) {
+                        score += 15;
+                        reasons.push('size_agreement (+15)');
+                        break;
+                    }
+                }
+            }
+            if (kwAttrs.forms.length > 0 && leadAttrs.forms.length > 0) {
+                for (var f = 0; f < kwAttrs.forms.length; f++) {
+                    if (leadAttrs.forms.indexOf(kwAttrs.forms[f]) !== -1) {
+                        score += 10;
+                        reasons.push('form_agreement (+10)');
+                        break;
+                    }
+                }
+            }
+
+            // Factor 4: Synonyms match (+5)
+            for (var synKey in SYNONYM_MAP) {
+                if (normKw.indexOf(synKey) !== -1) {
+                    var syns = SYNONYM_MAP[synKey];
+                    for (var synIdx = 0; synIdx < syns.length; synIdx++) {
+                        if (normLead.indexOf(syns[synIdx]) !== -1) {
+                            score += 5;
+                            reasons.push('synonym_match (' + syns[synIdx] + ': +5)');
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestKw = rawKw;
+                bestReasons = reasons;
+            }
+        }
+
+        // Multi-keyword bonus (+15)
+        if (totalKeywordsMatched > 1) {
+            bestScore += 15;
+            bestReasons.push('multi_keyword_coverage (+15)');
+        }
+
+        // Missing size penalty (-15) if filter requires specific size but lead omits it
+        if (filterAllSizes.length > 0 && leadAttrs.sizes.length === 0) {
+            bestScore -= 15;
+            bestReasons.push('missing_filter_size_penalty (-15)');
+        }
+
+        bestScore = Math.max(0, Math.min(100, bestScore));
+
+        return {
+            score: bestScore,
+            matchedKeyword: bestKw,
+            confidence: bestScore / 100,
+            accepted: bestScore >= this.minConfidenceScore,
+            reasons: bestReasons
+        };
+    };
+
+    LeadMatcher.prototype.evaluate = function(lead, filter) {
+        var elig = this.checkEligibility(lead, filter);
+        if (!elig.eligible) {
+            return { passed: false, stage: 'A_ELIGIBILITY', reason: elig.reason, detail: elig.detail, score: 0 };
+        }
+        var scoring = this.computeScore(lead, filter);
+        if (!scoring.accepted) {
+            return { passed: false, stage: 'B_SCORING', reason: 'low_confidence_score', score: scoring.score, confidence: scoring.confidence, reasons: scoring.reasons };
+        }
+        return {
+            passed: true,
+            stage: 'ACCEPTED',
+            reason: null,
+            score: scoring.score,
+            confidence: scoring.confidence,
+            matchedKeyword: scoring.matchedKeyword,
+            reasons: scoring.reasons,
+            filterId: filter.id,
+            filterName: filter.filter_name || filter.name
+        };
+    };
+
+    LeadMatcher.prototype.rankCandidates = function(candidates) {
+        return candidates.slice().sort(function(a, b) {
+            if (b.score !== a.score) return b.score - a.score;
+            if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+            return String(a.filter ? a.filter.id : '').localeCompare(String(b.filter ? b.filter.id : ''));
+        });
+    };
+
+    // ============================================================
+    // KEYWORD MANAGER (v6.3 - GRAVITAS MATCHING & ACTIVE FILTER COUNT)
     // ============================================================
     function KeywordManager() {
         this.logger = new Logger('KeywordManager');
@@ -677,7 +1138,22 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._localKeywords    = { product: [], negative: [], location: [], required: [] };
         this._supabaseKeywords = { product: [], negative: [], location: [], required: [] };
         this._supabaseEnabled = true;
+        this.matcher = new LeadMatcher();
+        this._activeFilters = [];
     }
+
+    KeywordManager.prototype.getActiveFilterCount = function() {
+        if (this._activeFilters && this._activeFilters.length > 0) {
+            return this._activeFilters.filter(function(f) { return f.isActive !== false; }).length;
+        }
+        if (this._supabaseKeywords && this._supabaseKeywords.product && this._supabaseKeywords.product.length > 0) {
+            return this._supabaseKeywords.product.length;
+        }
+        if (this._localKeywords && this._localKeywords.product && this._localKeywords.product.length > 0) {
+            return this._localKeywords.product.length;
+        }
+        return 0;
+    };
 
     KeywordManager.prototype.setSupabaseEnabled = function(enabled) {
         this._supabaseEnabled = enabled;
@@ -685,49 +1161,11 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     };
 
     KeywordManager.prototype._normalize = function(text) {
-        if (!text) return '';
-        return String(text)
-            .toLowerCase()
-            .replace(/[^\w\s]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
+        return normalizeText(text);
     };
 
-    // WORD-BOUNDARY MATCHING
-    // Single-word kw: exact token, or token startsWith kw when kw.length >= 4,
-    //                 or plural form (kw+s / kw+es).
-    // Multi-word kw: every kw token must appear as a token (any order).
     KeywordManager.prototype._textMatches = function(text, keyword) {
-        if (!text || !keyword) return false;
-        var normText = this._normalize(text);
-        var normKw   = this._normalize(keyword);
-        if (!normText || !normKw) return false;
-
-        var words  = normText.split(' ').filter(function(w) { return w.length > 0; });
-        var kwWords = normKw.split(' ').filter(function(w) { return w.length > 0; });
-
-        if (kwWords.length === 1) {
-            var kw = kwWords[0];
-            for (var i = 0; i < words.length; i++) {
-                var w = words[i];
-                if (w === kw) return true;
-                if (w === kw + 's' || w === kw + 'es') return true;
-                if (kw.length >= 4 && w.length > kw.length && w.indexOf(kw) === 0) return true;
-            }
-            return false;
-        } else {
-            for (var k = 0; k < kwWords.length; k++) {
-                var found = false;
-                for (var j = 0; j < words.length; j++) {
-                    var w2 = words[j];
-                    if (w2 === kwWords[k]) { found = true; break; }
-                    if (w2 === kwWords[k] + 's' || w2 === kwWords[k] + 'es') { found = true; break; }
-                    if (kwWords[k].length >= 4 && w2.length > kwWords[k].length && w2.indexOf(kwWords[k]) === 0) { found = true; break; }
-                }
-                if (!found) return false;
-            }
-            return true;
-        }
+        return wordBoundaryMatch(normalizeText(text), normalizeText(keyword));
     };
 
     KeywordManager.prototype.loadKeywords = function() {
@@ -773,7 +1211,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         };
 
         function normForMatch(t) {
-            return String(t == null ? '' : t).toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+            return normalizeText(t);
         }
 
         var rules = [];
@@ -790,29 +1228,42 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 }
                 return out;
             };
-                        rules.push({
+
+            var prodNames = [].concat(
+                Array.isArray(cfg.product_names) ? cfg.product_names : [],
+                Array.isArray(f.product_keywords) ? f.product_keywords : []
+            );
+            var negNames = [].concat(
+                Array.isArray(cfg.negative_keywords) ? cfg.negative_keywords : [],
+                Array.isArray(f.negative_keywords) ? f.negative_keywords : []
+            );
+
+            rules.push({
                 id: f.id,
                 name: f.filter_name || ('filter_' + f.id),
-                keywords:         uniqNorm(cfg.product_names),
+                keywords:         uniqNorm(prodNames),
                 matchMode:        cfg.match_mode === 'all' ? 'all' : 'any',
-                negativeKeywords: uniqNorm(cfg.negative_keywords),
+                negativeKeywords: uniqNorm(negNames),
                 locations: uniqNorm([].concat(
                     Array.isArray(cfg.countries) ? cfg.countries : [],
                     Array.isArray(cfg.states)    ? cfg.states    : [],
-                    Array.isArray(cfg.cities)    ? cfg.cities    : []
+                    Array.isArray(cfg.cities)    ? cfg.cities    : [],
+                    Array.isArray(f.location_keywords) ? f.location_keywords : []
                 )),
                 restrictedCountries: uniqNorm(cfg.restricted_countries),
-                               requireMobile:   cfg.require_mobile   === true,
+                requireMobile:   cfg.require_mobile   === true,
                 requireWhatsapp: cfg.require_whatsapp === true,
                 requireEmail:    cfg.require_email    === true,
                 quantityUnit:    typeof cfg.quantity_unit === 'string' ? cfg.quantity_unit.toLowerCase() : '',
                 minQuantity:     (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : 0,
-                _indianStates: INDIAN_STATES
+                isActive:        f.is_active !== false,
+                rawFilter:       f,
+                _indianStates:   INDIAN_STATES
             });
         }
         this._activeFilters = rules;
 
-        // Also keep legacy flat lists for local-mode fallback
+        // Keep flat lists for backward compatibility and status text
         var product = [], negative = [], location = [], required = [];
         var addUnique = function(arr, item) {
             if (!item || typeof item !== 'string') return;
@@ -833,7 +1284,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
         this._supabaseKeywords = { product: product, negative: negative, location: location, required: required };
         this._rebuildKeywords();
-        this.logger.info('📥 Supabase filters built', { rules: rules.length, product: product.length });
+        this.logger.info('📥 Supabase filters built', { rules: rules.length, product: product.length, activeCount: this.getActiveFilterCount() });
     };
 
     KeywordManager.prototype._rebuildKeywords = function() {
@@ -872,74 +1323,55 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         });
     };
 
-        KeywordManager.prototype.evaluateFilters = function(lead) {
+    // Evaluates a candidate lead against all active filters with Stage A eligibility & Stage B candidate ranking
+    KeywordManager.prototype.evaluateFilters = function(lead) {
         var self = this;
         var rules = this._activeFilters || [];
-        if (rules.length === 0) {
+        var activeRules = rules.filter(function(r) { return r.isActive !== false; });
+        if (activeRules.length === 0) {
             return { passed: false, reason: 'no_active_filter', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
         }
 
-        function normForMatch(t) {
-            return String(t == null ? '' : t).toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
-        }
-
-        var normProduct = normForMatch(lead.productName || '');
-        var rawProduct  = lead.productName || '';
         var contact = lead.contact || {};
         var leadCountryIso = (lead.countryIso || '').toUpperCase().trim();
-
-        // Location parts from lead
         var locParts = [];
-        if (lead.city)  locParts.push(normForMatch(lead.city));
-        if (lead.state) locParts.push(normForMatch(lead.state));
-        if (leadCountryIso === 'IN') locParts.push('india');
+        if (lead.city) locParts.push(normalizeText(lead.city));
+        if (lead.state) locParts.push(normalizeText(lead.state));
+        if (lead.location) locParts.push(normalizeText(lead.location));
+        if (leadCountryIso) {
+            locParts.push(leadCountryIso.toLowerCase());
+            if (leadCountryIso === 'IN') {
+                locParts.push('india');
+            } else {
+                locParts.push('foreign', 'international', 'export', 'overseas');
+            }
+        }
+        if (lead.country) locParts.push(normalizeText(lead.country));
 
         function locationMatches(rule) {
-            if (rule.locations.length === 0) return true;
+            if (!rule.locations || rule.locations.length === 0) return true;
             for (var i = 0; i < rule.locations.length; i++) {
                 var entry = rule.locations[i];
-                if (entry === 'india') {
+                if (entry === 'india' || entry === 'in') {
                     if (leadCountryIso === 'IN') return true;
                     for (var p = 0; p < locParts.length; p++) {
-                        if (rule._indianStates[locParts[p]]) return true;
+                        if (rule._indianStates && rule._indianStates[locParts[p]]) return true;
                     }
                     continue;
                 }
                 for (var q = 0; q < locParts.length; q++) {
-                    if (locParts[q] === entry) return true;
+                    if (locParts[q] === entry || locParts[q].indexOf(entry) !== -1 || entry.indexOf(locParts[q]) !== -1) return true;
                 }
             }
             return false;
         }
 
-        for (var i = 0; i < rules.length; i++) {
-            var r = rules[i];
+        var candidateMatches = [];
 
-            // 1) NEGATIVE KEYWORDS — agar koi bhi match kare productName se, skip
-            if (r.negativeKeywords && r.negativeKeywords.length > 0) {
-                var negHit = false;
-                for (var ni = 0; ni < r.negativeKeywords.length; ni++) {
-                    if (self._textMatches(rawProduct, r.negativeKeywords[ni])) { negHit = true; break; }
-                }
-                if (negHit) continue;
-            }
+        for (var i = 0; i < activeRules.length; i++) {
+            var r = activeRules[i];
 
-            // 2) KEYWORD MATCH — word-level, productName ke against
-            if (r.keywords.length > 0) {
-                var matched = [];
-                for (var ki = 0; ki < r.keywords.length; ki++) {
-                    if (self._textMatches(rawProduct, r.keywords[ki])) {
-                        matched.push(r.keywords[ki]);
-                    }
-                }
-                if (r.matchMode === 'all') {
-                    if (matched.length !== r.keywords.length) continue;
-                } else {
-                    if (matched.length === 0) continue;
-                }
-            }
-
-            // 3) RESTRICTED COUNTRIES — agar lead ka country restrict list mein hai, skip to remove the country while creating lead
+            // 1. Restricted countries check
             if (r.restrictedCountries && r.restrictedCountries.length > 0) {
                 var restricted = false;
                 if (leadCountryIso) {
@@ -958,38 +1390,59 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 if (restricted) continue;
             }
 
-            // 4) LOCATION (include list)
+            // 2. Location include check
             if (!locationMatches(r)) continue;
 
-                        // 5) CONTACT REQUIREMENTS — OR logic
-            //    Client ne jo bhi select kiya, un mein se at least 1 lead mein hona chahiye.
+            // 3. Contact requirements
             var anyRequired = r.requireMobile || r.requireWhatsapp || r.requireEmail;
             if (anyRequired) {
                 var has = false;
-                if (r.requireMobile   && contact.mobile) has = true;
-                if (r.requireWhatsapp && contact.phone)  has = true;
-                if (r.requireEmail    && contact.email)  has = true;
+                if (r.requireMobile && (contact.mobile || lead.senderMobile)) has = true;
+                if (r.requireWhatsapp && (contact.phone || lead.senderMobile)) has = true;
+                if (r.requireEmail && (contact.email || lead.senderEmail)) has = true;
                 if (!has) continue;
             }
 
-            // 6) QUANTITY FILTER — only if filter has both unit + minimum
+            // 4. Quantity filter
             if (r.quantityUnit && r.minQuantity > 0) {
                 var q = lead.quantity;
-                if (!q) continue;                           // card mein quantity nahi mili → skip
-                if (q.unit !== r.quantityUnit) continue;    // unit mismatch → skip
-                if (q.max < r.minQuantity) continue;        // minimum se kam → skip
+                if (!q || q.unit !== r.quantityUnit || q.max < r.minQuantity) continue;
             }
 
-            // Passed
-            return {
-                passed: true, reason: null,
-                filterId: r.id, filterName: r.name,
-                matchedProducts: normProduct ? [normProduct] : [],
-                matchedRequired: [], matchedNegative: []
-            };
+            // 5. Stage A Eligibility + Stage B Relevance Scoring
+            var evaluation = self.matcher.evaluate(lead, r);
+            if (evaluation.passed) {
+                candidateMatches.push({
+                    filter: r,
+                    filterId: r.id,
+                    filterName: r.name,
+                    score: evaluation.score,
+                    confidence: evaluation.confidence,
+                    matchedKeyword: evaluation.matchedKeyword,
+                    reasons: evaluation.reasons
+                });
+            }
         }
 
-        return { passed: false, reason: 'no_filter_matched', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
+        if (candidateMatches.length === 0) {
+            return { passed: false, reason: 'no_filter_matched', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
+        }
+
+        // Rank candidates deterministically by relevance score and confidence
+        var ranked = self.matcher.rankCandidates(candidateMatches);
+        var best = ranked[0];
+
+        return {
+            passed: true,
+            reason: null,
+            filterId: best.filterId,
+            filterName: best.filterName,
+            score: best.score,
+            confidence: best.confidence,
+            matchedProducts: best.matchedKeyword ? [best.matchedKeyword] : [normalizeText(lead.productName)],
+            matchedRequired: [],
+            matchedNegative: []
+        };
     };
 
     KeywordManager.prototype.getKeywords    = function(type) { return this.keywords[type] || []; };
@@ -1042,6 +1495,8 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             if (prodMatched.length === 0) {
                 return { passed: false, reason: 'no_product_keyword', matchedProducts: [], matchedRequired: reqMatched, matchedNegative: [] };
             }
+        } else if (req.length === 0) {
+            return { passed: false, reason: 'no_keywords_configured', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
         }
 
         return { passed: true, reason: null, matchedProducts: prodMatched, matchedRequired: reqMatched, matchedNegative: [] };
@@ -1100,17 +1555,17 @@ SafetyController.prototype.getStatus = function() {
     DuplicateManager.prototype.loadFromDb = function() {
         var self = this;
         if (this._loadedFromDb) return Promise.resolve();
-        // Load contacted + recently rejected leads so re-reloads don't rescans
+        // Only load contacted / acquired leads — un-acquired leads are NEVER duplicates
         return this.supabase.getRecentLeads(500).then(function(leads) {
             var loaded = 0;
             for (var i = 0; i < leads.length; i++) {
-                if (leads[i].is_contacted || leads[i].status === 'rejected' || leads[i].status === 'skipped') {
-                    self._seen.add(leads[i].unique_query_id);
+                if (leads[i].is_contacted || leads[i].status === 'contacted') {
+                    if (leads[i].unique_query_id) self._seen.add(leads[i].unique_query_id);
                     loaded++;
                 }
             }
             self._loadedFromDb = true;
-            console.log('[Dup] Loaded ' + loaded + ' leads from DB');
+            console.log('[Dup] Loaded ' + loaded + ' contacted leads from DB');
             return loaded;
         }).catch(function() { return 0; });
     };
@@ -1192,28 +1647,61 @@ SafetyController.prototype.getStatus = function() {
         this._running = false;
         this._callback = null;
         this._observer = null;
+        this._topSentinel = null;
         this._scanTimer = null;
         this._knownLeads = {};
-        this._debounceMs = 60;
-        this._fallbackMs = 500;
+        this._debounceMs = 25; // ultra-low latency reaction
+        this._fallbackMs = 800; // fast fallback poll
         this._idGen = new LeadIdGenerator();
         this._scanning = false;
         this._scanPending = false;
     }
+    Scanner.prototype._attachTopSentinel = function() {
+        if (this._topSentinel) return;
+        var s = document.createElement('div');
+        s.id = 'bl-top-sentinel';
+        s.style.cssText = 'height:1px;width:100%;pointer-events:none;opacity:0;';
+        if (document.body) document.body.insertBefore(s, document.body.firstChild);
+        this._topSentinel = s;
+    };
+    Scanner.prototype._checkNewLeadsBanner = function() {
+        try {
+            var banners = document.querySelectorAll(
+                '[class*="new_lead"], [class*="newLead"], .bl_new_toast, [id*="newLead"], ' +
+                '[class*="newBuyLead"], [class*="new_buylead"], .bl_toast_wrap, [class*="alert_new"], ' +
+                '[class*="toast"], button, a, div'
+            );
+            for (var i = 0; i < banners.length; i++) {
+                var b = banners[i];
+                if (b.id && b.id.indexOf('bl-') === 0) continue; // Skip extension panel UI
+                var t = (b.textContent || '').trim().toLowerCase();
+                if ((t.indexOf('new buylead') !== -1 || t.indexOf('new lead') !== -1 || t.indexOf('new enquiry') !== -1)
+                    && (t.indexOf('click') !== -1 || t.indexOf('refresh') !== -1 || t.indexOf('available') !== -1 || t.indexOf('view') !== -1 || t.indexOf('load') !== -1)) {
+                    if (b.offsetWidth > 0 && b.offsetHeight > 0) {
+                        b.click();
+                        this.logger.info('⚡ Clicked IndiaMART New Leads banner: "' + t.substring(0, 40) + '"');
+                        return true;
+                    }
+                }
+            }
+        } catch (e) {}
+        return false;
+    };
     Scanner.prototype.startWatching = function(cb) {
         if (this._running) return;
         this._callback = cb;
         this._running = true;
-        var container = document.querySelector('[class*="BuyLdC_cont"]');
-        if (!container) { var self = this; setTimeout(function() { self.startWatching(cb); }, 800); return; }
-        container = container.parentElement;
+        var container = document.querySelector('#bl_listing, [class*="bl_listing"], [class*="BuyLdC_cont"], [class*="BLbp_card"]');
+        var targetNode = container ? (container.parentElement || container) : (document.body || document.documentElement);
         var self2 = this;
         this._observer = new MutationObserver(function() {
             if (self2._scanPending) return;
             self2._scanPending = true;
             setTimeout(function() { self2._scanPending = false; self2._scan(); }, self2._debounceMs);
         });
-        this._observer.observe(container, { childList: true, subtree: true });
+        if (targetNode) {
+            this._observer.observe(targetNode, { childList: true, subtree: true });
+        }
         this._scanTimer = setInterval(function() { self2._scan(); }, this._fallbackMs);
         this.logger.info('✅ Scanner started');
         setTimeout(function() { self2._scan(); }, 200);
@@ -1227,11 +1715,12 @@ SafetyController.prototype.getStatus = function() {
         if (this._scanning || !this._running) return;
         this._scanning = true;
         try {
-            var MAX_CARDS = 7;
-var cards = document.querySelectorAll('[class*="BuyLdC_cont"]');
-if (cards.length > MAX_CARDS) {
-    cards = Array.prototype.slice.call(cards, 0, MAX_CARDS);
-}
+            // Auto-detect and click any "New Leads Available" banner to bring dynamic leads into portal DOM
+            this._checkNewLeadsBanner();
+
+            var allCards = document.querySelectorAll('[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], div[id*="id_BLCard"]');
+            // Incremental scanning focused strictly on the seven newest eligible cards in the feed
+            var cards = Array.prototype.slice.call(allCards, 0, 7);
             var currentIds = {};
             var newCards = [];
             var idGen = this._idGen;
@@ -1247,8 +1736,7 @@ if (cards.length > MAX_CARDS) {
             var now = Date.now();
             for (var key in known) {
                 var age = now - known[key];
-                if (!currentIds[key] && age > 30000) delete known[key];
-                else if (age > 600000) delete known[key];
+                if (age > 1800000) delete known[key];
             }
             if (newCards.length > 0) this._callback(newCards);
         } catch (e) {}
@@ -1345,55 +1833,87 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
                 quantity = extractQuantityFromTitle(productName);
             }
 
-                                 // --- LOCATION ---
-            // India card has TWO <strong> for city/state, PLUS one <strong> for time ("11 hrs ago").
-            // Location strongs have a tooltip span (.BuyLdC_tltp); time strong does NOT.
-            var locEls = el.querySelectorAll('.BLbp_hdrLeft strong.BuyLdC_tltpw')
-                     .length ? el.querySelectorAll('.BLbp_hdrLeft strong.BuyLdC_tltpw')
-                             : el.querySelectorAll('[class*="BuyLdC_time_loc"] strong');
+                                 // --- LOCATION EXTRACTION (DOMESTIC + FOREIGN) ---
+            var isTimeText = function(txt) {
+                if (!txt) return false;
+                var t = txt.trim().toLowerCase();
+                return /\b(?:\d+\s*(?:sec|second|min|minute|hr|hour|day|wk|week|month|yr|year)s?\s*ago|today|yesterday|just\s*now|\d+\s*(?:am|pm))\b/i.test(t) || t.indexOf('ago') !== -1;
+            };
+
+            var locEls = el.querySelectorAll(
+                '.BLbp_hdrLeft strong.BuyLdC_tltpw, .BLbp_hdrLeft strong, ' +
+                '[class*="BuyLdC_time_loc"] strong, [class*="BuyLdC_time_loc"] span, ' +
+                '.BLbp_hdrLeft span[class*="loc"], [class*="country_name"], [class*="location"], ' +
+                '[class*="city_name"], [class*="state_name"], [class*="foreign"], .BLbp_loc, ' +
+                '[class*="byr_loc"], [class*="byrLoc"]'
+            );
+
             var locParts = [];
             for (var li = 0; li < locEls.length; li++) {
-                // Skip time strong — it has no tooltip span
-                if (!locEls[li].querySelector('.BuyLdC_tltp')) continue;
-                var cleaned = cleanRawLocation(locEls[li].textContent);
-                if (cleaned) locParts.push(cleaned);
+                var node = locEls[li];
+                var rawText = (node.textContent || '').trim();
+                if (!rawText) continue;
+                // Exclude time strings
+                if (isTimeText(rawText)) continue;
+                var cleaned = cleanRawLocation(rawText);
+                if (cleaned && cleaned.length > 1 && !isTimeText(cleaned)) {
+                    if (locParts.indexOf(cleaned) === -1) {
+                        locParts.push(cleaned);
+                    }
+                }
             }
             var location = locParts.length > 0 ? locParts.join(', ') : null;
 
-                        // --- COUNTRY ---
+            // --- COUNTRY EXTRACTION (DOMESTIC + FOREIGN LEADS) ---
             var countryIso = null;
+            var isForeignLead = false;
 
-            // 1) flag alt attribute
+            // 1) Flag image (alt, title, data-country, src)
             try {
-                var flagImg = el.querySelector('img[src*="country-flags"]')
-           || el.querySelector('img[src*="flag"]');
-if (flagImg && flagImg.alt) {
-    var alt = flagImg.alt.trim().toUpperCase();
-    if (/^[A-Z]{2}$/.test(alt)) countryIso = alt;
-}
-                // 2) fallback: parse ISO from flag image src (e.g. .../in_flag_s.png → IN)
-                if (!countryIso && flagImg && flagImg.src) {
-                    var srcMatch = flagImg.src.match(/\/([a-z]{2})_flag[_s]*\.png/i);
-                    if (srcMatch) countryIso = srcMatch[1].toUpperCase();
+                var flagImg = el.querySelector('img[src*="country-flags"], img[src*="flags"], img[src*="flag"], [class*="flag"] img');
+                if (flagImg) {
+                    var flagAlt = (flagImg.alt || flagImg.title || flagImg.getAttribute('data-country') || '').trim().toUpperCase();
+                    if (/^[A-Z]{2}$/.test(flagAlt)) {
+                        countryIso = flagAlt;
+                    }
+                    if (!countryIso && flagImg.src) {
+                        var srcMatch = flagImg.src.match(/\/([a-z]{2})_flag[_s]*\.png/i) ||
+                                       flagImg.src.match(/\/flags?\/([a-z]{2})\./i) ||
+                                       flagImg.src.match(/\/flags?[_-]([a-z]{2})\./i);
+                        if (srcMatch) countryIso = srcMatch[1].toUpperCase();
+                    }
                 }
             } catch (e) {}
 
-            // 2) word-boundary match on location
+            // 2) CSS Flag elements (e.g. <span class="flags flags_us">, <i class="flag flag-ae">)
+            if (!countryIso) {
+                try {
+                    var cssFlags = el.querySelectorAll('[class*="flag"], [class*="country"]');
+                    for (var cf = 0; cf < cssFlags.length; cf++) {
+                        var cls = cssFlags[cf].className || '';
+                        var m = cls.match(/flag[s]?[_-]([a-z]{2})/i);
+                        if (m) { countryIso = m[1].toUpperCase(); break; }
+                    }
+                } catch (e) {}
+            }
+
+            // 3) Comprehensive Country Name Mapping
+            var countryMap = {
+                'india': 'IN', 'in': 'IN',
+                'usa': 'US', 'united states': 'US', 'united states of america': 'US', 'america': 'US',
+                'united kingdom': 'GB', 'uk': 'GB', 'britain': 'GB', 'great britain': 'GB', 'england': 'GB',
+                'uae': 'AE', 'united arab emirates': 'AE', 'dubai': 'AE', 'sharjah': 'AE', 'abu dhabi': 'AE',
+                'saudi arabia': 'SA', 'saudi': 'SA', 'russia': 'RU', 'china': 'CN', 'australia': 'AU', 'canada': 'CA',
+                'germany': 'DE', 'france': 'FR', 'japan': 'JP', 'brazil': 'BR', 'mexico': 'MX', 'italy': 'IT',
+                'spain': 'ES', 'south korea': 'KR', 'korea': 'KR', 'netherlands': 'NL', 'south africa': 'ZA',
+                'singapore': 'SG', 'thailand': 'TH', 'vietnam': 'VN', 'indonesia': 'ID', 'malaysia': 'MY',
+                'philippines': 'PH', 'turkey': 'TR', 'egypt': 'EG', 'israel': 'IL', 'pakistan': 'PK',
+                'bangladesh': 'BD', 'sri lanka': 'LK', 'nepal': 'NP', 'kuwait': 'KW', 'qatar': 'QA', 'oman': 'OM',
+                'bahrain': 'BH', 'sweden': 'SE', 'switzerland': 'CH', 'poland': 'PL', 'norway': 'NO', 'denmark': 'DK',
+                'finland': 'FI', 'ireland': 'IE', 'new zealand': 'NZ', 'belgium': 'BE', 'austria': 'AT', 'portugal': 'PT'
+            };
+
             if (!countryIso && location) {
-                var countryMap = {
-                    'india': 'IN', 'usa': 'US', 'united states': 'US', 'america': 'US',
-                    'united kingdom': 'GB', 'uk': 'GB', 'britain': 'GB',
-                    'uae': 'AE', 'united arab emirates': 'AE',
-                    'saudi arabia': 'SA', 'russia': 'RU', 'china': 'CN',
-                    'australia': 'AU', 'canada': 'CA', 'germany': 'DE', 'france': 'FR',
-                    'japan': 'JP', 'brazil': 'BR', 'mexico': 'MX', 'italy': 'IT',
-                    'spain': 'ES', 'south korea': 'KR', 'korea': 'KR',
-                    'netherlands': 'NL', 'south africa': 'ZA', 'singapore': 'SG',
-                    'thailand': 'TH', 'vietnam': 'VN', 'indonesia': 'ID',
-                    'malaysia': 'MY', 'philippines': 'PH', 'turkey': 'TR',
-                    'egypt': 'EG', 'israel': 'IL', 'pakistan': 'PK',
-                    'bangladesh': 'BD', 'sri lanka': 'LK', 'nepal': 'NP'
-                };
                 var segments = location.toLowerCase().split(',').map(function(s) { return s.trim(); });
                 for (var s = 0; s < segments.length; s++) {
                     for (var name in countryMap) {
@@ -1401,6 +1921,19 @@ if (flagImg && flagImg.alt) {
                     }
                     if (countryIso) break;
                 }
+            }
+
+            // 4) Check for IndiaMART Foreign Lead Badges / Text
+            var cardFullText = (el.textContent || '');
+            if (/(?:foreign\s*buylead|foreign\s*lead|export\s*buylead|international\s*buylead|overseas)/i.test(cardFullText) ||
+                el.querySelector('[class*="foreign"], [class*="export"], [class*="international"]')) {
+                isForeignLead = true;
+                if (!countryIso) countryIso = 'FOREIGN';
+                if (!location) location = 'Foreign';
+            }
+
+            if (countryIso && countryIso !== 'IN') {
+                isForeignLead = true;
             }
 
             // --- CONTACT AVAILABILITY ---
@@ -1453,18 +1986,42 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (emails && emails.length) senderEmail = emails[0];
             } catch (e) {}
 
+            // --- SENDER / SELLER / BUYER DETAILS ---
+            var senderEl = el.querySelector('.BLbp_byrName, .BLbp_buyer, [class*="buyer"], [class*="byr_name"], [class*="buyerName"], [class*="company"], [class*="comp_name"], [class*="senderName"], .BLbp_member, .BLbp_byrInfo, .SLC_byr, [class*="byrInfo"]');
+            var senderName = senderEl ? senderEl.textContent.trim() : '';
+
             // --- COMPOSE LEAD ---
             var subject = productName + (location ? ' - ' + location : '');
 
-                        // Build content-based unique ID so position-based card IDs
-            // don't collide across sessions (id_BLCard1 today ≠ id_BLCard1 tomorrow)
-            //var contentKey = leadId + '|' +
-               // (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
-               // ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            // Build unique lead ID distinguishing seller, product, location, quantity & requirement
+            // Ensures multiple leads for the exact same product from different sellers are NOT treated as duplicates
+            var queryIdPart = (leadId && leadId.indexOf('hash_') === -1) ? leadId : '';
+            var sellerPart  = (senderName || senderMobile || senderEmail || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            var prodPart    = (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40);
+            var locPart     = (location || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            var qtyStr = '';
+            if (quantity && typeof quantity === 'object') {
+                qtyStr = String(quantity.min || '') + (quantity.unit ? '_' + quantity.unit : '');
+            } else if (quantity != null) {
+                qtyStr = String(quantity);
+            }
+            var qtyPart = qtyStr.toLowerCase().replace(/[^\w]/g, '_').substring(0, 20);
 
-                 var contentKey =
-                 (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40) + '|' +
-                  ((location || '') + '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            var msgHash = 0;
+            if (messageText) {
+                for (var mi = 0; mi < messageText.length; mi++) {
+                    msgHash = ((msgHash << 5) - msgHash) + messageText.charCodeAt(mi);
+                    msgHash |= 0;
+                }
+            }
+            var msgPart = msgHash ? Math.abs(msgHash).toString(36) : '';
+
+            var contentKey;
+            if (queryIdPart) {
+                contentKey = queryIdPart + '_' + prodPart + (sellerPart ? '_' + sellerPart : '');
+            } else {
+                contentKey = prodPart + '|' + locPart + (sellerPart ? '|' + sellerPart : '') + (qtyPart ? '|' + qtyPart : '') + (msgPart ? '|' + msgPart : '');
+            }
 
             return {
                 leadId: leadId,
@@ -1474,6 +2031,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
                 productName: productName,
                 queryProductName: productName,
+
+                senderName: senderName || null,
+                sellerName: senderName || null,
 
                 messageText: messageText,
                 queryMessage: messageText,
@@ -1485,6 +2045,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 city: location ? location.split(',')[0].trim() : null,
                 state: location ? location.split(',').pop().trim() : null,
                 countryIso: countryIso,
+                isForeign: isForeignLead,
 
                 quantity: quantity,
 
@@ -1528,7 +2089,40 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     ActionAdapter.prototype.setPurchaseAction    = function(v) { this._purchaseAction = v; };
     ActionAdapter.prototype.setPopupTimeout      = function(v) { this._timeout = v; };
 
-       ActionAdapter.prototype.acquire = function(lead) {
+    function simulateClick(el) {
+        if (!el) return;
+        try {
+            if (typeof el.scrollIntoView === 'function') {
+                el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        } catch (e) {}
+
+        var rect = el.getBoundingClientRect();
+        var cx = rect.left + rect.width / 2;
+        var cy = rect.top + rect.height / 2;
+        var eventOpts = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            detail: 1,
+            clientX: cx,
+            clientY: cy,
+            screenX: cx,
+            screenY: cy,
+            buttons: 1
+        };
+
+        try { el.dispatchEvent(new PointerEvent('pointerdown', eventOpts)); } catch (e) {}
+        try { el.dispatchEvent(new MouseEvent('mousedown', eventOpts)); } catch (e) {}
+        try { el.focus(); } catch (e) {}
+        try { el.dispatchEvent(new PointerEvent('pointerup', eventOpts)); } catch (e) {}
+        try { el.dispatchEvent(new MouseEvent('mouseup', eventOpts)); } catch (e) {}
+        try { el.dispatchEvent(new MouseEvent('click', eventOpts)); } catch (e) {}
+        try { el.click(); } catch (e) {}
+    }
+
+    ActionAdapter.prototype.acquire = function(lead) {
         var self = this;
         var log = this.logger;
         return new Promise(function(resolve) {
@@ -1539,25 +2133,58 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             try {
                 var el = lead.raw.element;
                 var button = null;
-                var buttons = el.querySelectorAll('button');
+                var buttons = el.querySelectorAll('button, a, [role="button"], [class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], [class*="btn"]');
                 for (var i = 0; i < buttons.length; i++) {
-                    var t = buttons[i].textContent || '';
-                    if (t.indexOf('Contact Buyer Now') !== -1) { button = buttons[i]; break; }
+                    var t = (buttons[i].textContent || '').trim().toLowerCase();
+                    if (t.indexOf('contact buyer') !== -1 || t.indexOf('contact now') !== -1 ||
+                        t.indexOf('connect with buyer') !== -1 || t.indexOf('send enquiry') !== -1 ||
+                        t.indexOf('view contact') !== -1 || t.indexOf('reply now') !== -1) {
+                        button = buttons[i];
+                        break;
+                    }
                 }
                 if (!button) {
                     for (var j = 0; j < buttons.length; j++) {
-                        if ((buttons[j].textContent || '').indexOf('Contact') !== -1) { button = buttons[j]; break; }
+                        var t2 = (buttons[j].textContent || '').trim().toLowerCase();
+                        if (t2.indexOf('contact') !== -1 || t2.indexOf('connect') !== -1 || t2.indexOf('enquiry') !== -1) {
+                            button = buttons[j];
+                            break;
+                        }
                     }
                 }
-                if (!button) button = el.querySelector('[class*="BuyLdC_btn"], [class*="SLC_FillCTA"]');
+                if (!button) button = el.querySelector('[class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], button.BuyLdC_Cta, [class*="contact"]');
                 if (!button) { resolve({ success: false, message: 'No button' }); return; }
 
                 self._clicked[lead.leadId] = true;
-                button.click();
-                log.info('✅ Clicked', { leadId: lead.leadId });
+                simulateClick(button);
+                log.info('⚡ Clicked acquisition button', { leadId: lead.leadId });
 
                 var start = Date.now();
+                var maxTimeout = self._timeout || 3000;
                 var interval = setInterval(function() {
+                    // Check if card button itself transitioned to contacted state in DOM
+                    var btnText = (button.textContent || '').trim().toLowerCase();
+                    var isCardContacted = button.hasAttribute('disabled') ||
+                        button.classList.contains('disabled') ||
+                        btnText.indexOf('contacted') !== -1 ||
+                        btnText.indexOf('already contact') !== -1 ||
+                        btnText.indexOf('enquiry sent') !== -1 ||
+                        btnText.indexOf('view contact') !== -1 ||
+                        btnText.indexOf('view number') !== -1;
+
+                    if (isCardContacted) {
+                        clearInterval(interval);
+                        if (el) {
+                            try {
+                                el.setAttribute('data-leadsync-acquired', 'true');
+                                el.classList.add('bl-acquired-card');
+                            } catch (e) {}
+                        }
+                        log.info('✅ Acquisition verified directly on card button', { leadId: lead.leadId, status: btnText });
+                        resolve({ success: true, action: 'card_updated', popup: { success: true } });
+                        return;
+                    }
+
                     var popup = null;
                     var candidates = document.querySelectorAll(
                         '.SLC_PopCntr, [class*="SLC_PopCntr"], [class*="Cnt_blpack"], [role="dialog"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]'
@@ -1569,9 +2196,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         if (r.width > 100 && r.height > 60) { popup = c; break; }
                     }
 
-                                        if (popup) {
+                    if (popup) {
                         clearInterval(interval);
-                        log.info('⏱️ Popup detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
+                        log.info('⏱️ Popup dialog detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
                         var text = (popup.textContent || '').toLowerCase();
                         var isPurchase = text.indexOf('purchase buylead') !== -1 ||
                             text.indexOf("to view buyer's contact details") !== -1 ||
@@ -1579,38 +2206,86 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                             (text.indexOf('buy') !== -1 && text.indexOf('₹') !== -1);
 
                         if (isPurchase) {
-                            var closeBtn = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"]');
+                            // Paywall popup: points needed, do NOT treat as acquired
+                            var closeBtn = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
                             if (!closeBtn) {
                                 var allBtns = popup.querySelectorAll('button, span');
                                 for (var b = 0; b < allBtns.length; b++) {
                                     var bt = (allBtns[b].textContent || '').trim();
-                                    if (bt === '×' || bt === '✕' || bt === 'X') { closeBtn = allBtns[b]; break; }
+                                    if (bt === '×' || bt === '✕' || bt === 'X' || bt.toLowerCase() === 'close') { closeBtn = allBtns[b]; break; }
                                 }
                             }
-                            if (closeBtn) { try { closeBtn.click(); } catch(e) {} }
+                            if (closeBtn) { try { simulateClick(closeBtn); } catch(e) {} }
                             document.body.style.overflow = '';
-                            resolve({ success: true, action: 'purchase_closed', popup: { success: true } });
+                            log.warn('⚠️ BuyLead purchase required (paywall modal detected)', { leadId: lead.leadId });
+                            resolve({ success: false, action: 'points_required', message: 'BuyLead purchase points required' });
                             return;
                         }
 
-                        var confBtns = popup.querySelectorAll('button, [role="button"]');
-                        var yesBtn = null;
-                        for (var cb = 0; cb < confBtns.length; cb++) {
-                            var ct = (confBtns[cb].textContent || '').trim().toLowerCase();
-                            if (ct === 'yes' || ct === 'ok' || ct === 'confirm' || ct === 'proceed') { yesBtn = confBtns[cb]; break; }
+                        // PAID ACCOUNT / ENQUIRY POPUP: look for Send/Submit/Confirm button
+                        var actionBtns = popup.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a[class*="btn"], [class*="submit"], [class*="send"]');
+                        var sendBtn = null;
+                        for (var cb = 0; cb < actionBtns.length; cb++) {
+                            var ct = (actionBtns[cb].textContent || actionBtns[cb].value || '').trim().toLowerCase();
+                            if (ct === 'send' || ct === 'send now' || ct === 'send reply' || ct === 'send message' ||
+                                ct === 'contact buyer' || ct === 'submit' || ct === 'confirm' || ct === 'yes' ||
+                                ct === 'ok' || ct === 'proceed' || ct.indexOf('send') === 0) {
+                                sendBtn = actionBtns[cb];
+                                break;
+                            }
                         }
-                        if (yesBtn) { try { yesBtn.click(); } catch(e) {} }
-                        else { try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch(e) {} }
+
+                        if (sendBtn) {
+                            try { simulateClick(sendBtn); } catch(e) {}
+                            log.info('⚡ Clicked Send/Confirm in popup', { leadId: lead.leadId });
+                            if (el) {
+                                try {
+                                    el.setAttribute('data-leadsync-acquired', 'true');
+                                    el.classList.add('bl-acquired-card');
+                                } catch (e) {}
+                            }
+                            setTimeout(function() {
+                                document.body.style.overflow = '';
+                                resolve({ success: true, action: 'sent', popup: { success: true } });
+                            }, 50);
+                            return;
+                        }
+
+                        // Close secondary prompt
+                        var closeBtn2 = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
+                        if (closeBtn2) {
+                            try { simulateClick(closeBtn2); } catch(e) {}
+                        } else {
+                            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch(e) {}
+                        }
                         document.body.style.overflow = '';
                         resolve({ success: true, action: 'confirmed', popup: { success: true } });
                         return;
                     }
 
-                                        if (Date.now() - start > 1000) {
+                    // Timeout condition: check if card verified; if not, return failure (no fake success)
+                    if (Date.now() - start > maxTimeout) {
                         clearInterval(interval);
-                        resolve({ success: true, action: 'timeout_no_popup', popup: { success: true } });
+                        var finalBtnText = (button.textContent || '').trim().toLowerCase();
+                        var finalVerified = button.hasAttribute('disabled') ||
+                            button.classList.contains('disabled') ||
+                            finalBtnText.indexOf('contacted') !== -1 ||
+                            finalBtnText.indexOf('already contact') !== -1 ||
+                            finalBtnText.indexOf('enquiry sent') !== -1;
+
+                        if (finalVerified) {
+                            if (el) {
+                                try {
+                                    el.setAttribute('data-leadsync-acquired', 'true');
+                                    el.classList.add('bl-acquired-card');
+                                } catch (e) {}
+                            }
+                            resolve({ success: true, action: 'card_updated', popup: { success: true } });
+                        } else {
+                            resolve({ success: false, action: 'timeout_no_confirmation', message: 'No confirmation or popup response received' });
+                        }
                     }
-                }, 80);
+                }, 25);
 
             } catch (err) {
                 resolve({ success: false, message: err.message });
@@ -1724,11 +2399,250 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     LeadScorer.prototype.setMinimumScore  = function(s) { this.minimumScore = s; };
 
     // ============================================================
+    // CENTRALIZED PERFORMANCE METRICS SERVICE (v6.3 - GRAVITAS)
+    // ============================================================
+    function PerformanceMetrics() {
+        this._activeFiltersCount = 0;
+        this._detections = new Map(); // leadId -> timestamp
+        this._matches = new Map();    // leadId -> timestamp
+        this._attempts = 0;           // total eligible acquisition attempts
+        this._acquisitions = [];      // [{ leadId, durationMs, timestamp }]
+        this._failedAttempts = 0;
+        this._contacts = [];          // [{ leadId, durationMs, timestamp }]
+        this._failedContacts = 0;
+        this._sampleLimit = 20;
+    }
+
+    PerformanceMetrics.prototype.setActiveFiltersCount = function(count) {
+        this._activeFiltersCount = Math.max(0, parseInt(count, 10) || 0);
+    };
+
+    PerformanceMetrics.prototype.getActiveFiltersCount = function() {
+        return this._activeFiltersCount;
+    };
+
+    PerformanceMetrics.prototype.recordDetection = function(leadId, timestamp) {
+        if (!leadId) return;
+        var t = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        if (!this._detections.has(leadId)) {
+            this._detections.set(leadId, t);
+        }
+    };
+
+    PerformanceMetrics.prototype.recordMatch = function(leadId, timestamp) {
+        if (!leadId) return;
+        var t = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        this._matches.set(leadId, t);
+    };
+
+    PerformanceMetrics.prototype.recordAcquisitionAttempt = function(leadId) {
+        this._attempts++;
+    };
+
+    PerformanceMetrics.prototype.recordAcquisitionSuccess = function(leadId, timestamp) {
+        var now = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        var detectedAt = this._detections.get(leadId);
+        var durationMs = detectedAt ? Math.max(0, now - detectedAt) : 0;
+
+        this._acquisitions.push({
+            leadId: leadId,
+            durationMs: durationMs,
+            timestamp: Date.now()
+        });
+
+        if (this._acquisitions.length > 50) {
+            this._acquisitions.shift();
+        }
+        this._detections.delete(leadId);
+    };
+
+    PerformanceMetrics.prototype.recordAcquisitionFailure = function(leadId, reason) {
+        this._failedAttempts++;
+        this._detections.delete(leadId);
+    };
+
+    PerformanceMetrics.prototype.recordContactSuccess = function(leadId, timestamp) {
+        var now = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        var matchedAt = this._matches.get(leadId) || now;
+        var durationMs = Math.max(0, now - matchedAt);
+
+        this._contacts.push({
+            leadId: leadId,
+            durationMs: durationMs,
+            timestamp: Date.now()
+        });
+        if (this._contacts.length > 50) this._contacts.shift();
+        this._matches.delete(leadId);
+    };
+
+    PerformanceMetrics.prototype.recordContactFailure = function(leadId, reason) {
+        this._failedContacts++;
+        this._matches.delete(leadId);
+    };
+
+    PerformanceMetrics.prototype.getSpeedPerAcquisition = function() {
+        if (this._acquisitions.length === 0) {
+            return {
+                averageMs: null,
+                formatted: '---',
+                sampleCount: 0
+            };
+        }
+        var sample = this._acquisitions.slice(-this._sampleLimit);
+        var total = 0;
+        for (var i = 0; i < sample.length; i++) {
+            total += sample[i].durationMs;
+        }
+        var avgMs = Math.round(total / sample.length);
+        var formatted = avgMs < 1000 ? (avgMs + 'ms') : ((avgMs / 1000).toFixed(1) + 's');
+        return {
+            averageMs: avgMs,
+            formatted: formatted,
+            sampleCount: sample.length
+        };
+    };
+
+    PerformanceMetrics.prototype.getAcceptanceRate = function() {
+        if (this._attempts === 0) {
+            return {
+                ratePercent: null,
+                formatted: '---',
+                successes: 0,
+                attempts: 0
+            };
+        }
+        var successes = this._acquisitions.length;
+        var rate = (successes / this._attempts) * 100;
+        return {
+            ratePercent: Math.min(100, Math.round(rate * 10) / 10),
+            formatted: Math.min(100, Math.round(rate * 10) / 10).toFixed(1) + '%',
+            successes: successes,
+            attempts: this._attempts
+        };
+    };
+
+    PerformanceMetrics.prototype.getSummary = function() {
+        var speed = this.getSpeedPerAcquisition();
+        var acc = this.getAcceptanceRate();
+        return {
+            activeFilters: this.getActiveFiltersCount(),
+            speedFormatted: speed.formatted,
+            speedAverageMs: speed.averageMs,
+            speedSampleCount: speed.sampleCount,
+            acceptanceRateFormatted: acc.formatted,
+            acceptanceRatePercent: acc.ratePercent,
+            attempts: acc.attempts,
+            successes: acc.successes
+        };
+    };
+
+    // ============================================================
+    // LEAD LIFECYCLE & VERIFIED TERMINAL STATES (v6.3 - GRAVITAS)
+    // ============================================================
+    var LEAD_STATES = {
+        DETECTED: 'DETECTED',
+        MATCHED: 'MATCHED',
+        ACQUISITION_PENDING: 'ACQUISITION_PENDING',
+        ACQUIRED: 'ACQUIRED',
+        CONTACT_PENDING: 'CONTACT_PENDING',
+        CONTACTED: 'CONTACTED',
+        ACQUISITION_FAILED: 'ACQUISITION_FAILED',
+        CONTACT_FAILED: 'CONTACT_FAILED',
+        RETRY_SCHEDULED: 'RETRY_SCHEDULED',
+        BLOCKED: 'BLOCKED',
+        SKIPPED: 'SKIPPED'
+    };
+
+    var VALID_TRANSITIONS = {
+        'DETECTED': ['MATCHED', 'SKIPPED', 'BLOCKED'],
+        'MATCHED': ['ACQUISITION_PENDING', 'SKIPPED', 'BLOCKED'],
+        'ACQUISITION_PENDING': ['ACQUIRED', 'ACQUISITION_FAILED', 'BLOCKED', 'RETRY_SCHEDULED'],
+        'ACQUIRED': ['CONTACT_PENDING', 'CONTACTED', 'CONTACT_FAILED'],
+        'CONTACT_PENDING': ['CONTACTED', 'CONTACT_FAILED', 'RETRY_SCHEDULED'],
+        'RETRY_SCHEDULED': ['ACQUISITION_PENDING', 'CONTACT_PENDING', 'BLOCKED', 'SKIPPED'],
+        'ACQUISITION_FAILED': ['RETRY_SCHEDULED', 'BLOCKED', 'SKIPPED'],
+        'CONTACT_FAILED': ['RETRY_SCHEDULED', 'BLOCKED', 'SKIPPED'],
+        'CONTACTED': [],
+        'BLOCKED': ['RETRY_SCHEDULED'],
+        'SKIPPED': []
+    };
+
+    function LeadLifecycleManager() {
+        this._states = new Map();
+        this._inFlight = new Set();
+    }
+
+    LeadLifecycleManager.prototype.getState = function(leadId) {
+        var entry = this._states.get(leadId);
+        return entry ? entry.state : null;
+    };
+
+    LeadLifecycleManager.prototype.transition = function(leadId, newState, meta) {
+        if (!leadId) return { ok: false, error: 'missing_lead_id' };
+        if (!LEAD_STATES[newState]) return { ok: false, error: 'invalid_target_state: ' + newState };
+
+        var currentEntry = this._states.get(leadId);
+        var currentState = currentEntry ? currentEntry.state : null;
+
+        if (!currentState) {
+            if (newState !== LEAD_STATES.DETECTED) {
+                return { ok: false, error: 'Initial state must be DETECTED, got ' + newState };
+            }
+            this._states.set(leadId, {
+                state: newState,
+                history: [{ state: newState, at: Date.now(), meta: meta || {} }],
+                updatedAt: Date.now()
+            });
+            return { ok: true, previousState: null, currentState: newState };
+        }
+
+        if (currentState === newState) {
+            return { ok: true, previousState: currentState, currentState: newState, noop: true };
+        }
+
+        var allowed = VALID_TRANSITIONS[currentState] || [];
+        if (allowed.indexOf(newState) === -1) {
+            return {
+                ok: false,
+                error: 'Illegal state transition from ' + currentState + ' to ' + newState
+            };
+        }
+
+        if (newState === LEAD_STATES.ACQUISITION_PENDING || newState === LEAD_STATES.CONTACT_PENDING) {
+            this._inFlight.add(leadId);
+        } else if (newState === LEAD_STATES.CONTACTED || newState === LEAD_STATES.ACQUISITION_FAILED || newState === LEAD_STATES.CONTACT_FAILED || newState === LEAD_STATES.SKIPPED) {
+            this._inFlight.delete(leadId);
+        }
+
+        currentEntry.history.push({ state: newState, at: Date.now(), meta: meta || {} });
+        currentEntry.state = newState;
+        currentEntry.updatedAt = Date.now();
+
+        return { ok: true, previousState: currentState, currentState: newState };
+    };
+
+    LeadLifecycleManager.prototype.isInFlight = function(leadId) {
+        return this._inFlight.has(leadId);
+    };
+
+    LeadLifecycleManager.prototype.getSummary = function() {
+        var counts = {};
+        this._states.forEach(function(val) {
+            counts[val.state] = (counts[val.state] || 0) + 1;
+        });
+        return {
+            totalTracked: this._states.size,
+            inFlightCount: this._inFlight.size,
+            counts: counts
+        };
+    };
+
+    // ============================================================
     // ORCHESTRATOR
     // ============================================================
     function Orchestrator() {
         this.logger = new Logger('Orchestrator');
-        this.logger.info('🚀 Initializing v6.2.0');
+        this.logger.info('🚀 Initializing v6.3.0 (Gravitas Refactor)');
 
         this.supabase = new window.SupabaseService();
         this.supabase.setLogger(this.logger);
@@ -1744,13 +2658,32 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this.actionAdapter = new ActionAdapter(this.popupManager);
         this.scorer = new LeadScorer();
         this.navigator = new PageNavigator(this);
+        this.metrics = new PerformanceMetrics();
+        this.lifecycle = new LeadLifecycleManager();
 
         this.stats = {
             discovered: 0, parsed: 0, validated: 0, scored: 0,
             queued: 0, acquired: 0, rejected: 0, duplicate: 0, failed: 0,
-            countryBlocked: 0,
+            countryBlocked: 0, unique: 0, filtered: 0, contactFailed: 0,
             dbSynced: 0, popupsHandled: 0, loopsCompleted: 0, loadMoreClicks: 0
         };
+
+        this._uniqueSeenIds = new Set();
+        this._isPaused = false;
+        this._acquiredLeadIds = new Set();
+        this._acquiredRecords = [];
+        var selfAcq = this;
+        try {
+            chrome.storage.local.get(['acquiredLeadIds', 'acquiredRecords'], function(res) {
+                if (res && Array.isArray(res.acquiredLeadIds)) {
+                    res.acquiredLeadIds.forEach(function(id) { selfAcq._acquiredLeadIds.add(String(id)); });
+                }
+                if (res && Array.isArray(res.acquiredRecords)) {
+                    selfAcq._acquiredRecords = res.acquiredRecords;
+                }
+                selfAcq.logger.info('Loaded ' + selfAcq._acquiredLeadIds.size + ' previously acquired leads and ' + selfAcq._acquiredRecords.length + ' seller verification records.');
+            });
+        } catch (e) {}
 
         this.config = Object.assign({}, DEFAULT_CONFIG);
         this._initialized = false;
@@ -2086,6 +3019,126 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 border-color: #e4e4e7;
             }
             .bl-btn-skip:hover { background: #f4f4f5; color: #18181b; }
+
+            /* Top-Center Toast Container & Prompts */
+            #bl-toast-container {
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                z-index: 2147483647;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+                pointer-events: none;
+            }
+            .bl-top-toast {
+                pointer-events: auto;
+                min-width: 290px;
+                max-width: 460px;
+                background: #0f172a;
+                color: #f8fafc;
+                border-radius: 8px;
+                padding: 10px 16px;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35), 0 8px 10px -6px rgba(0, 0, 0, 0.35);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                animation: blToastSlideDown 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+                transition: opacity 0.28s ease, transform 0.28s ease;
+            }
+            .bl-top-toast.bl-toast-leave {
+                opacity: 0;
+                transform: translateY(-12px) scale(0.96);
+            }
+            .bl-toast-found { border-left: 4px solid #3b82f6; }
+            .bl-toast-acquiring { border-left: 4px solid #f59e0b; }
+            .bl-toast-contacted { border-left: 4px solid #10b981; }
+            .bl-toast-failed { border-left: 4px solid #ef4444; }
+            .bl-toast-refresh { border-left: 4px solid #8b5cf6; }
+            .bl-toast-info { border-left: 4px solid #06b6d4; }
+            .bl-toast-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+            .bl-toast-content { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+            .bl-toast-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8; }
+            .bl-toast-message { font-size: 13px; font-weight: 500; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+            @keyframes blToastSlideDown {
+                from { opacity: 0; transform: translateY(-20px) scale(0.95); }
+                to { opacity: 1; transform: translateY(0) scale(1); }
+            }
+
+            /* ── Panel control row & buttons ── */
+            .bl-ctrl-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 4px 0; }
+            .bl-ctrl-btn {
+                font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px;
+                border: none; cursor: pointer; transition: all 0.15s ease; line-height: 1.4;
+            }
+            .bl-ctrl-stop   { background: #ef4444; color: #fff; }
+            .bl-ctrl-stop:hover { background: #dc2626; }
+            .bl-ctrl-resume { background: #22c55e; color: #fff; }
+            .bl-ctrl-resume:hover { background: #16a34a; }
+            .bl-ctrl-refresh {
+                background: #eff6ff !important;
+                color: #2563eb !important;
+                border: 1px solid #bfdbfe !important;
+            }
+            .bl-ctrl-refresh:hover {
+                background: #dbeafe !important;
+                color: #1d4ed8 !important;
+            }
+            .bl-ctrl-filters {
+                background: #18181b !important;
+                color: #ffffff !important;
+                border: 1px solid #27272a !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                gap: 4px !important;
+            }
+            .bl-ctrl-filters:hover {
+                background: #09090b !important;
+                border-color: #3f3f46 !important;
+            }
+            .bl-badge {
+                background: #2563eb;
+                color: #ffffff;
+                font-size: 9px;
+                padding: 1px 5px;
+                border-radius: 10px;
+                font-weight: 700;
+            }
+
+            /* Performance metrics cards below Resume */
+            .bl-metrics-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 5px;
+                padding: 3px 0;
+                margin-top: 2px;
+            }
+            .bl-metric-card {
+                flex: 1;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                padding: 4px 6px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                font-size: 10px;
+            }
+            .bl-metric-label {
+                color: #64748b;
+                font-weight: 500;
+            }
+            .bl-metric-val {
+                color: #0f172a;
+                font-weight: 700;
+                font-family: monospace;
+            }
         `;
         document.head.appendChild(style);
     };
@@ -2097,6 +3150,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
         }, 30000);
         this._cleanupTimer = setInterval(function() { self.duplicateManager.cleanup(); }, 120000);
+
+        // Check for dynamic filter changes from Supabase every 3.5s while scanning
+        this._filterWatchTimer = setInterval(function() {
+            if (!self._isPaused) {
+                self._checkDynamicFilterChanges();
+            }
+        }, 1200);
     };
 
         Orchestrator.prototype._setupUI = function() {
@@ -2129,12 +3189,28 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             '</div>' +
             '<div class="bl-panel-body" id="bl-panel-body">' +
                 '<div class="bl-row"><span id="bl-status-text" class="bl-strong">Init...</span></div>' +
-                '<div class="bl-row"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span></div>' +
+                '<div class="bl-row"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span> <span class="bl-dim">·</span> <span class="bl-dim">Matched</span> <span id="bl-stat-filtered" class="bl-strong">0</span></div>' +
                 '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
                 '<div class="bl-row"><span id="bl-country-text" class="bl-dim">Any country</span></div>' +
                 '<div class="bl-row"><span id="bl-rate-text" class="bl-dim">0/60 min</span></div>' +
                 '<div class="bl-row"><span id="bl-kw-text" class="bl-dim">KW: 0</span></div>' +
                 '<div class="bl-row"><span id="bl-queue-text" class="bl-dim">Queue: 0</span></div>' +
+                '<div class="bl-row bl-ctrl-row">' +
+                    '<button id="bl-stop-btn" class="bl-ctrl-btn bl-ctrl-stop" type="button">⏸ Pause</button>' +
+                    '<button id="bl-resume-btn" class="bl-ctrl-btn bl-ctrl-resume" type="button" style="display:none">▶ Resume</button>' +
+                    '<button id="bl-refresh-btn" class="bl-ctrl-btn bl-ctrl-refresh" type="button" title="Restart scan from top without reloading webpage">🔄 Refresh</button>' +
+                    '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">⚡ Filters (<span id="bl-filters-count">0</span>)</button>' +
+                '</div>' +
+                '<div class="bl-row bl-metrics-row">' +
+                    '<div class="bl-metric-card" title="Average elapsed time between lead detection and verified acquisition">' +
+                        '<span class="bl-metric-label">Acq Speed:</span>' +
+                        '<span id="bl-stat-speed" class="bl-metric-val">---</span>' +
+                    '</div>' +
+                    '<div class="bl-metric-card" title="Verified successful acquisitions divided by eligible acquisition attempts">' +
+                        '<span class="bl-metric-label">Acceptance:</span>' +
+                        '<span id="bl-stat-acceptance" class="bl-metric-val">---</span>' +
+                    '</div>' +
+                '</div>' +
                 '<div class="bl-warning" id="bl-warning-text"></div>' +
             '</div>';
 
@@ -2152,6 +3228,56 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 chrome.storage.local.set({ panelCollapsed: !isCollapsed });
             });
         }
+
+        // ── Stop / Resume buttons ──
+        var stopBtn   = document.getElementById('bl-stop-btn');
+        var resumeBtn = document.getElementById('bl-resume-btn');
+        if (stopBtn) {
+            stopBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                self.emergencyStop();
+            });
+        }
+        if (resumeBtn) {
+            resumeBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                self.resume();
+            });
+        }
+
+        // ── Refresh scan button ──
+        var refreshBtn = document.getElementById('bl-refresh-btn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (e.shiftKey) {
+                    self.showTopToast('refresh', 'Reloading Webpage', 'Full portal reload with automatic scan resume...', 2000);
+                    sessionStorage.setItem('bl_last_reload_flag', 'from_reload');
+                    setTimeout(function() { window.location.reload(); }, 200);
+                    return;
+                }
+                self.restartScan();
+            });
+            refreshBtn.addEventListener('dblclick', function(e) {
+                e.stopPropagation();
+                self.showTopToast('refresh', 'Reloading Webpage', 'Full portal reload with automatic scan resume...', 2000);
+                sessionStorage.setItem('bl_last_reload_flag', 'from_reload');
+                setTimeout(function() { window.location.reload(); }, 200);
+            });
+        }
+
+        // ── Filters CRM button ──
+        var filtersBtn = document.getElementById('bl-filters-btn');
+        if (filtersBtn) {
+            filtersBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                try {
+                    var url = chrome.runtime.getURL('config/index.html');
+                    window.open(url, '_blank');
+                } catch (err) {}
+            });
+        }
+
         window.addEventListener('resize', function() { self._keepPanelInView(); });
         this._startStatusUpdates();
     };
@@ -2244,18 +3370,37 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             var kwEl = document.getElementById('bl-kw-text');
             var qEl  = document.getElementById('bl-queue-text');
 
+            var modeLabel = self.config.mode === 'AUTOMATIC' ? '[AUTO]' : (self.config.mode === 'ASSISTED' ? '[ASSIST]' : '[' + self.config.mode + ']');
             if (dot) dot.style.background = s.emergencyStop ? '#ef7076' : (s.cooldown ? '#fff5cc' : '#fff');
             if (text) {
-                var t = s.mode;
-                if (s.emergencyStop) t = '🚨 EMERGENCY';
-                else if (s.cooldown) t = '⏳ Cooldown';
-                else if (self.navigator._running) t = '▶ Loop Running';
-                else if (self.scanner._running) t = '▶ Running';
-                else t = '⏹ Stopped';
+                var t = modeLabel + ' ';
+                if (s.emergencyStop) t += '🚨 EMERGENCY';
+                else if (self._isPaused) t += '⏸ Paused';
+                else if (s.cooldown) t += '⏳ Cooldown';
+                else if (self.navigator._running) t += '▶ Loop Running';
+                else if (self.scanner._running) t += '▶ Scanning';
+                else t += '⏹ Stopped';
                 text.textContent = t;
             }
-            if (statsScanned) statsScanned.textContent = self.stats.discovered;
+            if (statsScanned)  statsScanned.textContent  = self.stats.unique || self.stats.discovered;
             if (statsAcquired) statsAcquired.textContent = self.stats.acquired;
+
+            var filtEl = document.getElementById('bl-stat-filtered');
+            if (filtEl) filtEl.textContent = self.stats.filtered || 0;
+
+            var speedEl = document.getElementById('bl-stat-speed');
+            var accEl = document.getElementById('bl-stat-acceptance');
+            var filterCountEl = document.getElementById('bl-filters-count');
+
+            if (speedEl) speedEl.textContent = self.metrics.getSpeedPerAcquisition().formatted;
+            if (accEl) accEl.textContent = self.metrics.getAcceptanceRate().formatted;
+            if (filterCountEl) filterCountEl.textContent = self.keywordManager.getActiveFilterCount();
+
+            var _sb = document.getElementById('bl-stop-btn');
+            var _rb = document.getElementById('bl-resume-btn');
+            var _running = !self._isPaused && self.scanner && self.scanner._running;
+            if (_sb) _sb.style.display = _running ? '' : 'none';
+            if (_rb) _rb.style.display = _running ? 'none' : '';
             if (conn) {
                 var kws = self.keywordManager.getAllKeywords();
                 conn.textContent = (self._supabaseEnabled ? '☁️ CRM' : '📴 Local') + ' (P' + kws.product.length + ')';
@@ -2318,13 +3463,18 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // STRICT COUNTRY
     // ============================================================
     Orchestrator.prototype._checkStrictCountry = function(lead) {
+        // When Supabase filters are active, country restrictions are dynamically enforced per filter
+        // (allows leads from any country when no country filter is specified in that filter)
+        if (this._supabaseEnabled) {
+            return { allowed: true };
+        }
         if (!this.config.strictCountryMode) return { allowed: true };
         var allowed = (this.config.allowedCountries || []).map(function(c) {
             return String(c).toUpperCase().trim();
         }).filter(function(c) { return c.length > 0; });
 
         if (allowed.length === 0) {
-            return { allowed: false, reason: 'STRICT_COUNTRY_NO_ALLOWED_LIST', details: { leadCountry: lead.countryIso || null, allowed: [] } };
+            return { allowed: true };
         }
 
         var leadCountry = (lead.countryIso || '').toUpperCase().trim();
@@ -2332,7 +3482,6 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             if (this.config.strictCountryRejectUnknown) {
                 return { allowed: false, reason: 'STRICT_COUNTRY_UNKNOWN', details: { allowed: allowed } };
             }
-            this.logger.warn('🌍 UNKNOWN COUNTRY PASSED', { leadId: lead.leadId });
             return { allowed: true, reason: 'STRICT_COUNTRY_UNKNOWN_ALLOWED' };
         }
         if (allowed.indexOf(leadCountry) !== -1) {
@@ -2360,8 +3509,19 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (!lead) { self.stats.failed++; continue; }
 
                 self.stats.discovered++;
+                if (self.metrics) self.metrics.recordDetection(card.id, Date.now());
+                if (self.lifecycle) self.lifecycle.transition(card.id, 'DETECTED');
 
-                // === STEP 0: STRICT COUNTRY ===
+                // === STEP 0: EXCLUDE ALREADY ACQUIRED LEADS (SELLER-DISTINCT DUPLICATE CHECK) ===
+                // Only leads that were PREVIOUSLY ACQUIRED with the SAME SELLER are treated as duplicates!
+                // Unacquired leads are NEVER marked as duplicates and remain eligible on rescans.
+                if (self._isLeadAcquired(lead, card)) {
+                    self.stats.duplicate++;
+                    self.logger.debug('🔒 Acquired lead excluded (same seller duplicate): ' + card.id + ' | "' + (lead.productName || '') + '"');
+                    continue;
+                }
+
+                // === STEP 0.5: STRICT COUNTRY CHECK (Only when strict country mode is explicitly enabled) ===
                 var countryCheck = self._checkStrictCountry(lead);
                 if (!countryCheck.allowed) {
                     self.stats.countryBlocked++;
@@ -2369,15 +3529,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     continue;
                 }
 
-                                                // === STEP 1: DUPLICATE ===
-                if (self.duplicateManager.isDuplicate(lead.uniqueQueryId)) {
-                    self.stats.duplicate++;
-                    self.logger.debug('🔁 Duplicate skip: ' + card.id + ' | "' + (lead.productName || '').substring(0, 50) + '"');
-                    continue;
-                }
-
                 // === STEP 2: FILTER MATCH ===
-                // If Supabase is enabled but filters not yet loaded, skip this card (don't mark seen — retry after load)
+                // If Supabase is enabled but filters not yet loaded, skip this card (retry after load)
                 if (self._supabaseEnabled && !self.supabase._filtersLoaded) {
                     self.logger.debug('⏳ Filters not loaded yet, skipping: ' + card.id);
                     continue;
@@ -2387,12 +3540,19 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     : self.keywordManager.checkKeywords(lead.productName, lead.messageText);
                 if (!kw.passed) {
                     self.stats.rejected++;
-                                       self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"');
-                    self.duplicateManager.markSeen(lead.uniqueQueryId);
+                    self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"');
+                    // NOTE: Do NOT markSeen() in duplicateManager — unacquired leads must remain available for rescan!
                     continue;
                 }
 
+                if (self.metrics) self.metrics.recordMatch(card.id, Date.now());
+                if (self.lifecycle) self.lifecycle.transition(card.id, 'MATCHED');
+
                 self.stats.validated++;
+                self.stats.filtered = (self.stats.filtered || 0) + 1;
+                if (self.showTopToast) {
+                    self.showTopToast('found', 'Lead Found', (lead.productName || 'Lead') + ' — ' + (lead.city || lead.state || lead.location || 'India'));
+                }
 
                 // === STEP 3: SCORE ===
                 
@@ -2427,9 +3587,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     };
 
     Orchestrator.prototype._saveLeadToDb = function(lead, isMatched) {
-        if (!this._supabaseEnabled) return;
+        if (!this._supabaseEnabled) return Promise.resolve(null);
         var self = this;
-        this.supabase.insertLead({
+        lead._savePromise = this.supabase.insertLead({
             uniqueQueryId: lead.uniqueQueryId,
             queryType: lead.queryType,
             queryTime: lead.queryTime,
@@ -2449,7 +3609,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 lead._dbId = dbLead.id || (dbLead.data && dbLead.data.id);
                 if (dbLead.conflict && dbLead.existingId) lead._dbId = dbLead.existingId;
             }
-        }).catch(function() { /* swallow */ });
+            return dbLead;
+        }).catch(function(err) {
+            self.logger.error('Failed to save lead: ' + (err && err.message));
+            return null;
+        });
+        return lead._savePromise;
     };
 
     Orchestrator.prototype._processLead = function(lead) {
@@ -2467,26 +3632,57 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 return;
             }
 
+            if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'ACQUISITION_PENDING');
+            if (self.metrics) self.metrics.recordAcquisitionAttempt(lead.leadId);
+
+            if (self.showTopToast) {
+                self.showTopToast('acquiring', 'Acquiring Lead', 'Contacting buyer for: ' + (lead.productName || 'Lead'));
+            }
             self.actionAdapter.acquire(lead).then(function(result) {
-                var isSuccess = result.success || (result.popup && result.popup.action === 'timeout_no_popup');
+                var isSuccess = result && result.success === true;
                 if (isSuccess) {
                     self.stats.acquired++;
                     self.stateMachine.setState(lead.leadId, 'ACQUIRED');
+                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'ACQUIRED');
+                    if (self.metrics) self.metrics.recordAcquisitionSuccess(lead.leadId, Date.now());
                     self.safety.recordAcquisition();
                     if (result.popup && result.popup.success) self.stats.popupsHandled++;
                     self.logger.info('🎉 ACQUIRED', { leadId: lead.leadId });
-                    if (self._supabaseEnabled) {
-                        self.supabase.markLeadContacted(lead.uniqueQueryId).catch(function() {});
-                        if (lead._dbId) {
-                            self.supabase.insertLeadHistory(lead._dbId, 'CONTACTED', { score: 'auto', mode: self.config.mode }, new Date().toISOString()).catch(function() {});
-                        }
+                    self._recordLeadAcquired(lead);
+
+                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACT_PENDING');
+
+                    if (self.showTopToast) {
+                        self.showTopToast('contacted', 'Lead Acquired & Contacted', (lead.productName || 'Lead') + ' (' + (lead.senderMobile || 'Contacted') + ')', 2000);
                     }
-                } else if (result.simulated) {
+
+                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACTED');
+                    if (self.metrics) self.metrics.recordContactSuccess(lead.leadId, Date.now());
+
+                    if (self._supabaseEnabled) {
+                        var savePromise = lead._savePromise || self._saveLeadToDb(lead, true);
+                        Promise.resolve(savePromise).then(function() {
+                            return self.supabase.markLeadContacted(lead._dbId || lead.uniqueQueryId);
+                        }).then(function() {
+                            if (lead._dbId) {
+                                return self.supabase.insertLeadHistory(lead._dbId, 'CONTACTED', { score: 'auto', mode: self.config.mode }, new Date().toISOString());
+                            }
+                        }).catch(function(err) {
+                            self.logger.warn('Failed to update lead contacted status', { error: err && err.message });
+                        });
+                    }
+                } else if (result && result.simulated) {
                     self.stateMachine.setState(lead.leadId, 'DRY_RUN');
                 } else {
                     self.stats.failed++;
-                    self.stateMachine.setState(lead.leadId, 'FAILED', { error: result.message });
-                    self.logger.error('❌ Failed: ' + result.message, { leadId: lead.leadId });
+                    var errMsg = (result && result.message) || 'Acquisition failed';
+                    self.stateMachine.setState(lead.leadId, 'FAILED', { error: errMsg });
+                    if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'ACQUISITION_FAILED');
+                    if (self.metrics) self.metrics.recordAcquisitionFailure(lead.leadId, errMsg);
+                    self.logger.error('❌ Failed: ' + errMsg, { leadId: lead.leadId });
+                    if (self.showTopToast) {
+                        self.showTopToast('failed', 'Contact Dropped / Failed', (lead.productName || 'Lead') + ' — ' + errMsg);
+                    }
                 }
                 self._broadcastStatus();
                 resolve();
@@ -2538,7 +3734,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var self = this;
         card.querySelector('[data-a="acq"]').addEventListener('click', function() {
             self.actionAdapter.acquire(lead).then(function(r) {
-                if (r.success) { self.stats.acquired++; self.stateMachine.setState(lead.leadId, 'ACQUIRED'); }
+                if (r.success) {
+                    self.stats.acquired++;
+                    self.stateMachine.setState(lead.leadId, 'ACQUIRED');
+                    self._recordLeadAcquired(lead);
+                    if (self.showTopToast) {
+                        self.showTopToast('contacted', 'Lead Acquired & Contacted', (lead.productName || 'Lead') + ' (' + (lead.senderMobile || 'Contacted') + ')', 2000);
+                    }
+                }
             });
             card.remove();
         });
@@ -2623,6 +3826,319 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     Orchestrator.prototype.setAutoMinimize = function(v) { this.config.autoMinimize = v; this.actionAdapter.setAutoMinimize(v); chrome.storage.local.set({ autoMinimize: v }); };
     Orchestrator.prototype.setConfirmationAnswer = function(a) { this.config.confirmationAnswer = a; this.actionAdapter.setConfirmationAnswer(a); chrome.storage.local.set({ confirmationAnswer: a }); };
     Orchestrator.prototype.setPurchaseAction = function(a) { this.config.purchaseAction = a; this.actionAdapter.setPurchaseAction(a); chrome.storage.local.set({ purchaseAction: a }); };
+
+    // ============================================================
+    // TOP-CENTER LIVE TELEMETRY TOASTS
+    // ============================================================
+    Orchestrator.prototype._ensureToastContainer = function() {
+        var c = document.getElementById('bl-toast-container');
+        if (!c) {
+            c = document.createElement('div');
+            c.id = 'bl-toast-container';
+            document.body.appendChild(c);
+        }
+        return c;
+    };
+
+    Orchestrator.prototype.showTopToast = function(type, title, message, durationMs) {
+        try {
+            var container = this._ensureToastContainer();
+            var toast = document.createElement('div');
+            toast.className = 'bl-top-toast bl-toast-' + (type || 'info');
+
+            var iconMap = {
+                'found': '🔍',
+                'acquiring': '⚡',
+                'contacted': '✅',
+                'failed': '⚠️',
+                'refresh': '🔄',
+                'info': '⏳'
+            };
+            var icon = iconMap[type] || '🔔';
+
+            toast.innerHTML =
+                '<span class="bl-toast-icon">' + icon + '</span>' +
+                '<div class="bl-toast-content">' +
+                    '<div class="bl-toast-title">' + (title || 'Update') + '</div>' +
+                    '<div class="bl-toast-message">' + (message || '') + '</div>' +
+                '</div>';
+
+            container.appendChild(toast);
+
+            var timeout = durationMs || 2000;
+            setTimeout(function() {
+                toast.classList.add('bl-toast-leave');
+                setTimeout(function() {
+                    if (toast.parentNode) toast.parentNode.removeChild(toast);
+                }, 300);
+            }, timeout);
+        } catch (e) {}
+    };
+
+    // ============================================================
+    // UNMATCHED PRODUCTS TRACKING
+    // ============================================================
+    Orchestrator.prototype._recordLeadAcquired = function(lead) {
+        if (!lead) return;
+        var qid = lead.uniqueQueryId || lead.leadId;
+        if (qid) this._acquiredLeadIds.add(String(qid));
+        if (lead.leadId) this._acquiredLeadIds.add(String(lead.leadId));
+
+        if (!this._acquiredRecords) this._acquiredRecords = [];
+        var norm = function(s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
+        var rec = {
+            uniqueQueryId: String(qid || ''),
+            leadId: String(lead.leadId || ''),
+            productName: norm(lead.productName),
+            sellerName: norm(lead.senderName || lead.sellerName),
+            phone: String(lead.senderMobile || '').replace(/[^\d]/g, ''),
+            location: norm(lead.location),
+            acquiredAt: Date.now()
+        };
+        this._acquiredRecords.push(rec);
+
+        // Mark only this specific lead in duplicateManager
+        if (this.duplicateManager) {
+            if (lead.uniqueQueryId) this.duplicateManager.markSeen(lead.uniqueQueryId);
+            if (lead.leadId) this.duplicateManager.markSeen(lead.leadId);
+        }
+        try {
+            var arr = Array.from(this._acquiredLeadIds);
+            chrome.storage.local.set({
+                acquiredLeadIds: arr,
+                acquiredRecords: this._acquiredRecords.slice(-500)
+            });
+        } catch (e) {}
+        this.logger.info('🔒 Lead permanently marked ACQUIRED & ignored for future scans: ' + (qid || lead.productName) + ' [Seller: ' + (lead.senderName || 'unknown') + ']');
+    };
+
+    Orchestrator.prototype._isLeadAcquired = function(lead, card) {
+        if (!this._acquiredLeadIds) return false;
+
+        // 1. Check card DOM element directly for contacted indicators
+        if (card && card.element) {
+            if (card.element.getAttribute('data-leadsync-acquired') === 'true') return true;
+            var btn = card.element.querySelector('button, a, [class*="BuyLdC_Cta"], [class*="BuyLdC_btn"], [class*="SLC_FillCTA"]');
+            if (btn) {
+                if (btn.hasAttribute('disabled') || btn.classList.contains('disabled')) return true;
+                var bt = (btn.textContent || '').trim().toLowerCase();
+                if (bt.indexOf('contacted') !== -1 || bt.indexOf('already contact') !== -1 ||
+                    bt.indexOf('acquired') !== -1 || bt.indexOf('message sent') !== -1 ||
+                    bt.indexOf('enquiry sent') !== -1 || bt.indexOf('view number') !== -1 ||
+                    bt.indexOf('view contact') !== -1) {
+                    return true;
+                }
+            }
+        }
+
+        if (card && card.id && this._acquiredLeadIds.has(String(card.id))) return true;
+
+        if (lead) {
+            // 2. Direct ID matches
+            if (lead.uniqueQueryId && this._acquiredLeadIds.has(String(lead.uniqueQueryId))) return true;
+            if (lead.leadId && this._acquiredLeadIds.has(String(lead.leadId))) return true;
+
+            // 3. SELLER VERIFICATION LOGIC:
+            // Compare against previously acquired records.
+            // If lead is for the exact same product:
+            //   - If seller (or phone) matches previously acquired lead -> DUPLICATE (return true, DO NOT acquire again)
+            //   - If seller is DIFFERENT -> NOT A DUPLICATE (allow acquisition!)
+            if (this._acquiredRecords && this._acquiredRecords.length > 0) {
+                var norm = function(s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
+                var curProd = norm(lead.productName);
+                var curSeller = norm(lead.senderName || lead.sellerName);
+                var curPhone = String(lead.senderMobile || '').replace(/[^\d]/g, '');
+
+                for (var r = 0; r < this._acquiredRecords.length; r++) {
+                    var rec = this._acquiredRecords[r];
+                    if (rec.productName === curProd) {
+                        // Product matches an acquired lead: verify seller identity
+                        if (curPhone && rec.phone && curPhone === rec.phone) {
+                            return true; // Same seller phone already acquired
+                        }
+                        if (curSeller && rec.sellerName && curSeller === rec.sellerName) {
+                            return true; // Same seller name already acquired
+                        }
+                        if (rec.uniqueQueryId && rec.uniqueQueryId === lead.uniqueQueryId) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
+    Orchestrator.prototype._checkDynamicFilterChanges = function() {
+        if (!this._supabaseEnabled || !this.supabase) return Promise.resolve(false);
+        var self = this;
+        return this.supabase.loadFilters(true).then(function(success) {
+            if (!success) return false;
+            var newFilters = self.supabase.getFilters() || [];
+            var newSignature = JSON.stringify(newFilters.map(function(f) {
+                return {
+                    id: f.id,
+                    name: f.name,
+                    keywords: f.product_keywords,
+                    neg: f.negative_keywords,
+                    loc: f.sender_locations,
+                    act: f.is_active,
+                    mode: f.match_mode,
+                    upd: f.updated_at
+                };
+            }));
+
+            if (self._lastFiltersSignature === undefined) {
+                self._lastFiltersSignature = newSignature;
+                return false;
+            }
+
+            if (newSignature !== self._lastFiltersSignature) {
+                self._lastFiltersSignature = newSignature;
+                self.keywordManager.extractFromSupabaseFilters(newFilters);
+                var kws = self.keywordManager.getAllKeywords();
+                self.logger.info('🔄 Dynamic filter changes detected! Active product keywords: ' + kws.product.join(', '));
+                if (self.showTopToast) {
+                    self.showTopToast('info', 'Filters Updated', 'Applied ' + newFilters.length + ' updated filter(s) dynamically', 2000);
+                }
+                // Clear duplicateManager (preserving acquired leads) so unacquired cards on page can match new keywords
+                if (self.duplicateManager) {
+                    self.duplicateManager.clear();
+                    if (self._acquiredLeadIds) {
+                        self._acquiredLeadIds.forEach(function(id) {
+                            self.duplicateManager.markSeen(id);
+                        });
+                    }
+                }
+                // Reset scanner cache so all unacquired cards in DOM are evaluated against new filters
+                if (self.scanner) {
+                    self.scanner.resetEmitted();
+                    self.scanner._scan();
+                }
+                return true;
+            }
+            return false;
+        }).catch(function() {
+            return false;
+        });
+    };
+
+    // ============================================================
+    // REFRESH SCAN WITHOUT WEBPAGE RELOAD
+    // ============================================================
+    Orchestrator.prototype.restartScan = function() {
+        this.logger.info('🔄 Restarting scan and refreshing portal leads...');
+        this.navigator.stop();
+
+        // 1. Trigger IndiaMART portal to load dynamically arriving leads onto webpage
+        var refreshedInPage = false;
+        try {
+            // A) Check and click IndiaMART's "New Leads Available" notification banner / toast
+            if (this.scanner && this.scanner._checkNewLeadsBanner) {
+                refreshedInPage = this.scanner._checkNewLeadsBanner();
+            }
+
+            // B) Click IndiaMART's native refresh button / icon if present on portal
+            var refreshSelectors = [
+                '#refreshBL', '#refresh_lead', '[id*="refresh_leads" i]',
+                'button[class*="refresh" i]', 'a[class*="refresh" i]',
+                '[class*="icon-refresh"]', '[class*="refresh_icon"]',
+                '[title*="refresh" i]', '[aria-label*="refresh" i]',
+                '[data-action*="refresh" i]'
+            ];
+            for (var r = 0; r < refreshSelectors.length; r++) {
+                var refEl = document.querySelector(refreshSelectors[r]);
+                if (refEl && refEl.id !== 'bl-refresh-btn' && (!refEl.id || refEl.id.indexOf('bl-') !== 0)) {
+                    try { refEl.click(); refreshedInPage = true; } catch(e) {}
+                    break;
+                }
+            }
+
+            // C) Re-click active IndiaMART BuyLeads tab to trigger native AJAX data reload
+            var tabSelectors = [
+                '[class*="BL_tab"][class*="active"] a',
+                '[class*="BL_tab"][class*="active"]',
+                '[class*="tab_selected"] a',
+                '[class*="tab_selected"]',
+                'li[class*="selected"] a',
+                'li.BL_tab.active',
+                'li.BL_tab a',
+                '[data-tab="relevant"]',
+                '[data-tab="all"]',
+                '#all_buyleads',
+                '#relevant_buyleads'
+            ];
+            for (var t = 0; t < tabSelectors.length; t++) {
+                var tab = document.querySelector(tabSelectors[t]);
+                if (tab) {
+                    try { tab.click(); refreshedInPage = true; } catch(e) {}
+                    break;
+                }
+            }
+        } catch(e) {}
+
+        // 2. Clear scanner emitted-cache and in-memory counters
+        if (this.scanner) {
+            this.scanner.resetEmitted();
+        }
+        this._uniqueSeenIds.clear();
+
+        // 3. Reset duplicateManager while strictly preserving acquired leads
+        if (this.duplicateManager && this.duplicateManager._seen) {
+            this.duplicateManager._seen.clear();
+            if (this._acquiredLeadIds) {
+                var selfDup = this.duplicateManager;
+                this._acquiredLeadIds.forEach(function(id) { selfDup.markSeen(id); });
+            }
+        }
+
+        // 4. Reset display counters
+        this.stats.unique = 0;
+        this.stats.discovered = 0;
+        this.stats.duplicate = 0;
+        this.stats.rejected = 0;
+        this.stats.filtered = 0;
+        this.stats.acquired = 0;
+        this.stats.failed = 0;
+
+        var statsScanned = document.getElementById('bl-stat-scanned');
+        if (statsScanned) statsScanned.textContent = '0';
+        var statsAcquired = document.getElementById('bl-stat-acquired');
+        if (statsAcquired) statsAcquired.textContent = '0';
+        var filtEl = document.getElementById('bl-stat-filtered');
+        if (filtEl) filtEl.textContent = '0';
+
+        // 5. Jump to top instantly (instantaneous, no smooth-scroll delay)
+        try {
+            window.scrollTo(0, 0);
+            window.dispatchEvent(new Event('scroll'));
+        } catch (e) {}
+
+        this._isPaused = false;
+        this._broadcastStatus();
+
+        var toastMsg = refreshedInPage
+            ? 'Portal refreshed & continuous scan restarted from top'
+            : 'Continuous scan restarted from top';
+        this.showTopToast('refresh', 'Scanner Refreshed', toastMsg, 2000);
+
+        // 6. Force-refresh filters from Supabase in background
+        if (this._checkDynamicFilterChanges) {
+            this._checkDynamicFilterChanges(true);
+        }
+
+        // 7. Restart continuous scanning pass cleanly
+        var self = this;
+        setTimeout(function() {
+            if (self.scanner) {
+                self.scanner._scan();
+            }
+            if (self.navigator) {
+                self.navigator.restart();
+            }
+        }, 200);
+    };
+
     Orchestrator.prototype.setAutoScroll = function(e) {
         this.config.autoScroll = e;
         chrome.storage.local.set({ autoScroll: e });
@@ -2685,17 +4201,31 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     };
 
     Orchestrator.prototype.emergencyStop = function() {
-        this.safety.emergencyStopFn();
+        this._isPaused = true;
+        this.safety.emergencyStopFn ? this.safety.emergencyStopFn() : this.safety.emergencyStop();
+        if (this.scanner) this.scanner.stopWatching();
         if (this.popupManager) this.popupManager.cancel();
         if (this.navigator) this.navigator.stop();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(false);
+        this.logger.warn('🚨 EMERGENCY STOP ACTIVATED — Scanner & Navigator halted');
+        this._broadcastStatus();
         return Promise.resolve(true);
     };
+
     Orchestrator.prototype.resume = function() {
+        this._isPaused = false;
         this.safety.resume();
-        this.queue.resume();
-        if (this.config.autoScroll && this.navigator) this.navigator.start();
+        var self = this;
+        if (this.scanner) {
+            this.scanner.startWatching(function(cards) {
+                self._onCardsDetected(cards);
+            });
+            this.scanner._scan();
+        }
+        if (this.navigator) this.navigator.start();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(true);
+        this.logger.info('▶ RESUMED — Scanner & Navigator active');
+        this._broadcastStatus();
         return Promise.resolve(true);
     };
 
@@ -2736,6 +4266,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         if (this._statsTimer) clearInterval(this._statsTimer);
         if (this._cleanupTimer) clearInterval(this._cleanupTimer);
         if (this._statusPanelTimer) clearInterval(this._statusPanelTimer);
+        if (this._filterWatchTimer) clearInterval(this._filterWatchTimer);
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(false);
     };
 
@@ -2758,6 +4289,19 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var orchestrator = new Orchestrator();
         window.orchestrator = orchestrator;
 
+                // Storage-level instant synchronization across popup and portal tabs
+        chrome.storage.onChanged.addListener(function(changes, areaName) {
+            if (areaName !== 'local') return;
+            // Instant real-time microsecond filter update
+            if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters) {
+                if (orchestrator && orchestrator._checkDynamicFilterChanges) {
+                    orchestrator._checkDynamicFilterChanges(true);
+                }
+            }
+            if (changes.mode && changes.mode.newValue) {
+                orchestrator.setMode(changes.mode.newValue);
+            }
+        });
         chrome.runtime.onMessage.addListener(function(req, sender, sendResponse) {
             switch (req.action) {
                 case 'GET_STATUS':              sendResponse(Object.assign({ success: true }, orchestrator.getStatus())); return true;

@@ -101,6 +101,7 @@
             </label>
         </div>
 
+
         <!-- Status Grid -->
         <div class="status-grid">
             <div class="status-item">
@@ -124,19 +125,19 @@
         <!-- Mode Controls -->
         <div class="section-title">Operating Mode</div>
         <div class="mode-grid">
-            <button class="mode-btn mode-monitor" data-mode="MONITOR" id="modeMonitor">
+            <button type="button" class="mode-btn mode-monitor" data-mode="MONITOR" id="modeMonitor">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
                 Monitor
             </button>
-            <button class="mode-btn mode-dryrun" data-mode="DRY_RUN" id="modeDryRun">
+            <button type="button" class="mode-btn mode-dryrun" data-mode="DRY_RUN" id="modeDryRun">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3h15"/><path d="M6 3v16a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V3"/><path d="M6 14h12"/></svg>
                 Dry Run
             </button>
-            <button class="mode-btn mode-assisted" data-mode="ASSISTED" id="modeAssisted">
+            <button type="button" class="mode-btn mode-assisted" data-mode="ASSISTED" id="modeAssisted">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                 Assisted
             </button>
-            <button class="mode-btn mode-automatic active" data-mode="AUTOMATIC" id="modeAutomatic">
+            <button type="button" class="mode-btn mode-automatic active" data-mode="AUTOMATIC" id="modeAutomatic">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
                 Auto
             </button>
@@ -164,7 +165,6 @@
         <div class="stat-row"><span class="stat-label">Rejected</span><span class="stat-value stat-danger" id="statRejected">0</span></div>
         <div class="stat-row"><span class="stat-label">Country Blocked</span><span class="stat-value stat-warning" id="statCountryBlocked">0</span></div>
         <div class="stat-row"><span class="stat-label">Duplicate</span><span class="stat-value stat-warning" id="statDuplicate">0</span></div>
-        <div class="stat-row"><span class="stat-label">Failed</span><span class="stat-value stat-danger" id="statFailed">0</span></div>
         <div class="stat-row"><span class="stat-label">Popups Handled</span><span class="stat-value stat-purple" id="statPopups">0</span></div>
     </div>
 </div>
