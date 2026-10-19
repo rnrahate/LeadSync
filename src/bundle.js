@@ -305,16 +305,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (!this._running || this._loopInProgress) return;
         this._loopInProgress = true;
 
-        // Check for dynamic filter changes (throttled to every 5s so it does not bottleneck the loop or flood Supabase)
-        var now = Date.now();
-        var shouldCheckFilters = !self._lastFilterCheck || (now - self._lastFilterCheck > 5000);
-        var filterPromise = (shouldCheckFilters && self.orchestrator && self.orchestrator._checkDynamicFilterChanges)
-            ? (self._lastFilterCheck = now, self.orchestrator._checkDynamicFilterChanges())
-            : Promise.resolve(false);
-
-        filterPromise.then(function() {
-            if (!self._running) { self._loopInProgress = false; return; }
-
+        try {
             // If all filters are already completed, stop loop and transition to IDLE
             if (self.orchestrator && self.orchestrator.keywordManager) {
                 var activeCount = self.orchestrator.keywordManager.getActiveFilterCount();
@@ -330,7 +321,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 self.orchestrator.startNewCycle();
             }
 
-            // Ensure scanner resets per-pass cache so all top 5 leads are re-evaluated against filters
+            // Ensure scanner resets per-pass cache so all top 7 leads are re-evaluated against filters in real-time
             if (self.orchestrator && self.orchestrator.scanner) {
                 self.orchestrator.scanner.resetEmitted();
             }
@@ -338,12 +329,6 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             // Actively scroll down across the seven newest leads and scan them
             self._scrollToTop7Leads(function() {
                 if (!self._running) { self._loopInProgress = false; return; }
-
-                // Return to top real-time quick without any 2-second delay
-                try {
-                    window.scrollTo(0, 0);
-                    window.dispatchEvent(new Event('scroll'));
-                } catch (e) {}
 
                 self._loopInProgress = false;
                 if (self.orchestrator && self.orchestrator.stats) {
@@ -354,10 +339,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 // then trigger ultra-low-latency hard reload (~100ms) to rescan newest seven leads.
                 self._waitForQueueAndReload();
             });
-        }).catch(function() {
+        } catch (e) {
             self._loopInProgress = false;
             self._scheduleNextLoop();
-        });
+        }
     };
 
     // Smooth and fast scroll across the seven newest leads on the page with real-time scanning
@@ -596,14 +581,21 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             var isQueueBusy = q && (q.processing > 0 || (q.queue && q.queue.length > 0));
             var isPopupActive = self.orchestrator && self.orchestrator.popupManager && self.orchestrator.popupManager._active;
             var isScannerBusy = self.orchestrator && self.orchestrator.scanner && (self.orchestrator.scanner._scanning || self.orchestrator.scanner._scanPending);
+            var isLifecycleInFlight = self.orchestrator && self.orchestrator.lifecycle && self.orchestrator.lifecycle._inFlight && self.orchestrator.lifecycle._inFlight.size > 0;
 
-            if (isQueueBusy || isPopupActive || isScannerBusy) {
+            if (isQueueBusy || isPopupActive || isScannerBusy || isLifecycleInFlight) {
                 self._queueWaitTimer = setTimeout(function() {
                     self._queueWaitTimer = null;
                     checkQueue();
                 }, 100);
                 return;
             }
+
+            // Return to top cleanly only when all acquisitions and queue are fully idle
+            try {
+                window.scrollTo(0, 0);
+                window.dispatchEvent(new Event('scroll'));
+            } catch (e) {}
 
             // At the end of every completed top-seven scan cycle:
             // If autoReloadOnComplete is enabled, trigger hard reload after safe delay (~100ms)
@@ -1669,7 +1661,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     KeywordManager.prototype.loadKeywords = function() {
         var self = this;
         return new Promise(function(resolve) {
-            chrome.storage.local.get(['keywords', 'supabaseEnabled', 'filterCompletedBuyers'], function(result) {
+            chrome.storage.local.get(['keywords', 'supabaseEnabled', 'filterCompletedBuyers', 'cached_filters_v1', 'supabase_filters_cache'], function(result) {
                 if (result && result.filterCompletedBuyers) {
                     try {
                         for (var fId in result.filterCompletedBuyers) {
@@ -1686,9 +1678,27 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                     required: (result.keywords && result.keywords.required) || []
                 };
                 self._supabaseEnabled = result.supabaseEnabled !== false;
-                self._rebuildKeywords();
+
+                // Prime Supabase filters from local storage cache immediately so matching works real-time without waiting
+                var cachedFilters = null;
+                if (result && result.cached_filters_v1 && Array.isArray(result.cached_filters_v1.filters)) {
+                    cachedFilters = result.cached_filters_v1.filters;
+                } else if (result && result.supabase_filters_cache && Array.isArray(result.supabase_filters_cache.filters)) {
+                    cachedFilters = result.supabase_filters_cache.filters;
+                }
+                if (cachedFilters && cachedFilters.length > 0) {
+                    self.extractFromSupabaseFilters(cachedFilters);
+                    if (self.orchestrator && self.orchestrator.supabase) {
+                        self.orchestrator.supabase._filters = cachedFilters;
+                        self.orchestrator.supabase._filtersLoaded = true;
+                    }
+                } else {
+                    self._rebuildKeywords();
+                }
+
                 self.logger.info('Local keywords loaded', {
                     product: self._localKeywords.product.length,
+                    activeFilters: self.getActiveFilterCount(),
                     supabaseEnabled: self._supabaseEnabled
                 });
                 resolve(self.keywords);
@@ -4509,9 +4519,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 }
 
                 // === STEP 2: FILTER MATCH ===
-                // If Supabase is enabled but filters not yet loaded, skip this card (retry after load)
+                // If Supabase is enabled but filters not yet loaded, skip this card (retry immediately once loaded)
                 if (self._supabaseEnabled && !self.supabase._filtersLoaded) {
                     self.logger.debug('⏳ Filters not loaded yet, skipping: ' + card.id);
+                    if (self.scanner && self.scanner._knownLeads) {
+                        delete self.scanner._knownLeads[card.id];
+                    }
                     continue;
                 }
                 var kw = self._supabaseEnabled
@@ -5429,7 +5442,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         chrome.storage.onChanged.addListener(function(changes, areaName) {
             if (areaName !== 'local') return;
             // Instant real-time microsecond filter update
-            if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters) {
+            if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters || changes.cached_filters_v1) {
                 if (orchestrator && orchestrator._checkDynamicFilterChanges) {
                     orchestrator._checkDynamicFilterChanges(true);
                 }

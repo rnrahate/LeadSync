@@ -40,7 +40,7 @@ class SupabaseService {
         this._filtersLastFetch = 0;
         this._filtersTTL = 1000; // 1 second (ultra-low latency)
         this._filtersCacheKey = 'cached_filters_v1';
-        this._filtersCacheTTL = 2000; // 2 seconds
+        this._filtersCacheTTL = 86400000; // 24 hours (instant cache on page reload; real-time invalidated by storage events)
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;

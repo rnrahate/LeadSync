@@ -550,14 +550,10 @@ LeadMatcher.prototype.rankCandidates = function(leads, filter) {
         }
     }
 
-    // Sort descending by score; tie-break deterministically
+    // Sort descending by score; tie-break deterministically (pure real-time matching, no query time / req time duration checks)
     candidates.sort(function(a, b) {
         if (b.score !== a.score) return b.score - a.score;
-        // Tie-breaker 1: newest query time / lead age if available
-        var tA = a.lead.queryTime || a.lead.detectedAt || 0;
-        var tB = b.lead.queryTime || b.lead.detectedAt || 0;
-        if (tB !== tA) return tB - tA;
-        // Tie-breaker 2: stable ID alphabetical
+        // Deterministic stable ID alphabetical
         return String(a.lead.leadId || a.lead.uniqueQueryId || '').localeCompare(String(b.lead.leadId || b.lead.uniqueQueryId || ''));
     });
 
