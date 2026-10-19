@@ -170,6 +170,42 @@ console.log('\n=== RUNNING REAL-TIME FILTER MATCHING TESTS ===\n');
         assert.strictEqual(orchestrator.navigator._loopInProgress, false);
         console.log('  ✅ PASS: 4. PageNavigator runs real-time loop without 5000ms filter check delay');
 
+        // Test 5: Qualifier-aware filter matching matches real leads with pharmacopoeia & intent descriptors
+        orchestrator.supabase._filtersLoaded = true;
+        orchestrator.keywordManager.extractFromSupabaseFilters([
+            {
+                id: 199,
+                filter_name: 'USP Grade Abaloparatide API',
+                filter_config: { product_names: ['USP Grade Abaloparatide API'] },
+                is_active: true
+            },
+            {
+                id: 196,
+                filter_name: 'Personal Use Tretinoin',
+                filter_config: { product_names: ['Personal Use Tretinoin 0.025 Cream, 20 Gm'] },
+                is_active: true
+            }
+        ]);
+
+        const leadAbaloparatide = {
+            productName: 'Abaloparatide',
+            messageText: 'Looking for Abaloparatide high quality',
+            contact: { mobile: '9999999999' }
+        };
+        const matchResult1 = orchestrator.keywordManager.evaluateFilters(leadAbaloparatide);
+        assert.strictEqual(matchResult1.passed, true, 'Lead "Abaloparatide" must match filter "USP Grade Abaloparatide API"');
+        assert.strictEqual(matchResult1.filterId, 199);
+
+        const leadTretinoin = {
+            productName: 'Tretinoin 0.025% Cream',
+            messageText: 'Need 20g tube for personal use',
+            contact: { mobile: '9999999999' }
+        };
+        const matchResult2 = orchestrator.keywordManager.evaluateFilters(leadTretinoin);
+        assert.strictEqual(matchResult2.passed, true, 'Lead "Tretinoin 0.025% Cream" must match filter "Personal Use Tretinoin 0.025 Cream, 20 Gm"');
+        assert.strictEqual(matchResult2.filterId, 196);
+        console.log('  ✅ PASS: 5. Qualifier-aware matching matches real leads with compound pharmacopoeia/intent descriptors');
+
         // Clean up timers
         if (orchestrator.navigator) orchestrator.navigator.stop();
         if (orchestrator.scanner) orchestrator.scanner.stopWatching();

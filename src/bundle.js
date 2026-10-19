@@ -281,6 +281,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (this._settleTimer)   { clearTimeout(this._settleTimer);   this._settleTimer = null; }
         if (this._stepTimer)     { clearTimeout(this._stepTimer);     this._stepTimer = null; }
         if (this._queueWaitTimer){ clearTimeout(this._queueWaitTimer); this._queueWaitTimer = null; }
+        if (this._waitForCardsTimer){ clearTimeout(this._waitForCardsTimer); this._waitForCardsTimer = null; }
         if (this._reloadTimer)   { clearTimeout(this._reloadTimer);   this._reloadTimer = null; }
         this.logger.info('⏹ Bottom-loop navigator cleanly stopped (all timers cleared)');
     };
@@ -361,7 +362,20 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             self.orchestrator.scanner._scan();
         }
 
-        var allCards = document.querySelectorAll('[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], div[id*="id_BLCard"]');
+        var allCards = document.querySelectorAll(
+            '[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], ' +
+            'div[id*="id_BLCard"], [class*="BLCard"], [class*="bl_card"], div[id*="BLCard"], ' +
+            'div[id*="BLbp"], [class*="bl-card"], [class*="listing_card"]'
+        );
+        if (allCards.length === 0) {
+            // Cards are still rendering after reload/navigation — wait briefly before scrolling or reloading
+            self._waitForCardsTimer = setTimeout(function() {
+                self._waitForCardsTimer = null;
+                if (!self._running) { done(); return; }
+                self._scrollToTop7Leads(done);
+            }, 300);
+            return;
+        }
         var targetCard = allCards.length > 0 ? allCards[Math.min(6, allCards.length - 1)] : null;
         var maxScrollY = 1000;
         if (targetCard) {
@@ -582,8 +596,12 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             var isPopupActive = self.orchestrator && self.orchestrator.popupManager && self.orchestrator.popupManager._active;
             var isScannerBusy = self.orchestrator && self.orchestrator.scanner && (self.orchestrator.scanner._scanning || self.orchestrator.scanner._scanPending);
             var isLifecycleInFlight = self.orchestrator && self.orchestrator.lifecycle && self.orchestrator.lifecycle._inFlight && self.orchestrator.lifecycle._inFlight.size > 0;
+            var isLeadProcessing = self.orchestrator && self.orchestrator.stateMachine && (function() {
+                var smStats = self.orchestrator.stateMachine.getStats();
+                return (smStats.PROCESSING || 0) > 0 || (smStats.ACQUISITION_PENDING || 0) > 0 || (smStats.CONTACT_PENDING || 0) > 0;
+            })();
 
-            if (isQueueBusy || isPopupActive || isScannerBusy || isLifecycleInFlight) {
+            if (isQueueBusy || isPopupActive || isScannerBusy || isLifecycleInFlight || isLeadProcessing) {
                 self._queueWaitTimer = setTimeout(function() {
                     self._queueWaitTimer = null;
                     checkQueue();
@@ -623,10 +641,16 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         var self = this;
         if (!this._running) return false;
 
-        // Prevent reload storms or overlapping reload triggers
+        // Prevent reload storms or overlapping reload triggers (persisted in sessionStorage)
         if (this._reloadInProgress) return false;
         var now = Date.now();
-        if (this._lastReloadTime && (now - this._lastReloadTime < 500)) {
+        var lastTime = this._lastReloadTime;
+        if (!lastTime && typeof process === 'undefined') {
+            try {
+                lastTime = parseInt(sessionStorage.getItem('bl_last_reload_time') || '0', 10) || 0;
+            } catch (e) {}
+        }
+        if (lastTime && (now - lastTime < 500)) {
             this.logger.warn('Reload storm prevented: reload requested too quickly');
             return false;
         }
@@ -1382,9 +1406,22 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                     score += 15;
                     reasons.push('full_exact_match (+15)');
                 }
+            } else if (normLead.length >= 4 && (normKw.indexOf(normLead) !== -1 || (lead.productName && normKw.indexOf(normalizeText(lead.productName)) !== -1))) {
+                score += 35;
+                reasons.push('subphrase_filter_match (+35)');
             }
 
             // Factor 2: Token coverage (+25 max)
+            var QUALIFIER_WORDS = {
+                'usp': 1, 'bp': 1, 'ip': 1, 'ep': 1, 'jp': 1, 'cp': 1,
+                'grade': 1, 'api': 1,
+                'personal': 1, 'use': 1, 'commercial': 1, 'industrial': 1,
+                'for': 1, 'in': 1, 'and': 1, 'with': 1, 'of': 1, 'the': 1, 'a': 1, 'an': 1,
+                'pharma': 1, 'pharmaceutical': 1, 'standard': 1, 'pure': 1, 'bulk': 1
+            };
+            var substantiveKwTokens = kwTokens.filter(function(t) { return !QUALIFIER_WORDS[t]; });
+            var denom = substantiveKwTokens.length > 0 ? substantiveKwTokens : kwTokens;
+
             var matchedTokensCount = 0;
             for (var t = 0; t < kwTokens.length; t++) {
                 var tok = kwTokens[t];
@@ -1398,18 +1435,32 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 }
                 if (matchedTok) matchedTokensCount++;
             }
-            var coverage = matchedTokensCount / kwTokens.length;
-            var coveragePoints = Math.round(coverage * 25);
-            score += coveragePoints;
-            reasons.push('token_coverage (' + Math.round(coverage * 100) + '%: +' + coveragePoints + ')');
 
-            // If all keyword tokens are present or keyword matches text, guarantee acceptance
-            if (coverage >= 1.0 || (keywordMatchesText(normCombined, normKw) && normCombined.indexOf(normKw) === -1)) {
-                score = Math.max(score, 60);
-                reasons.push('complete_token_or_synonym_match (+60 minimum)');
+            var matchedSubstantiveCount = 0;
+            for (var stIdx = 0; stIdx < denom.length; stIdx++) {
+                var sTok = denom[stIdx];
+                for (var lt2 = 0; lt2 < leadTokens.length; lt2++) {
+                    if (tokensEquivalent(leadTokens[lt2], sTok)) {
+                        matchedSubstantiveCount++;
+                        break;
+                    }
+                }
             }
 
-            if (coverage >= 0.7) totalKeywordsMatched++;
+            var coverage = matchedTokensCount / kwTokens.length;
+            var substantiveCoverage = matchedSubstantiveCount / denom.length;
+            var effectiveCoverage = Math.max(coverage, substantiveCoverage);
+            var coveragePoints = Math.round(effectiveCoverage * 25);
+            score += coveragePoints;
+            reasons.push('token_coverage (' + Math.round(effectiveCoverage * 100) + '%: +' + coveragePoints + ')');
+
+            // If all substantive keyword tokens are present or keyword matches text, guarantee acceptance
+            if (effectiveCoverage >= 1.0 || (keywordMatchesText(normCombined, normKw) && normCombined.indexOf(normKw) === -1)) {
+                score = Math.max(score, 60);
+                reasons.push('complete_token_or_substantive_match (+60 minimum)');
+            }
+
+            if (effectiveCoverage >= 0.7) totalKeywordsMatched++;
 
             // Factor 3: Attribute agreement (+15 SPF, +15 strength, +15 size, +10 form)
             if (kwAttrs.spf && leadAttrs.spf && kwAttrs.spf === leadAttrs.spf) {
@@ -1554,7 +1605,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             }
             return this._activeFilters.filter(function(f) {
                 if (f.isActive === false || f.is_active === false || f.deleted_at || f.is_deleted) return false;
-                var buyers = self._filterCompletedBuyers.get(f.id);
+                var buyers = self._filterCompletedBuyers.get(f.id) || self._filterCompletedBuyers.get(String(f.id));
                 var count = buyers ? buyers.size : 0;
                 var target = 1;
                 if (typeof f.targetQuantity === 'number' && f.targetQuantity > 0) {
@@ -1583,7 +1634,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 var f = this._activeFilters[i];
                 if (String(f.id) === String(filterId)) {
                     if (f.isActive === false || f.is_active === false || f.deleted_at || f.is_deleted) return false;
-                    var buyers = self._filterCompletedBuyers.get(f.id);
+                    var buyers = self._filterCompletedBuyers.get(f.id) || self._filterCompletedBuyers.get(String(f.id));
                     var count = buyers ? buyers.size : 0;
                     var target = 1;
                     if (typeof f.targetQuantity === 'number' && f.targetQuantity > 0) {
@@ -1604,27 +1655,30 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
 
     KeywordManager.prototype.reserveSlot = function(filterId, leadId) {
         if (!filterId || !leadId) return;
-        if (!this._filterInFlight.has(filterId)) {
-            this._filterInFlight.set(filterId, new Set());
+        var fKey = String(filterId);
+        if (!this._filterInFlight.has(fKey)) {
+            this._filterInFlight.set(fKey, new Set());
         }
-        this._filterInFlight.get(filterId).add(leadId);
+        this._filterInFlight.get(fKey).add(leadId);
     };
 
     KeywordManager.prototype.releaseReservation = function(filterId, leadId) {
         if (!filterId || !leadId) return;
-        if (this._filterInFlight.has(filterId)) {
-            this._filterInFlight.get(filterId).delete(leadId);
+        var fKey = String(filterId);
+        if (this._filterInFlight.has(fKey)) {
+            this._filterInFlight.get(fKey).delete(leadId);
         }
     };
 
     KeywordManager.prototype.recordFilterSuccess = function(filterId, lead) {
         if (!filterId) return;
         var buyerId = this.getBuyerId(lead);
-        if (!this._filterCompletedBuyers.has(filterId)) {
-            this._filterCompletedBuyers.set(filterId, new Set());
+        var fKey = String(filterId);
+        if (!this._filterCompletedBuyers.has(fKey)) {
+            this._filterCompletedBuyers.set(fKey, new Set());
         }
         if (buyerId) {
-            this._filterCompletedBuyers.get(filterId).add(buyerId);
+            this._filterCompletedBuyers.get(fKey).add(buyerId);
         }
         this.releaseReservation(filterId, lead ? (lead.leadId || lead.id) : null);
         this._persistCompletedBuyers();
@@ -1949,7 +2003,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             var r = activeRules[i];
 
             // 0. Filter Quota & Distinct Buyer check: deduct fulfilled filters
-            var completedBuyers = self._filterCompletedBuyers.get(r.id);
+            var completedBuyers = self._filterCompletedBuyers.get(r.id) || self._filterCompletedBuyers.get(String(r.id));
             var completedCount = completedBuyers ? completedBuyers.size : 0;
             var target = 1;
             if (typeof r.targetQuantity === 'number' && r.targetQuantity > 0) {
@@ -1963,7 +2017,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             }
             if (completedCount >= target) continue;
 
-            var inFlight = self._filterInFlight.get(r.id);
+            var inFlight = self._filterInFlight.get(r.id) || self._filterInFlight.get(String(r.id));
             var inFlightCount = inFlight ? inFlight.size : 0;
             if (completedCount + inFlightCount >= target) continue;
 
@@ -3626,16 +3680,18 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             self._setupUI();
             self._broadcastStatus();
 
-            // Now wait for Supabase filters (with retry) before starting scanner
-            if (self._supabaseEnabled) {
-                return self._syncSupabaseKeywords();
-            }
-            return Promise.resolve();
-        }).then(function() {
+            // Immediately mark initialized and start scanner in real-time
             self._initialized = true;
             self._updateScannerLifecycleState('init');
             self.logger.info('✅ Ready — initialized (scanner state: ' + self._scannerState + ')');
             self._broadcastStatus();
+
+            // In background, sync with Supabase and load DB history without blocking scanner
+            if (self._supabaseEnabled) {
+                self._syncSupabaseKeywords().catch(function(err) {
+                    self.logger.warn('Background Supabase sync notice: ' + (err && err.message));
+                });
+            }
         });
     };
 
@@ -5112,10 +5168,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return false;
     };
 
-    Orchestrator.prototype._checkDynamicFilterChanges = function() {
+    Orchestrator.prototype._checkDynamicFilterChanges = function(forceRefresh) {
         if (!this._supabaseEnabled || !this.supabase) return Promise.resolve(false);
         var self = this;
-        return this.supabase.loadFilters(true).then(function(success) {
+        var force = forceRefresh === true;
+        return this.supabase.loadFilters(force).then(function(success) {
             if (!success) return false;
             var newFilters = self.supabase.getFilters() || [];
             var newSignature = JSON.stringify(newFilters.map(function(f) {
@@ -5443,8 +5500,18 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             if (areaName !== 'local') return;
             // Instant real-time microsecond filter update
             if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters || changes.cached_filters_v1) {
-                if (orchestrator && orchestrator._checkDynamicFilterChanges) {
-                    orchestrator._checkDynamicFilterChanges(true);
+                var cachedObj = (changes.cached_filters_v1 && changes.cached_filters_v1.newValue) ||
+                                (changes.supabase_filters_cache && changes.supabase_filters_cache.newValue);
+                var newFilterList = cachedObj && Array.isArray(cachedObj.filters) ? cachedObj.filters : (Array.isArray(cachedObj) ? cachedObj : null);
+                if (newFilterList && orchestrator && orchestrator.keywordManager) {
+                    orchestrator.keywordManager.extractFromSupabaseFilters(newFilterList);
+                    if (orchestrator.supabase) {
+                        orchestrator.supabase._filters = newFilterList;
+                        orchestrator.supabase._filtersLoaded = true;
+                    }
+                    orchestrator._updateScannerLifecycleState('storage_filter_update');
+                } else if (orchestrator && orchestrator._checkDynamicFilterChanges) {
+                    orchestrator._checkDynamicFilterChanges(false);
                 }
             }
             if (changes.mode && changes.mode.newValue) {

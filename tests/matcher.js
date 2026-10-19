@@ -388,9 +388,22 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
                 score += 15;
                 reasons.push('full_exact_match (+15)');
             }
+        } else if (normLead.length >= 4 && (normKw.indexOf(normLead) !== -1 || (lead.productName && normKw.indexOf(normalizeText(lead.productName)) !== -1))) {
+            score += 35;
+            reasons.push('subphrase_filter_match (+35)');
         }
 
         // Factor 2: Query term coverage (+25 points max proportional to matched tokens)
+        var QUALIFIER_WORDS = {
+            'usp': 1, 'bp': 1, 'ip': 1, 'ep': 1, 'jp': 1, 'cp': 1,
+            'grade': 1, 'api': 1,
+            'personal': 1, 'use': 1, 'commercial': 1, 'industrial': 1,
+            'for': 1, 'in': 1, 'and': 1, 'with': 1, 'of': 1, 'the': 1, 'a': 1, 'an': 1,
+            'pharma': 1, 'pharmaceutical': 1, 'standard': 1, 'pure': 1, 'bulk': 1
+        };
+        var substantiveKwTokens = kwTokens.filter(function(t) { return !QUALIFIER_WORDS[t]; });
+        var denom = substantiveKwTokens.length > 0 ? substantiveKwTokens : kwTokens;
+
         var matchedTokensCount = 0;
         for (var t = 0; t < kwTokens.length; t++) {
             var tok = kwTokens[t];
@@ -404,17 +417,31 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
             }
             if (matchedTok) matchedTokensCount++;
         }
-        var coverage = matchedTokensCount / kwTokens.length;
-        var coveragePoints = Math.round(coverage * 25);
-        score += coveragePoints;
-        reasons.push('token_coverage (' + Math.round(coverage * 100) + '%: +' + coveragePoints + ')');
 
-        if (coverage >= 1.0) {
-            score = Math.max(score, 60);
-            reasons.push('complete_token_or_synonym_match (+60 minimum)');
+        var matchedSubstantiveCount = 0;
+        for (var stIdx = 0; stIdx < denom.length; stIdx++) {
+            var sTok = denom[stIdx];
+            for (var lt2 = 0; lt2 < leadTokens.length; lt2++) {
+                if (tokensEquivalent(leadTokens[lt2], sTok)) {
+                    matchedSubstantiveCount++;
+                    break;
+                }
+            }
         }
 
-        if (coverage >= 0.7) {
+        var coverage = matchedTokensCount / kwTokens.length;
+        var substantiveCoverage = matchedSubstantiveCount / denom.length;
+        var effectiveCoverage = Math.max(coverage, substantiveCoverage);
+        var coveragePoints = Math.round(effectiveCoverage * 25);
+        score += coveragePoints;
+        reasons.push('token_coverage (' + Math.round(effectiveCoverage * 100) + '%: +' + coveragePoints + ')');
+
+        if (effectiveCoverage >= 1.0) {
+            score = Math.max(score, 60);
+            reasons.push('complete_token_or_substantive_match (+60 minimum)');
+        }
+
+        if (effectiveCoverage >= 0.7) {
             totalKeywordsMatched++;
         }
 
