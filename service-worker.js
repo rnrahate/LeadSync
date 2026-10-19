@@ -64,7 +64,7 @@ var DEFAULT_CONFIG = {
     loadMoreWaitMs: 900,
     maxStuckLoops: 3,
     maxReloadsPerSession: 999999,
-    autoReloadOnComplete: false,
+    autoReloadOnComplete: true,
     autoReloadDelayMs: 100,
 
     // Popup (speed-tuned)

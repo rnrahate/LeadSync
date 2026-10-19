@@ -170,10 +170,10 @@ it('Scenario H: Foreign country matching and restricted countries with ISO norma
     assert.strictEqual(resIn.passed, true);
 });
 
-it('Scenario I: Contact requirements enforce ALL specified contact channels (AND logic)', function() {
+it('Scenario I: Contact requirements enforce ANY specified contact channel (OR logic)', function() {
     var contactFilter = {
         id: 105,
-        name: 'Strict Contact Filter',
+        name: 'Flexible Contact Filter',
         keywords: ['Paracetamol 650mg'],
         requireMobile: true,
         requireEmail: true
@@ -183,19 +183,25 @@ it('Scenario I: Contact requirements enforce ALL specified contact channels (AND
         productName: 'Paracetamol 650mg',
         senderMobile: '9876543210'
     };
-    var bothContactLead = {
-        leadId: 'lead_both_contact',
+    var onlyEmailLead = {
+        leadId: 'lead_email_only',
         productName: 'Paracetamol 650mg',
-        senderMobile: '9876543210',
         senderEmail: 'buyer@example.com'
+    };
+    var neitherContactLead = {
+        leadId: 'lead_no_contact',
+        productName: 'Paracetamol 650mg'
     };
 
     var resMobOnly = matcher.evaluate(onlyMobileLead, contactFilter);
-    assert.strictEqual(resMobOnly.passed, false);
-    assert.strictEqual(resMobOnly.reason, 'missing_contact_info');
+    assert.strictEqual(resMobOnly.passed, true, 'Lead with mobile satisfies OR contact requirements');
 
-    var resBoth = matcher.evaluate(bothContactLead, contactFilter);
-    assert.strictEqual(resBoth.passed, true);
+    var resEmailOnly = matcher.evaluate(onlyEmailLead, contactFilter);
+    assert.strictEqual(resEmailOnly.passed, true, 'Lead with email satisfies OR contact requirements');
+
+    var resNeither = matcher.evaluate(neitherContactLead, contactFilter);
+    assert.strictEqual(resNeither.passed, false, 'Lead without mobile or email must be rejected');
+    assert.strictEqual(resNeither.reason, 'missing_contact_info');
 });
 
 // ------------------------------------------------------------

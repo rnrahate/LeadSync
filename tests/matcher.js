@@ -17,6 +17,15 @@ function normalizeText(text) {
         .trim();
 }
 
+function tokensEquivalent(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (Math.min(a.length, b.length) > 2 && (a === b + 's' || a === b + 'es' || a + 's' === b || a + 'es' === b)) return true;
+    if (a.length > 4 && a.slice(-3) === 'ies' && a.slice(0, -3) + 'y' === b) return true;
+    if (b.length > 4 && b.slice(-3) === 'ies' && b.slice(0, -3) + 'y' === a) return true;
+    return false;
+}
+
 function tokenize(normalizedText) {
     if (!normalizedText) return [];
     return normalizedText.split(/\s+/).filter(function(t) { return t.length > 0; });
@@ -306,35 +315,22 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
         }
     }
 
-    // 4. Contact requirements (ALL specified channels must be present)
-    var reqMobile = filter.requireMobile || (filter.filter_config && filter.filter_config.require_mobile);
-    var reqWhatsapp = filter.requireWhatsapp || (filter.filter_config && filter.filter_config.require_whatsapp);
-    var reqEmail = filter.requireEmail || (filter.filter_config && filter.filter_config.require_email);
+    // 4. Contact requirements (OR logic: any selected channel qualifies the lead)
+    var reqMobile = !!(filter.requireMobile || (filter.filter_config && filter.filter_config.require_mobile));
+    var reqWhatsapp = !!(filter.requireWhatsapp || (filter.filter_config && filter.filter_config.require_whatsapp));
+    var reqEmail = !!(filter.requireEmail || (filter.filter_config && filter.filter_config.require_email));
     if (reqMobile || reqWhatsapp || reqEmail) {
         var contact = lead.contact || {};
         var hasMobile = !!(contact.mobile || lead.senderMobile || lead.hasMobileVerified);
         var hasWhatsapp = !!(contact.phone || lead.senderMobile || lead.hasWhatsapp);
         var hasEmail = !!(contact.email || lead.senderEmail || lead.hasEmailVerified);
 
-        if (reqMobile && !hasMobile) {
+        var satisfiesAny = (reqMobile && hasMobile) || (reqWhatsapp && hasWhatsapp) || (reqEmail && hasEmail);
+        if (!satisfiesAny) {
             return {
                 eligible: false,
                 reason: 'missing_contact_info',
-                detail: 'Lead does not satisfy required mobile contact channel'
-            };
-        }
-        if (reqWhatsapp && !hasWhatsapp) {
-            return {
-                eligible: false,
-                reason: 'missing_contact_info',
-                detail: 'Lead does not satisfy required whatsapp contact channel'
-            };
-        }
-        if (reqEmail && !hasEmail) {
-            return {
-                eligible: false,
-                reason: 'missing_contact_info',
-                detail: 'Lead does not satisfy required email contact channel'
+                detail: 'Lead does not satisfy any of the required contact channels'
             };
         }
     }
@@ -345,9 +341,12 @@ LeadMatcher.prototype.checkEligibility = function(lead, filter) {
 // Stage B: Candidate Scoring (Deterministic relevance score 0 - 100)
 LeadMatcher.prototype.computeScore = function(lead, filter) {
     var rawProd = lead.productName || '';
+    var rawMsg = lead.messageText || lead.queryMessage || '';
+    var rawCombined = (rawProd + ' ' + rawMsg).trim();
     var normLead = normalizeText(rawProd);
-    var leadTokens = tokenize(normLead);
-    var leadAttrs = extractAttributes(normLead);
+    var normCombined = normalizeText(rawCombined);
+    var leadTokens = tokenize(normCombined);
+    var leadAttrs = extractAttributes(normCombined);
 
     var prodKws = filter.keywords || filter.product_keywords || (filter.filter_config && filter.filter_config.product_names) || [];
     if (prodKws.length === 0) {
@@ -382,7 +381,7 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
         var reasons = [];
 
         // Factor 1: Exact phrase match in lead product name (+35 points, +15 bonus for full exact match)
-        if (normLead.indexOf(normKw) !== -1) {
+        if (normLead.indexOf(normKw) !== -1 || normCombined.indexOf(normKw) !== -1) {
             score += 35;
             reasons.push('exact_phrase_match (+35)');
             if (normLead === normKw) {
@@ -398,7 +397,7 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
             var matchedTok = false;
             for (var lt = 0; lt < leadTokens.length; lt++) {
                 var lTok = leadTokens[lt];
-                if (lTok === tok || lTok === tok + 's' || lTok === tok + 'es') {
+                if (tokensEquivalent(lTok, tok)) {
                     matchedTok = true;
                     break;
                 }
@@ -409,6 +408,11 @@ LeadMatcher.prototype.computeScore = function(lead, filter) {
         var coveragePoints = Math.round(coverage * 25);
         score += coveragePoints;
         reasons.push('token_coverage (' + Math.round(coverage * 100) + '%: +' + coveragePoints + ')');
+
+        if (coverage >= 1.0) {
+            score = Math.max(score, 60);
+            reasons.push('complete_token_or_synonym_match (+60 minimum)');
+        }
 
         if (coverage >= 0.7) {
             totalKeywordsMatched++;

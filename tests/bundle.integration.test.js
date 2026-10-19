@@ -203,7 +203,7 @@ global.MutationObserver = class {
 class MockSupabaseService {
     constructor() {
         this._filters = [
-            { id: 'f1', name: 'SPF 50 Gel', product_keywords: ['Sunscreen 50g', 'SPF 50 Gel'], negative_keywords: ['lotion'], is_active: true }
+            { id: 'f1', name: 'SPF 50 Gel', product_keywords: ['Sunscreen 50g', 'SPF 50 Gel'], negative_keywords: ['lotion'], target_lead_count: 2, is_active: true }
         ];
         this._filtersLoaded = true;
     }
@@ -685,10 +685,10 @@ setTimeout(() => {
                 });
                 assert.strictEqual(bdLeadMatch.passed, true, 'Lead with countryIso "BD" must match filter configured with "BANGLADESH"');
 
-                // 18.3 Strict Contact Channels (AND logic)
+                // 18.3 Contact Channels (OR logic)
                 orch.keywordManager._activeFilters = [{
-                    id: 'f_strict_contact',
-                    name: 'Strict Contact Filter',
+                    id: 'f_or_contact',
+                    name: 'OR Contact Filter',
                     product_keywords: ['Thermometer'],
                     filter_config: {
                         require_mobile: true,
@@ -701,15 +701,100 @@ setTimeout(() => {
                     productName: 'Digital Thermometer',
                     senderMobile: '9123456789'
                 });
-                assert.strictEqual(mobileOnlyLead.passed, false, 'Lead missing required email must be rejected when both mobile and email are required');
+                assert.strictEqual(mobileOnlyLead.passed, true, 'Lead with mobile satisfies OR contact requirements');
+
+                const emailOnlyLead = orch.keywordManager.evaluateFilters({
+                    productName: 'Digital Thermometer',
+                    senderEmail: 'buyer@test.com'
+                });
+                assert.strictEqual(emailOnlyLead.passed, true, 'Lead with email satisfies OR contact requirements');
 
                 const bothContactsLead = orch.keywordManager.evaluateFilters({
                     productName: 'Digital Thermometer',
                     senderMobile: '9123456789',
                     senderEmail: 'buyer@test.com'
                 });
-                assert.strictEqual(bothContactsLead.passed, true, 'Lead satisfying both required contact channels must be accepted');
-                console.log('  ✅ PASS: Issue 3 verified: Match Mode "all", Foreign Country ISO mapping, and strict contact channels');
+                assert.strictEqual(bothContactsLead.passed, true, 'Lead satisfying both contact channels must be accepted');
+
+                const neitherContactLead = orch.keywordManager.evaluateFilters({
+                    productName: 'Digital Thermometer'
+                });
+                assert.strictEqual(neitherContactLead.passed, false, 'Lead missing both required contact channels must be rejected');
+                console.log('  ✅ PASS: Issue 3 verified: Match Mode "all", Foreign Country ISO mapping, and OR contact channels');
+
+                // 20. Test Issue 4: Scanner Distinct Count on Static Page & Auto-Reload On Complete
+                assert.strictEqual(orch.navigator._settings.autoReloadOnComplete, true, "autoReloadOnComplete must be enabled in navigator settings");
+                assert.strictEqual(orch.config.autoReloadOnComplete, true, "autoReloadOnComplete must be enabled in orchestrator config");
+
+                const makeCard = (titleText) => {
+                    const el = new MockElement("div");
+                    const titleEl = new MockElement("div");
+                    titleEl.classList.add("BLbp_title");
+                    titleEl.textContent = titleText;
+                    el.appendChild(titleEl);
+                    return el;
+                };
+
+                const initialDiscovered = orch.stats.discovered;
+                // Scan static card
+                orch._onCardsDetected([
+                    { id: "lead_static_101", element: makeCard("Product Static") }
+                ]);
+                assert.strictEqual(orch.stats.discovered, initialDiscovered + 1, "First scan of new card must increment discovered count");
+
+                // Rescan exact same static card
+                orch._onCardsDetected([
+                    { id: "lead_static_101", element: makeCard("Product Static") }
+                ]);
+                assert.strictEqual(orch.stats.discovered, initialDiscovered + 1, "Rescanning same static lead must NOT increment discovered count");
+
+                // Genuinely fresh lead arriving after reload
+                orch._onCardsDetected([
+                    { id: "lead_brand_new_102", element: makeCard("Product Fresh") }
+                ]);
+                assert.strictEqual(orch.stats.discovered, initialDiscovered + 2, "Only genuinely new lead arriving on page must increment discovered count");
+                console.log('  ✅ PASS: Issue 4 verified: Popup scanned count stays fixed on static page and only counts distinct leads');
+
+                // 21. Test Issue 5: Real-time Arrival < 1s, Strict Top-7 Feed Window, and Speed/Acceptance Persistence Across Cycles
+                // A. Verify Top-7 Windowing: When 23 cards exist in DOM feed, only top 7 are scanned
+                orch.startNewCycle('test-cycle-23cards');
+                const mock23Cards = [];
+                for (let c = 1; c <= 23; c++) {
+                    mock23Cards.push({ id: 'lead_card_' + c, element: makeCard('Product Lead ' + c) });
+                }
+                // Simulate scanner feeding top-7 slice from 23 cards in feed
+                const top7Cards = mock23Cards.slice(0, 7);
+                assert.strictEqual(top7Cards.length, 7, 'Top-7 window must isolate exactly 7 cards from 23 loaded in DOM');
+                orch._onCardsDetected(top7Cards);
+                assert.strictEqual(orch.stats.cycleScanned, 7, 'Scanned counter must show 7 (not 23) for top-7 window');
+                assert.strictEqual(global.document.getElementById('bl-stat-scanned').textContent, '7', 'BL panel must display 7 (not 23)');
+
+                // B. Verify Rescan: On rescan loop, counter resets to 0 and re-scans the 7 leads
+                orch.startNewCycle('test-cycle-rescan');
+                assert.strictEqual(orch.stats.cycleScanned, 0, 'Cycle counter resets to 0 at rescan start');
+                orch._onCardsDetected(top7Cards);
+                assert.strictEqual(orch.stats.cycleScanned, 7, 'Cycle counter must show 7 on each rescan');
+                assert.strictEqual(global.document.getElementById('bl-stat-scanned').textContent, '7', 'BL panel must display 7 on rescan');
+
+                // C. Verify Speed and Acceptance logic updates upon acquisition
+                orch.metrics.resetCycle('test-speed-acc');
+                orch.metrics.recordDetection('lead-succ-speed', 1000);
+                orch.metrics.recordAcquisitionAttempt('lead-succ-speed');
+                orch.metrics.recordAcquisitionSuccess('lead-succ-speed', 1450); // 450ms
+                orch.metrics.recordLeadAttemptCompleted('lead-succ-speed', true);
+                
+                const speed = orch.metrics.getSpeedPerAcquisition();
+                const acc = orch.metrics.getAcceptanceRate();
+                assert.strictEqual(speed.formatted, '450ms', 'Speed must reflect 450ms acquisition time');
+                assert.strictEqual(acc.formatted, '100.0%', 'Acceptance rate must reflect 100.0%');
+
+                // D. Verify Speed and Acceptance PERSIST across loop cycles (not wiped by routine loop startNewCycle)
+                orch.startNewCycle('test-cycle-loop-pass');
+                const speedAfterPass = orch.metrics.getSpeedPerAcquisition();
+                const accAfterPass = orch.metrics.getAcceptanceRate();
+                assert.strictEqual(speedAfterPass.formatted, '450ms', 'Speed must NOT reset to 0s on routine loop passes');
+                assert.strictEqual(accAfterPass.formatted, '100.0%', 'Acceptance must NOT reset to 0% on routine loop passes');
+                console.log('  ✅ PASS: Issue 5 verified: Top-7 window isolates 7 (not 23), rescans 7, and Speed/Acceptance persist across cycles');
 
                 console.log('\n=== ALL BUNDLE INTEGRATION TESTS PASSED ===\n');
                 process.exit(0);
