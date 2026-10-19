@@ -218,6 +218,32 @@ PerformanceMetrics.prototype.getSnapshot = function() {
     };
 };
 
+PerformanceMetrics.prototype.exportState = function() {
+    return {
+        acquisitions: this._acquisitions ? this._acquisitions.slice(-50) : [],
+        contacts: this._contacts ? this._contacts.slice(-50) : [],
+        attempts: this._attempts || 0,
+        failedAttempts: this._failedAttempts || 0,
+        contactsCount: (this._contacts && this._contacts.length) || 0,
+        failedContacts: this._failedContacts || 0,
+        completedAttempts: this._completedAttempts || 0,
+        completedSuccesses: this._completedSuccesses || 0,
+        lastDurationMs: this._lastDurationMs || 0
+    };
+};
+
+PerformanceMetrics.prototype.importState = function(state) {
+    if (!state || typeof state !== 'object') return;
+    if (Array.isArray(state.acquisitions)) this._acquisitions = state.acquisitions;
+    if (Array.isArray(state.contacts)) this._contacts = state.contacts;
+    if (typeof state.attempts === 'number') this._attempts = state.attempts;
+    if (typeof state.failedAttempts === 'number') this._failedAttempts = state.failedAttempts;
+    if (typeof state.failedContacts === 'number') this._failedContacts = state.failedContacts;
+    if (typeof state.completedAttempts === 'number') this._completedAttempts = state.completedAttempts;
+    if (typeof state.completedSuccesses === 'number') this._completedSuccesses = state.completedSuccesses;
+    if (typeof state.lastDurationMs === 'number') this._lastDurationMs = state.lastDurationMs;
+};
+
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         PerformanceMetrics: PerformanceMetrics

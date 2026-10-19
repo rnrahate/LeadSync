@@ -229,6 +229,9 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._settleTimer = null;
         this._stepTimer = null;
         this._queueWaitTimer = null;
+        this._reloadTimer = null;
+        this._reloadInProgress = false;
+        this._lastReloadTime = 0;
         this._loopInProgress = false;
         this._noMoreCount = 0;
         this._lastLeadCount = 0;
@@ -236,7 +239,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._settings = {
             scrollSpeed: 900, scrollDelayMs: 40, bottomWaitMs: 500,
             loopIntervalMs: 250, loadMoreWaitMs: 900, maxStuckLoops: 3,
-            autoReloadOnComplete: true, autoReloadDelayMs: 50, maxReloadsPerSession: 999999
+            autoReloadOnComplete: true, autoReloadDelayMs: 100, maxReloadsPerSession: 999999
         };
         this._lastFilterCheck = Date.now();
         this.RELOAD_STORAGE_KEY = 'bl_auto_reload_count';
@@ -271,12 +274,14 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     PageNavigator.prototype.stop = function() {
         this._running = false;
         this._loopInProgress = false;
+        this._reloadInProgress = false;
         if (this._loopTimer)     { clearTimeout(this._loopTimer);     this._loopTimer = null; }
         if (this._startTimer)    { clearTimeout(this._startTimer);    this._startTimer = null; }
         if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null; }
         if (this._settleTimer)   { clearTimeout(this._settleTimer);   this._settleTimer = null; }
         if (this._stepTimer)     { clearTimeout(this._stepTimer);     this._stepTimer = null; }
         if (this._queueWaitTimer){ clearTimeout(this._queueWaitTimer); this._queueWaitTimer = null; }
+        if (this._reloadTimer)   { clearTimeout(this._reloadTimer);   this._reloadTimer = null; }
         this.logger.info('⏹ Bottom-loop navigator cleanly stopped (all timers cleared)');
     };
 
@@ -345,9 +350,9 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                     self.orchestrator.stats.loopsCompleted++;
                 }
 
-                // Never reload the document. Wait for all queued acquisition/contact actions
-                // to finish, then use IndiaMART's native in-page refresh and continue scanning.
-                self._waitForQueueAndNativeRefresh();
+                // Wait for all queued acquisition/contact actions to finish,
+                // then trigger ultra-low-latency hard reload (~100ms) to rescan newest seven leads.
+                self._waitForQueueAndReload();
             });
         }).catch(function() {
             self._loopInProgress = false;
@@ -567,53 +572,135 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         try { return document.querySelectorAll('[class*="BuyLdC_cont"]').length; } catch (e) { return 0; }
     };
 
-    PageNavigator.prototype._waitForQueueAndNativeRefresh = function() {
+    PageNavigator.prototype._waitForQueueAndReload = function() {
         var self = this;
 
         function checkQueue() {
             if (!self._running) return;
 
-            // If there are no unfinished filters, stop without touching the portal.
+            // If there are no unfinished filters, stop without reloading.
             var activeCount = (self.orchestrator && self.orchestrator.keywordManager)
                 ? self.orchestrator.keywordManager.getActiveFilterCount()
                 : 0;
             if (self.orchestrator && self.orchestrator._supabaseEnabled && self.orchestrator.supabase && self.orchestrator.supabase._filtersLoaded && activeCount === 0) {
-                self.logger.info('All filters completed; no native refresh needed');
+                self.logger.info('All filters completed; no reload needed');
                 if (self.orchestrator._updateScannerLifecycleState) {
                     self.orchestrator._updateScannerLifecycleState('all_filters_completed');
                 }
                 return;
             }
 
-            // Wait as long as required; never force a reload at a timeout while an
-            // acquisition/contact action is active or still pending.
+            // Wait as long as required; never reload in the middle of lead detection,
+            // CRM matching, acquisition, popup handling, or contact processing.
             var q = self.orchestrator && self.orchestrator.queue;
             var isQueueBusy = q && (q.processing > 0 || (q.queue && q.queue.length > 0));
-            if (isQueueBusy) {
+            var isPopupActive = self.orchestrator && self.orchestrator.popupManager && self.orchestrator.popupManager._active;
+            var isScannerBusy = self.orchestrator && self.orchestrator.scanner && (self.orchestrator.scanner._scanning || self.orchestrator.scanner._scanPending);
+
+            if (isQueueBusy || isPopupActive || isScannerBusy) {
                 self._queueWaitTimer = setTimeout(function() {
                     self._queueWaitTimer = null;
                     checkQueue();
-                }, 250);
+                }, 100);
                 return;
             }
 
-            var refreshed = self._refreshPortalForNewLeads();
-            // Give the native AJAX refresh time to insert/update lead cards before
-            // the next scan pass. If there was no refresh control, continue normally.
-            var delay = refreshed ? Math.max(900, self._settings.loadMoreWaitMs || 900) : self._settings.loopIntervalMs;
-            self._loopTimer = setTimeout(function() {
-                if (self._running) self._startLoop();
-            }, delay);
+            // At the end of every completed top-seven scan cycle:
+            // If autoReloadOnComplete is enabled, trigger hard reload after safe delay (~100ms)
+            if (self._settings.autoReloadOnComplete) {
+                self._autoReloadPage();
+            } else {
+                var refreshed = self._refreshPortalForNewLeads();
+                var delay = refreshed ? Math.max(900, self._settings.loadMoreWaitMs || 900) : self._settings.loopIntervalMs;
+                self._loopTimer = setTimeout(function() {
+                    if (self._running) self._startLoop();
+                }, delay);
+            }
         }
 
         checkQueue();
     };
 
-    // Kept as a compatibility shim for any stale callers. Full-page auto-reload
-    // is intentionally disabled; the scanner uses native in-page refresh instead.
+    // Alias for backward compatibility
+    PageNavigator.prototype._waitForQueueAndNativeRefresh = function() {
+        return this._waitForQueueAndReload();
+    };
+
+    // Ultra-low-latency hard page reload after completed top-seven scan cycle
     PageNavigator.prototype._autoReloadPage = function() {
-        this.logger.warn('Full-page auto-reload is disabled; native refresh is used instead');
-        return false;
+        var self = this;
+        if (!this._running) return false;
+
+        // Prevent reload storms or overlapping reload triggers
+        if (this._reloadInProgress) return false;
+        var now = Date.now();
+        if (this._lastReloadTime && (now - this._lastReloadTime < 500)) {
+            this.logger.warn('Reload storm prevented: reload requested too quickly');
+            return false;
+        }
+
+        var reloadCount = 0;
+        try {
+            reloadCount = parseInt(sessionStorage.getItem(this.RELOAD_STORAGE_KEY) || '0', 10) || 0;
+        } catch (e) {}
+
+        if (reloadCount >= this._settings.maxReloadsPerSession) {
+            this.logger.warn('🛑 Max auto-reloads reached (' + this._settings.maxReloadsPerSession + ')');
+            this._showFinalBanner();
+            return false;
+        }
+
+        this._reloadInProgress = true;
+        this._lastReloadTime = now;
+
+        // Persist session state needed to resume correctly
+        try {
+            var nextCount = reloadCount + 1;
+            sessionStorage.setItem(this.RELOAD_STORAGE_KEY, String(nextCount));
+            sessionStorage.setItem('bl_last_reload_flag', 'from_reload');
+            sessionStorage.setItem('bl_reload_pending', 'true');
+            sessionStorage.setItem('bl_last_reload_time', String(now));
+            sessionStorage.setItem('bl_scanner_auto_resume', this._running ? 'true' : 'false');
+
+            if (this.orchestrator) {
+                if (this.orchestrator.stats) {
+                    sessionStorage.setItem('bl_session_stats', JSON.stringify(this.orchestrator.stats));
+                }
+                if (this.orchestrator._uniqueSeenIds) {
+                    sessionStorage.setItem('bl_session_seen_ids', JSON.stringify(Array.from(this.orchestrator._uniqueSeenIds)));
+                }
+                if (this.orchestrator.metrics && typeof this.orchestrator.metrics.exportState === 'function') {
+                    sessionStorage.setItem('bl_session_metrics', JSON.stringify(this.orchestrator.metrics.exportState()));
+                }
+            }
+        } catch (e) {
+            this.logger.warn('Failed to persist session state before reload: ' + (e && e.message));
+        }
+
+        var delay = Math.max(50, this._settings.autoReloadDelayMs || 100);
+        this.logger.info('🔄 Auto-reloading page in ' + delay + 'ms (#' + (reloadCount + 1) + '/' + this._settings.maxReloadsPerSession + ')');
+
+        if (this._reloadTimer) {
+            clearTimeout(this._reloadTimer);
+            this._reloadTimer = null;
+        }
+
+        this._reloadTimer = setTimeout(function() {
+            self._reloadTimer = null;
+            try {
+                if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
+                    window.location.reload();
+                } else if (typeof window !== 'undefined' && window.location) {
+                    window.location.href = window.location.href;
+                }
+            } catch (err) {
+                self.logger.error('Failed to trigger window.location.reload: ' + (err && err.message));
+                self._reloadInProgress = false;
+                if (self._running) self._scheduleNextLoop();
+            }
+        }, delay);
+
+        return true;
     };
 
         PageNavigator.prototype._showReloadOverlay = function(n) {
@@ -3203,6 +3290,32 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
+    PerformanceMetrics.prototype.exportState = function() {
+        return {
+            acquisitions: this._acquisitions ? this._acquisitions.slice(-50) : [],
+            contacts: this._contacts ? this._contacts.slice(-50) : [],
+            attempts: this._attempts || 0,
+            failedAttempts: this._failedAttempts || 0,
+            contactsCount: (this._contacts && this._contacts.length) || 0,
+            failedContacts: this._failedContacts || 0,
+            completedAttempts: this._completedAttempts || 0,
+            completedSuccesses: this._completedSuccesses || 0,
+            lastDurationMs: this._lastDurationMs || 0
+        };
+    };
+
+    PerformanceMetrics.prototype.importState = function(state) {
+        if (!state || typeof state !== 'object') return;
+        if (Array.isArray(state.acquisitions)) this._acquisitions = state.acquisitions;
+        if (Array.isArray(state.contacts)) this._contacts = state.contacts;
+        if (typeof state.attempts === 'number') this._attempts = state.attempts;
+        if (typeof state.failedAttempts === 'number') this._failedAttempts = state.failedAttempts;
+        if (typeof state.failedContacts === 'number') this._failedContacts = state.failedContacts;
+        if (typeof state.completedAttempts === 'number') this._completedAttempts = state.completedAttempts;
+        if (typeof state.completedSuccesses === 'number') this._completedSuccesses = state.completedSuccesses;
+        if (typeof state.lastDurationMs === 'number') this._lastDurationMs = state.lastDurationMs;
+    };
+
     // ============================================================
     // LEAD LIFECYCLE & VERIFIED TERMINAL STATES (v6.3 - GRAVITAS)
     // ============================================================
@@ -3349,7 +3462,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         // Restore session stats across auto-reloads
         try {
             var reloadFlag = sessionStorage.getItem('bl_last_reload_flag');
-            if (reloadFlag === 'from_reload') {
+            var reloadPending = sessionStorage.getItem('bl_reload_pending');
+            var isFromReload = (reloadFlag === 'from_reload') || (reloadPending === 'true');
+
+            if (isFromReload) {
+                // Clear reload-pending flags safely now that extension is restarting
+                sessionStorage.removeItem('bl_reload_pending');
+                sessionStorage.removeItem('bl_last_reload_flag');
+
                 var savedStats = sessionStorage.getItem('bl_session_stats');
                 if (savedStats) {
                     var parsed = JSON.parse(savedStats);
@@ -3364,13 +3484,28 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         for (var sIdx = 0; sIdx < parsedSeen.length; sIdx++) {
                             this._uniqueSeenIds.add(parsedSeen[sIdx]);
                         }
-                        this.stats.discovered = this._uniqueSeenIds.size;
+                        this.stats.discovered = Math.max(this.stats.discovered || 0, this._uniqueSeenIds.size);
                         this.stats.unique = this._uniqueSeenIds.size;
                     }
+                }
+                var savedMetrics = sessionStorage.getItem('bl_session_metrics');
+                if (savedMetrics && this.metrics && typeof this.metrics.importState === 'function') {
+                    try {
+                        this.metrics.importState(JSON.parse(savedMetrics));
+                    } catch (e) {}
+                }
+                var autoResume = sessionStorage.getItem('bl_scanner_auto_resume');
+                if (autoResume === 'false') {
+                    this._isPaused = true;
                 }
             } else {
                 sessionStorage.removeItem('bl_session_stats');
                 sessionStorage.removeItem('bl_session_seen_ids');
+                sessionStorage.removeItem('bl_session_metrics');
+                sessionStorage.removeItem('bl_scanner_auto_resume');
+                sessionStorage.removeItem('bl_auto_reload_count');
+                sessionStorage.removeItem('bl_reload_pending');
+                sessionStorage.removeItem('bl_last_reload_flag');
             }
         } catch (e) {}
         this._isPaused = false;
@@ -5095,7 +5230,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         try {
             sessionStorage.removeItem('bl_session_stats');
             sessionStorage.removeItem('bl_session_seen_ids');
+            sessionStorage.removeItem('bl_session_metrics');
             sessionStorage.removeItem('bl_last_reload_flag');
+            sessionStorage.removeItem('bl_reload_pending');
+            sessionStorage.removeItem('bl_last_reload_time');
+            sessionStorage.removeItem('bl_scanner_auto_resume');
             if (this.navigator && this.navigator.RELOAD_STORAGE_KEY) {
                 sessionStorage.removeItem(this.navigator.RELOAD_STORAGE_KEY);
             }
@@ -5282,13 +5421,6 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     } else {
         window.__BUY_LEAD_ASSISTANT_V6__ = true;
         console.log('🚀 IndiaMART BuyLead Assistant v6.2.0');
-
-        try {
-            var reloadFlag = sessionStorage.getItem('bl_last_reload_flag');
-            if (reloadFlag === 'from_reload') sessionStorage.removeItem('bl_last_reload_flag');
-            else sessionStorage.removeItem('bl_auto_reload_count');
-        } catch (e) {}
-        try { sessionStorage.setItem('bl_last_reload_flag', 'from_reload'); } catch (e) {}
 
         var orchestrator = new Orchestrator();
         window.orchestrator = orchestrator;
