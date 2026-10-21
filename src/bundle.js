@@ -1,40 +1,38 @@
 
 // src/bundle.js
-// IndiaMART BuyLead Assistant - v6.2.0
+// IndiaMART BuyLead Assistant - v6.3.0
 // ============================================================================
-// CHANGELOG v6.2.0
-// ----------------------------------------------------------------------------
-// ACCURACY
-//   • Parser now emits productName / messageText / mcatName as SEPARATE fields.
-//     The old `searchableText` concatenation is gone — it was the single
-//     biggest source of false positives (product matcher saw the entire card).
-//   • Product keyword gate matches against productName ONLY.
-//   • Negative keyword gate matches against productName ONLY.
-//   • Required keyword gate = OR across productName + messageText.
-//   • _textMatches rewritten with word-boundary tokenisation (no more
-//     `spf` matching `sputum`, `used` matching `unused`, `in` matching `Berlin`).
-//   • Country extraction: flag `alt` first, then word-boundary name match.
-//
-// SPEED
-//   • Queue drains immediately after acquire() — no waiting on popup timeout.
-//   • Scroll: 900px step / 40ms delay (was 400/100).
-//   • Loop interval: 250ms (was 1200ms).
-//   • Load-More wait: 900ms (was 3000ms); button clicked immediately.
-//   • Popup poll: 60ms / 5s timeout (was 100ms / 10s), MutationObserver-gated.
-//   • Scanner debounce: 60ms / 500ms fallback (was 150/1000).
-//   • ActionAdapter retry: 1.5s, skipped when a dialog is already open.
-//   • Cooldown default: 400ms (was 2000ms).
-//   • Panel refresh: 800ms (was 1500ms).
+// CHANGELOG v6.3.0
 // ============================================================================
 // Developed by Keyn Labs
 // ============================================================================
 
-console.log('🎯 IndiaMART BuyLead Assistant v6.2.0 (acquisition timing fix)');
+console.log('🎯 IndiaMART BuyLead Assistant v6.4.0 (bot-speed network-intercept + ACQ confirmation)');
 console.log('📦 Developed by Keyn Labs');
 console.log('🔗 https://keynlabs.vercel.app/');
 
-(function() {
+(function () {
     'use strict';
+
+    // ============================================================
+    // SCAN LIMIT — max distinct lead cards processed per scan cycle.
+    // Scanning stops after this many, regardless of page length.
+    // No automatic scrolling is performed to reveal more cards.
+    // ============================================================
+    var MAX_LEADS_PER_CYCLE = 5;
+
+    // ============================================================
+    // RATE-LIMIT DETECTION — phrases from IndiaMART's account-restriction banner.
+    // When any of these substrings appear in the visible page body the extension
+    // must stop all automated activity immediately.
+    // ============================================================
+    var RATE_LIMIT_PHRASES = [
+        'unusually high activity',
+        'reached the request limit',
+        'please wait 15 minutes',
+        'session is reactivated',
+        'you have reached the request limit'
+    ];
 
     // ============================================================
     // DEFAULT CONFIG
@@ -65,20 +63,17 @@ console.log('🔗 https://keynlabs.vercel.app/');
         preferredStates: ['maharashtra'],
         preferredCountries: ['IN'],
 
-        // ---- NAVIGATOR (v6.2 speed) ----
-        autoScroll: true,
-        scrollSpeed: 900,
-        scrollDelayMs: 40,
-        bottomWaitMs: 500,
-        loopIntervalMs: 250,
+        // ---- NAVIGATOR ----
+        // autoScroll intentionally removed — the extension no longer scrolls.
+        loopIntervalMs: 100,
         loadMoreWaitMs: 900,
         maxStuckLoops: 3,
         maxReloadsPerSession: 999999,
-        // Never reload the entire portal automatically. Use native in-page refresh only.
         autoReloadOnComplete: true,
-        autoReloadDelayMs: 100,
+        autoReloadDelayMs: 2500,    // 2.5 second reload interval
+        reloadJitterMs:    400,     // ±400ms jitter
 
-        // ---- POPUP (v6.2 speed) ----
+        // ---- POPUP ----
         autoMinimize: true,
         popupTimeoutMs: 15000,
         confirmationAnswer: 'yes',
@@ -104,10 +99,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this.minLevel = LEVELS.DEBUG;
         this._correlationId = null;
     }
-    Logger.prototype.getCorrelationId = function() {
+    Logger.prototype.getCorrelationId = function () {
         return this._correlationId || 'op_' + Date.now().toString(36);
     };
-    Logger.prototype._log = function(level, message, data) {
+    Logger.prototype._log = function (level, message, data) {
         data = data || {};
         var entry = {
             timestamp: new Date().toISOString(),
@@ -126,95 +121,95 @@ console.log('🔗 https://keynlabs.vercel.app/');
         _logQueue.push(entry);
         if (_logQueue.length > 300) _logQueue = _logQueue.slice(-200);
         if (!_logFlushTimer) {
-            _logFlushTimer = setTimeout(function() {
+            _logFlushTimer = setTimeout(function () {
                 _logFlushTimer = null;
                 var batch = _logQueue.splice(0, _logQueue.length);
                 if (batch.length === 0) return;
                 try {
-                    chrome.storage.local.get('logs', function(result) {
+                    chrome.storage.local.get('logs', function (result) {
                         var logs = result.logs || [];
                         logs = logs.concat(batch);
                         if (logs.length > 500) logs = logs.slice(-500);
                         chrome.storage.local.set({ logs: logs });
                     });
-                } catch (e) {}
+                } catch (e) { }
             }, 3000);
         }
     };
-    Logger.prototype.trace = function(m, d) { this._log(LEVELS.TRACE, m, d); };
-    Logger.prototype.debug = function(m, d) { this._log(LEVELS.DEBUG, m, d); };
-    Logger.prototype.info  = function(m, d) { this._log(LEVELS.INFO,  m, d); };
-    Logger.prototype.warn  = function(m, d) { this._log(LEVELS.WARN,  m, d); };
-    Logger.prototype.error = function(m, d) { this._log(LEVELS.ERROR, m, d); };
-    Logger.prototype.fatal = function(m, d) { this._log(LEVELS.FATAL, m, d); };
+    Logger.prototype.trace = function (m, d) { this._log(LEVELS.TRACE, m, d); };
+    Logger.prototype.debug = function (m, d) { this._log(LEVELS.DEBUG, m, d); };
+    Logger.prototype.info = function (m, d) { this._log(LEVELS.INFO, m, d); };
+    Logger.prototype.warn = function (m, d) { this._log(LEVELS.WARN, m, d); };
+    Logger.prototype.error = function (m, d) { this._log(LEVELS.ERROR, m, d); };
+    Logger.prototype.fatal = function (m, d) { this._log(LEVELS.FATAL, m, d); };
 
     // ============================================================
     // LEAD ID GENERATOR
     // ============================================================
-    function LeadIdGenerator() {}
-LeadIdGenerator.prototype.generateFromElement = function(element) {
-    // 1. Direct lead / enquiry ID attributes
-    var dataId = element.getAttribute('data-lead-id')
-              || element.getAttribute('data-query-id')
-              || element.getAttribute('data-buyer-id')
-              || element.getAttribute('data-glusr-id')
-              || element.getAttribute('data-blid');
-    if (dataId) return 'dm_' + dataId;
+    function LeadIdGenerator() { }
+    LeadIdGenerator.prototype.generateFromElement = function (element) {
+        // 1. Direct lead / enquiry ID attributes
+        var dataId = element.getAttribute('data-lead-id')
+            || element.getAttribute('data-query-id')
+            || element.getAttribute('data-buyer-id')
+            || element.getAttribute('data-glusr-id')
+            || element.getAttribute('data-blid');
+        if (dataId) return 'dm_' + dataId;
 
-    var elemId = element.getAttribute('id') || '';
-    var idMatch = elemId.match(/(?:BLCard|BLbp|card)[_\-]?(\d+)/i);
-    // Real IndiaMART enquiry/lead IDs have 6+ digits; small numbers (e.g. id_BLCard1) are DOM indices, not lead IDs
-    if (idMatch && idMatch[1].length >= 6) return 'cid_' + idMatch[1];
+        var elemId = element.getAttribute('id') || '';
+        var idMatch = elemId.match(/(?:BLCard|BLbp|card)[_\-]?(\d+)/i);
+        // Real IndiaMART enquiry/lead IDs have 6+ digits; small numbers (e.g. id_BLCard1) are DOM indices, not lead IDs
+        if (idMatch && idMatch[1].length >= 6) return 'cid_' + idMatch[1];
 
-    // 2. Links with lead / buyer IDs
-    var links = element.querySelectorAll('a[href]');
-    for (var i = 0; i < links.length; i++) {
-        var href = links[i].getAttribute('href') || '';
-        var match = href.match(/(?:buyerid|glusrid|leadid|blid|queryid)[=\/](\d+)/i);
-        if (match) return 'lnk_' + match[1];
-    }
+        // 2. Links with lead / buyer IDs
+        var links = element.querySelectorAll('a[href]');
+        for (var i = 0; i < links.length; i++) {
+            var href = links[i].getAttribute('href') || '';
+            var match = href.match(/(?:buyerid|glusrid|leadid|blid|queryid)[=\/](\d+)/i);
+            if (match) return 'lnk_' + match[1];
+        }
 
-    // 3. Button attributes (data-click-data, data-query-id, data-lead-id)
-    var btn = element.querySelector('button, a, [role="button"]');
-    if (btn) {
-        var btnData = btn.getAttribute('data-click-data') || '';
-        var btnMatch = btnData.match(/"(?:queryid|buyerid|leadid|glusrid)"\s*:\s*"?(\d+)"?/i)
-                    || btnData.match(/(?:queryid|buyerid|leadid|glusrid)=(\d+)/i);
-        if (btnMatch) return 'btn_' + btnMatch[1];
-        var btnDirectId = btn.getAttribute('data-query-id') || btn.getAttribute('data-lead-id');
-        if (btnDirectId) return 'btn_' + btnDirectId;
-    }
+        // 3. Button attributes (data-click-data, data-query-id, data-lead-id)
+        var btn = element.querySelector('button, a, [role="button"]');
+        if (btn) {
+            var btnData = btn.getAttribute('data-click-data') || '';
+            var btnMatch = btnData.match(/"(?:queryid|buyerid|leadid|glusrid)"\s*:\s*"?(\d+)"?/i)
+                || btnData.match(/(?:queryid|buyerid|leadid|glusrid)=(\d+)/i);
+            if (btnMatch) return 'btn_' + btnMatch[1];
+            var btnDirectId = btn.getAttribute('data-query-id') || btn.getAttribute('data-lead-id');
+            if (btnDirectId) return 'btn_' + btnDirectId;
+        }
 
-    // 4. Distinguish by Product + Location + Seller / Buyer + Quantity + Requirement
-    var productEl = element.querySelector('.BLbp_title')
-                 || element.querySelector('[class*="BuyLdC"] span.SLC_f18')
-                 || element.querySelector('span.SLC_f18');
-    var productText = productEl ? productEl.textContent.trim() : '';
+        // 4. Distinguish by Product + Location + Seller / Buyer + Quantity + Requirement
+        var productEl = element.querySelector('.BLbp_title')
+            || element.querySelector('[class*="BuyLdC"] span.SLC_f18')
+            || element.querySelector('span.SLC_f18');
+        var productText = productEl ? productEl.textContent.trim() : '';
 
-    var locEl = element.querySelector('.BLbp_hdrLeft strong.BuyLdC_tltpw')
-             || element.querySelector('[class*="BuyLdC_time_loc"] strong');
-    var locationText = locEl ? locEl.textContent.trim() : '';
+        var locEl = element.querySelector('.BLbp_hdrLeft strong.BuyLdC_tltpw')
+            || element.querySelector('[class*="BuyLdC_time_loc"] strong');
+        var locationText = locEl ? locEl.textContent.trim() : '';
 
-    var sellerEl = element.querySelector('.BLbp_byrName, .BLbp_buyer, [class*="buyer"], [class*="byr_name"], [class*="buyerName"], [class*="company"], [class*="comp_name"], [class*="senderName"], .BLbp_member, .BLbp_byrInfo, .SLC_byr, [class*="byrInfo"]');
-    var sellerText = sellerEl ? sellerEl.textContent.trim() : '';
+        var sellerEl = element.querySelector('.BLbp_byrName, .BLbp_buyer, [class*="buyer"], [class*="byr_name"], [class*="buyerName"], [class*="company"], [class*="comp_name"], [class*="senderName"], .BLbp_member, .BLbp_byrInfo, .SLC_byr, [class*="byrInfo"]');
+        var sellerText = sellerEl ? sellerEl.textContent.trim() : '';
 
-    var descEl = element.querySelector('.BLbp_desc, [class*="BuyLdC_msg"], [class*="desc"]');
-    var descText = descEl ? descEl.textContent.trim() : '';
+        var descEl = element.querySelector('.BLbp_desc, [class*="BuyLdC_msg"], [class*="desc"]');
+        var descText = descEl ? descEl.textContent.trim() : '';
 
-    var qtyEl = element.querySelector('.BLbp_qty, [class*="quantity"], [class*="qty"]');
-    var qtyText = qtyEl ? qtyEl.textContent.trim() : '';
+        var qtyEl = element.querySelector('.BLbp_qty, [class*="quantity"], [class*="qty"]');
+        var qtyText = qtyEl ? qtyEl.textContent.trim() : '';
 
-    var combined = productText + '|' + locationText + '|' + sellerText + '|' + qtyText + '|' + descText.substring(0, 60);
-    if (combined.length < 5) return null;
+        var combined = productText + '|' + locationText + '|' + sellerText + '|' + qtyText + '|' + descText.substring(0, 60);
+        if (combined.length < 3) return null;
 
-    var hash = 0;
-    for (var j = 0; j < combined.length; j++) {
-        var chr = combined.charCodeAt(j);
-        hash = ((hash << 5) - hash) + chr;
-        hash = hash & hash;
-    }
-    return 'hash_' + Math.abs(hash).toString(36);
-};
+        var hash = 0;
+        for (var j = 0; j < combined.length; j++) {
+            var chr = combined.charCodeAt(j);
+            hash = ((hash << 5) - hash) + chr;
+            hash = hash & hash;
+        }
+        return 'hash_' + Math.abs(hash).toString(36);
+    };
 
     // ============================================================
     // PAGE NAVIGATOR (SPEED-TUNED)
@@ -237,71 +232,71 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._lastLeadCount = 0;
         this._stuckCount = 0;
         this._settings = {
-            scrollSpeed: 900, scrollDelayMs: 40, bottomWaitMs: 500,
-            loopIntervalMs: 250, loadMoreWaitMs: 900, maxStuckLoops: 3,
-            autoReloadOnComplete: true, autoReloadDelayMs: 100, maxReloadsPerSession: 999999
+            loopIntervalMs: 100, loadMoreWaitMs: 900, maxStuckLoops: 3,
+            autoReloadOnComplete: true, autoReloadDelayMs: 2500, reloadJitterMs: 400, maxReloadsPerSession: 999999
         };
         this._lastFilterCheck = Date.now();
         this.RELOAD_STORAGE_KEY = 'bl_auto_reload_count';
     }
 
-    PageNavigator.prototype.applySettings = function(config) {
-        if (config.scrollSpeed)          this._settings.scrollSpeed = config.scrollSpeed;
-        if (config.scrollDelayMs)        this._settings.scrollDelayMs = config.scrollDelayMs;
-        if (config.bottomWaitMs)         this._settings.bottomWaitMs = config.bottomWaitMs;
-        if (config.loopIntervalMs)       this._settings.loopIntervalMs = config.loopIntervalMs;
-        if (config.loadMoreWaitMs)       this._settings.loadMoreWaitMs = config.loadMoreWaitMs;
-        if (config.maxStuckLoops)        this._settings.maxStuckLoops = config.maxStuckLoops;
-        // Hard-disable full-page reloads even if an old stored config says true.
+    PageNavigator.prototype.applySettings = function (config) {
+        // Scroll-related settings (scrollSpeed, scrollDelayMs, bottomWaitMs) are ignored —
+        // automatic scrolling has been removed.
+        if (config.loopIntervalMs) this._settings.loopIntervalMs = config.loopIntervalMs;
+        if (config.loadMoreWaitMs) this._settings.loadMoreWaitMs = config.loadMoreWaitMs;
+        if (config.maxStuckLoops) this._settings.maxStuckLoops = config.maxStuckLoops;
         this._settings.autoReloadOnComplete = config.autoReloadOnComplete !== undefined ? !!config.autoReloadOnComplete : true;
-        if (config.autoReloadDelayMs)    this._settings.autoReloadDelayMs = config.autoReloadDelayMs;
+        if (config.autoReloadDelayMs) this._settings.autoReloadDelayMs = config.autoReloadDelayMs;
         if (config.maxReloadsPerSession) this._settings.maxReloadsPerSession = config.maxReloadsPerSession;
-        // liveScanWaitMs is obsolete: event-driven detection replaced the 2s full-rescan loop.
         if (config.liveScanWaitMs !== undefined) {
-            try { if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) chrome.storage.local.remove('liveScanWaitMs'); } catch (e) {}
+            try { if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) chrome.storage.local.remove('liveScanWaitMs'); } catch (e) { }
         }
     };
 
-    PageNavigator.prototype.start = function() {
+    PageNavigator.prototype.start = function () {
         if (this._running) return;
         this._running = true;
         var self = this;
         this.logger.info('▶ Bottom-loop navigator started');
         if (this._startTimer) { clearTimeout(this._startTimer); }
-        this._startTimer = setTimeout(function() { self._startLoop(); }, 100);
+        // Bug fix: was setTimeout(..., 0) — fired before React hydrated, saw 0 cards,
+        // triggered reload immediately, causing rapid reload loop that crashes Chrome.
+        // 1200ms initial settle gives IndiaMART's React app time to paint lead cards.
+        this._startTimer = setTimeout(function () { self._startLoop(); }, 1200);
     };
 
-    PageNavigator.prototype.stop = function() {
+    PageNavigator.prototype.stop = function () {
         this._running = false;
         this._loopInProgress = false;
         this._reloadInProgress = false;
-        if (this._loopTimer)     { clearTimeout(this._loopTimer);     this._loopTimer = null; }
-        if (this._startTimer)    { clearTimeout(this._startTimer);    this._startTimer = null; }
+        // Bug fix: _lastReloadTime was not reset on stop(), causing the storm guard
+        // in _autoReloadPage to block the first reload of a new cycle if stop()+start()
+        // happened within 1 second (common during filter refresh or emergency stop/resume).
+        this._lastReloadTime = 0;
+        if (this._loopTimer) { clearTimeout(this._loopTimer); this._loopTimer = null; }
+        if (this._startTimer) { clearTimeout(this._startTimer); this._startTimer = null; }
         if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null; }
-        if (this._settleTimer)   { clearTimeout(this._settleTimer);   this._settleTimer = null; }
-        if (this._stepTimer)     { clearTimeout(this._stepTimer);     this._stepTimer = null; }
-        if (this._queueWaitTimer){ clearTimeout(this._queueWaitTimer); this._queueWaitTimer = null; }
-        if (this._waitForCardsTimer){ clearTimeout(this._waitForCardsTimer); this._waitForCardsTimer = null; }
-        if (this._reloadTimer)   { clearTimeout(this._reloadTimer);   this._reloadTimer = null; }
+        if (this._settleTimer) { clearTimeout(this._settleTimer); this._settleTimer = null; }
+        if (this._stepTimer) { clearTimeout(this._stepTimer); this._stepTimer = null; }
+        if (this._queueWaitTimer) { clearTimeout(this._queueWaitTimer); this._queueWaitTimer = null; }
+        if (this._waitForCardsTimer) { clearTimeout(this._waitForCardsTimer); this._waitForCardsTimer = null; }
+        if (this._reloadTimer) { clearTimeout(this._reloadTimer); this._reloadTimer = null; }
         this.logger.info('⏹ Bottom-loop navigator cleanly stopped (all timers cleared)');
     };
 
-    PageNavigator.prototype.restart = function() {
+    PageNavigator.prototype.restart = function () {
         this.stop();
         this._running = true;
         this._loopInProgress = false;
         var self = this;
-        this.logger.info('🔄 Bottom-loop navigator restarted cleanly from top');
-        try {
-            window.scrollTo(0, 0);
-            window.dispatchEvent(new Event('scroll'));
-        } catch (e) {}
-        this._startTimer = setTimeout(function() {
+        this.logger.info('🔄 Bottom-loop navigator restarted cleanly');
+        // No automatic scroll — scan starts from whatever is currently visible.
+        this._startTimer = setTimeout(function () {
             self._startLoop();
         }, 200);
     };
 
-    PageNavigator.prototype._startLoop = function() {
+    PageNavigator.prototype._startLoop = function () {
         var self = this;
         if (!this._running || this._loopInProgress) return;
         this._loopInProgress = true;
@@ -327,8 +322,8 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 self.orchestrator.scanner.resetEmitted();
             }
 
-            // Actively scroll down across the seven newest leads and scan them
-            self._scrollToTop7Leads(function() {
+            // Scan the first MAX_LEADS_PER_CYCLE visible lead cards — no scrolling.
+            self._scanVisibleLeads(function () {
                 if (!self._running) { self._loopInProgress = false; return; }
 
                 self._loopInProgress = false;
@@ -337,7 +332,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 }
 
                 // Wait for all queued acquisition/contact actions to finish,
-                // then trigger ultra-low-latency hard reload (~100ms) to rescan newest seven leads.
+                // then trigger reload or next loop.
                 self._waitForQueueAndReload();
             });
         } catch (e) {
@@ -346,73 +341,61 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    // Smooth and fast scroll across the seven newest leads on the page with real-time scanning
-    PageNavigator.prototype._scrollToTop7Leads = function(done) {
+    // Scan the first MAX_LEADS_PER_CYCLE visible lead cards without any scrolling.
+    // Cards that are already in the DOM (rendered by the page's own AJAX feed) are
+    // evaluated in the portal's natural display order.  No scrollIntoView, no
+    // window.scrollTo, no load-more clicking.
+    PageNavigator.prototype._scanVisibleLeads = function (done) {
         var self = this;
         if (!this._running) { done(); return; }
 
-        // Start from top
-        try {
-            window.scrollTo(0, 0);
-            window.dispatchEvent(new Event('scroll'));
-        } catch (e) {}
+        var MAX_CONTENT_RETRIES = 3;
+        var CONTENT_WAIT_MS = 100;
 
-        // Immediate scan at top
-        if (self.orchestrator && self.orchestrator.scanner) {
-            self.orchestrator.scanner._scan();
-        }
-
-        var allCards = document.querySelectorAll(
-            '[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], ' +
-            'div[id*="id_BLCard"], [class*="BLCard"], [class*="bl_card"], div[id*="BLCard"], ' +
-            'div[id*="BLbp"], [class*="bl-card"], [class*="listing_card"]'
-        );
-        if (allCards.length === 0) {
-            // Cards are still rendering after reload/navigation — wait briefly before scrolling or reloading
-            self._waitForCardsTimer = setTimeout(function() {
-                self._waitForCardsTimer = null;
-                if (!self._running) { done(); return; }
-                self._scrollToTop7Leads(done);
-            }, 300);
-            return;
-        }
-        var targetCard = allCards.length > 0 ? allCards[Math.min(6, allCards.length - 1)] : null;
-        var maxScrollY = 1000;
-        if (targetCard) {
-            try {
-                var r = targetCard.getBoundingClientRect();
-                maxScrollY = Math.max(300, Math.min(2500, window.scrollY + r.bottom - window.innerHeight + 80));
-            } catch (e) {}
-        }
-
-        var curY = window.scrollY;
-        var stepPx = Math.max(200, Math.min(450, self._settings.scrollSpeed || 300));
-        var stepDelay = Math.max(25, self._settings.scrollDelayMs || 40);
-
-        function step() {
+        function tryCards(attempt) {
             if (!self._running) { done(); return; }
 
-            curY += stepPx;
-            try {
-                window.scrollTo(0, Math.min(curY, maxScrollY));
-                window.dispatchEvent(new Event('scroll'));
-            } catch (e) {}
+            var allCards = (typeof document !== 'undefined') ? document.querySelectorAll(
+                '[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], ' +
+                'div[id*="id_BLCard"], [class*="BLCard"], [class*="bl_card"], div[id*="BLCard"], ' +
+                'div[id*="BLbp"], [class*="bl-card"], [class*="listing_card"]'
+            ) : [];
 
+            if (allCards.length === 0) {
+                if (attempt < MAX_CONTENT_RETRIES) {
+                    self._waitForCardsTimer = setTimeout(function () {
+                        self._waitForCardsTimer = null;
+                        tryCards(attempt + 1);
+                    }, CONTENT_WAIT_MS);
+                    return;
+                }
+                // Cards never appeared — let cycle complete without scanning
+                done(); return;
+            }
+
+            // Check that the first card has text content (product/location rendered).
+            // After a hard reload the DOM shell appears before text nodes are populated.
+            var firstCard = allCards[0];
+            var firstCardText = firstCard ? (firstCard.textContent || '').trim() : '';
+            if (firstCardText.length < 5 && attempt < MAX_CONTENT_RETRIES) {
+                self._waitForCardsTimer = setTimeout(function () {
+                    self._waitForCardsTimer = null;
+                    tryCards(attempt + 1);
+                }, CONTENT_WAIT_MS);
+                return;
+            }
+
+            // Cards exist and have content — run scan.
             if (self.orchestrator && self.orchestrator.scanner) {
                 self.orchestrator.scanner._scan();
             }
-
-            if (curY >= maxScrollY) {
-                done();
-            } else {
-                self._stepTimer = setTimeout(step, stepDelay);
-            }
+            done();
         }
 
-        self._stepTimer = setTimeout(step, stepDelay);
+        tryCards(0);
     };
 
-    PageNavigator.prototype._refreshPortalForNewLeads = function() {
+    PageNavigator.prototype._refreshPortalForNewLeads = function () {
         // A native refresh can also replace lead cards/dialog nodes, so never run it
         // while an acquisition/contact action is processing or waiting in the queue.
         var q = this.orchestrator && this.orchestrator.queue;
@@ -446,90 +429,24 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                         refEl.click();
                         this.logger.info('Native in-page refresh clicked: ' + refreshSelectors[r]);
                         return true;
-                    } catch(e) {}
+                    } catch (e) { }
                 }
             }
-        } catch(e) {}
+        } catch (e) { }
         return false;
     };
 
-    PageNavigator.prototype._scheduleNextLoop = function() {
+    PageNavigator.prototype._scheduleNextLoop = function () {
         var self = this;
         if (!this._running) return;
-        this._loopTimer = setTimeout(function() { self._startLoop(); }, this._settings.loopIntervalMs);
+        this._loopTimer = setTimeout(function () { self._startLoop(); }, this._settings.loopIntervalMs);
     };
 
-    // Fast scroll: continuous downward pass till end of active feed
-    PageNavigator.prototype._fastScrollToBottom = function(done) {
-        var self = this;
-        var lastY = -1;
-        var sameCount = 0;
-        var maxSame = 8;
+    // _fastScrollToBottom removed — automatic scrolling is disabled.
+    // The extension scans only the first MAX_LEADS_PER_CYCLE leads already visible
+    // in the portal's AJAX feed without triggering additional feed loads.
 
-        function step() {
-            if (!self._running) { done({ reason: 'stopped' }); return; }
-
-            // SCAN on every downward step so all leads from utmost top to bottom-most are scanned!
-            if (self.orchestrator && self.orchestrator.scanner) {
-                self.orchestrator.scanner._scan();
-            }
-
-            var docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-            var maxY = Math.max(0, docHeight - window.innerHeight);
-            var curY = window.scrollY;
-
-            // When near the bottom of currently loaded content
-            if (curY >= maxY - 40) {
-                // Final scan at current bottom
-                if (self.orchestrator && self.orchestrator.scanner) {
-                    self.orchestrator.scanner._scan();
-                }
-
-                // Try clicking "Show More / Load More" to continue scrolling further
-                var clicked = self._clickLoadMore();
-                if (clicked) {
-                    if (self.orchestrator && self.orchestrator.stats) self.orchestrator.stats.loadMoreClicks++;
-                    setTimeout(step, self._settings.loadMoreWaitMs || 800);
-                    return;
-                }
-
-                sameCount++;
-                if (sameCount >= maxSame) {
-                    done({ reason: 'end_of_list' });
-                    return;
-                }
-                setTimeout(step, 300);
-                return;
-            }
-
-            var newY = Math.min(curY + self._settings.scrollSpeed, maxY);
-            try {
-                window.scrollTo(0, newY);
-                window.dispatchEvent(new Event('scroll'));
-            } catch (e) {}
-
-            if (Math.abs(newY - lastY) < 5) {
-                sameCount++;
-                if (sameCount >= maxSame) {
-                    var loadMoreBtn = self._clickLoadMore();
-                    if (loadMoreBtn) {
-                        sameCount = 0;
-                        setTimeout(step, self._settings.loadMoreWaitMs || 800);
-                        return;
-                    }
-                    done({ reason: 'end_of_list' });
-                    return;
-                }
-            } else {
-                sameCount = 0;
-            }
-            lastY = newY;
-            self._stepTimer = setTimeout(step, self._settings.scrollDelayMs || 40);
-        }
-        step();
-    };
-
-    PageNavigator.prototype._findLoadMoreButton = function() {
+    PageNavigator.prototype._findLoadMoreButton = function () {
         // Direct selectors first — no waiting.
         var direct = document.querySelectorAll('button.BuyLdC_Cta');
         for (var i = 0; i < direct.length; i++) {
@@ -554,7 +471,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return null;
     };
 
-    PageNavigator.prototype._clickLoadMore = function() {
+    PageNavigator.prototype._clickLoadMore = function () {
         var btn = this._findLoadMoreButton();
         if (!btn) return false;
         try {
@@ -567,15 +484,29 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    PageNavigator.prototype._countLeads = function() {
+    PageNavigator.prototype._countLeads = function () {
         try { return document.querySelectorAll('[class*="BuyLdC_cont"]').length; } catch (e) { return 0; }
     };
 
-    PageNavigator.prototype._waitForQueueAndReload = function() {
+    PageNavigator.prototype._waitForQueueAndReload = function () {
         var self = this;
+
+        // Minimal settle — allows toasts/metrics to paint before idle-check.
+        // Bug fix: was anonymous setTimeout (uncancellable). Now stored as _settleTimer
+        // so stop() can cancel it and prevent ghost reloads after stop() is called.
+        var SETTLE_MS = 50;
+
+        if (this._settleTimer) { clearTimeout(this._settleTimer); this._settleTimer = null; }
+        this._settleTimer = setTimeout(function () {
+            self._settleTimer = null;
+            checkQueue();
+        }, SETTLE_MS);
 
         function checkQueue() {
             if (!self._running) return;
+
+            // If the orchestrator paused (e.g. lead acquired), never reload.
+            if (self.orchestrator && self.orchestrator._isPaused) return;
 
             // If there are no unfinished filters, stop without reloading.
             var activeCount = (self.orchestrator && self.orchestrator.keywordManager)
@@ -589,55 +520,54 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 return;
             }
 
-            // Wait as long as required; never reload in the middle of lead detection,
-            // CRM matching, acquisition, popup handling, or contact processing.
+            // Wait until acquisition / contact / popup work is fully idle.
             var q = self.orchestrator && self.orchestrator.queue;
             var isQueueBusy = q && (q.processing > 0 || (q.queue && q.queue.length > 0));
             var isPopupActive = self.orchestrator && self.orchestrator.popupManager && self.orchestrator.popupManager._active;
             var isScannerBusy = self.orchestrator && self.orchestrator.scanner && (self.orchestrator.scanner._scanning || self.orchestrator.scanner._scanPending);
             var isLifecycleInFlight = self.orchestrator && self.orchestrator.lifecycle && self.orchestrator.lifecycle._inFlight && self.orchestrator.lifecycle._inFlight.size > 0;
-            var isLeadProcessing = self.orchestrator && self.orchestrator.stateMachine && (function() {
+            var isLeadProcessing = self.orchestrator && self.orchestrator.stateMachine && (function () {
                 var smStats = self.orchestrator.stateMachine.getStats();
                 return (smStats.PROCESSING || 0) > 0 || (smStats.ACQUISITION_PENDING || 0) > 0 || (smStats.CONTACT_PENDING || 0) > 0;
             })();
 
             if (isQueueBusy || isPopupActive || isScannerBusy || isLifecycleInFlight || isLeadProcessing) {
-                self._queueWaitTimer = setTimeout(function() {
+                self._queueWaitTimer = setTimeout(function () {
                     self._queueWaitTimer = null;
                     checkQueue();
                 }, 100);
                 return;
             }
 
-            // Return to top cleanly only when all acquisitions and queue are fully idle
-            try {
-                window.scrollTo(0, 0);
-                window.dispatchEvent(new Event('scroll'));
-            } catch (e) {}
+            // Re-check: orchestrator may have paused while queue was draining.
+            if (self.orchestrator && self.orchestrator._isPaused) return;
 
-            // At the end of every completed top-seven scan cycle:
-            // If autoReloadOnComplete is enabled, trigger hard reload after safe delay (~100ms)
+            // If this cycle acquired anything, the pause is already active — do not reload.
+            if (self.orchestrator && self.orchestrator._cycleAcquiredThisScan) {
+                self.logger.info('⏸ Cycle acquired a lead — reload skipped, waiting for user resume');
+                return;
+            }
+
+            // Nothing acquired this cycle — hard reload to fetch fresh leads.
             if (self._settings.autoReloadOnComplete) {
                 self._autoReloadPage();
             } else {
                 var refreshed = self._refreshPortalForNewLeads();
                 var delay = refreshed ? Math.max(900, self._settings.loadMoreWaitMs || 900) : self._settings.loopIntervalMs;
-                self._loopTimer = setTimeout(function() {
+                self._loopTimer = setTimeout(function () {
                     if (self._running) self._startLoop();
                 }, delay);
             }
         }
-
-        checkQueue();
     };
 
     // Alias for backward compatibility
-    PageNavigator.prototype._waitForQueueAndNativeRefresh = function() {
+    PageNavigator.prototype._waitForQueueAndNativeRefresh = function () {
         return this._waitForQueueAndReload();
     };
 
     // Ultra-low-latency hard page reload after completed top-seven scan cycle
-    PageNavigator.prototype._autoReloadPage = function() {
+    PageNavigator.prototype._autoReloadPage = function () {
         var self = this;
         if (!this._running) return false;
 
@@ -648,17 +578,17 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (!lastTime && typeof process === 'undefined') {
             try {
                 lastTime = parseInt(sessionStorage.getItem('bl_last_reload_time') || '0', 10) || 0;
-            } catch (e) {}
+            } catch (e) { }
         }
-        if (lastTime && (now - lastTime < 500)) {
-            this.logger.warn('Reload storm prevented: reload requested too quickly');
+        if (lastTime && (now - lastTime < 1000)) {
+            this.logger.warn('Reload storm prevented: reload requested too quickly (< 1s)');
             return false;
         }
 
         var reloadCount = 0;
         try {
             reloadCount = parseInt(sessionStorage.getItem(this.RELOAD_STORAGE_KEY) || '0', 10) || 0;
-        } catch (e) {}
+        } catch (e) { }
 
         if (reloadCount >= this._settings.maxReloadsPerSession) {
             this.logger.warn('🛑 Max auto-reloads reached (' + this._settings.maxReloadsPerSession + ')');
@@ -693,16 +623,28 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             this.logger.warn('Failed to persist session state before reload: ' + (e && e.message));
         }
 
-        var delay = Math.max(50, this._settings.autoReloadDelayMs || 100);
-        this.logger.info('🔄 Auto-reloading page in ' + delay + 'ms (#' + (reloadCount + 1) + '/' + this._settings.maxReloadsPerSession + ')');
+        var baseDelay = typeof this._settings.autoReloadDelayMs === 'number' ? this._settings.autoReloadDelayMs : 2500;
+        var jitter = typeof this._settings.reloadJitterMs === 'number' ? this._settings.reloadJitterMs : 400;
+        var delay = baseDelay + (jitter > 0 ? (Math.floor(Math.random() * jitter * 2) - jitter) : 0);
+        if (typeof process === 'undefined') {
+            delay = Math.max(1500, delay); // In live browser, safe floor of 1.5s to prevent excessive IndiaMART page queries
+        } else {
+            delay = Math.max(0, delay);
+        }
+        this.logger.info('🔄 Auto-reloading in ' + Math.round(delay/1000) + 's (#' + (reloadCount + 1) + '/' + this._settings.maxReloadsPerSession + ')');
 
         if (this._reloadTimer) {
             clearTimeout(this._reloadTimer);
             this._reloadTimer = null;
         }
 
-        this._reloadTimer = setTimeout(function() {
+        this._reloadTimer = setTimeout(function () {
             self._reloadTimer = null;
+            // Abort if navigator was stopped (manual pause / emergency stop) while timer was queued
+            if (!self._running) {
+                self._reloadInProgress = false;
+                return;
+            }
             try {
                 if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
                     window.location.reload();
@@ -719,11 +661,11 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return true;
     };
 
-        PageNavigator.prototype._showReloadOverlay = function(n) {
+    PageNavigator.prototype._showReloadOverlay = function (n) {
         // Overlay removed — silent reload
     };
 
-    PageNavigator.prototype._showFinalBanner = function() {
+    PageNavigator.prototype._showFinalBanner = function () {
         try {
             var existing = document.getElementById('bl-final-banner');
             if (existing) existing.remove();
@@ -733,10 +675,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             banner.innerHTML = '<div style="font-weight:700;color:#f5a623;margin-bottom:4px;">🛑 Session Limit Reached</div>' +
                 '<div style="font-size:11px;color:#666;">Auto-reloaded ' + this._settings.maxReloadsPerSession + ' times. Please refresh manually.</div>';
             document.body.appendChild(banner);
-        } catch (e) {}
+        } catch (e) { }
     };
 
-    PageNavigator.prototype._isInDOM = function(el) {
+    PageNavigator.prototype._isInDOM = function (el) {
         if (!el) return false;
         try {
             var r = el.getBoundingClientRect();
@@ -746,7 +688,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         } catch (e) { return false; }
     };
 
-    PageNavigator.prototype.getStatus = function() {
+    PageNavigator.prototype.getStatus = function () {
         return {
             running: this._running, loopInProgress: this._loopInProgress,
             noMoreCount: this._noMoreCount, stuckCount: this._stuckCount,
@@ -770,7 +712,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._mutationSeen = false;
     }
 
-    PopupManager.prototype._classifyPopup = function(el) {
+    PopupManager.prototype._classifyPopup = function (el) {
         var text = (el.textContent || '').toLowerCase();
 
         // Count visible Yes/No buttons
@@ -779,7 +721,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         for (var i = 0; i < buttons.length; i++) {
             var bt = (buttons[i].textContent || buttons[i].value || '').trim().toLowerCase();
             if (bt === 'yes' || bt === 'ok' || bt === 'confirm' || bt === 'proceed') hasYes = true;
-            if (bt === 'no'  || bt === 'cancel' || bt === 'dismiss')                    hasNo  = true;
+            if (bt === 'no' || bt === 'cancel' || bt === 'dismiss') hasNo = true;
         }
 
         // Confirmation takes priority — never auto-close a modal that needs an answer.
@@ -802,7 +744,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return 'UNKNOWN';
     };
 
-    PopupManager.prototype.watchForPopup = function(callback, options) {
+    PopupManager.prototype.watchForPopup = function (callback, options) {
         var self = this;
         options = options || {};
         this._onHandled = callback;
@@ -817,15 +759,15 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._mutationSeen = false;
 
         // MutationObserver gate — only re-scan when DOM actually changed
-        if (this._observer) { try { this._observer.disconnect(); } catch (e) {} }
+        if (this._observer) { try { this._observer.disconnect(); } catch (e) { } }
         try {
-            this._observer = new MutationObserver(function() { self._mutationSeen = true; });
+            this._observer = new MutationObserver(function () { self._mutationSeen = true; });
             this._observer.observe(document.body, { childList: true, subtree: true });
-        } catch (e) {}
+        } catch (e) { }
 
         if (this._watchInterval) clearInterval(this._watchInterval);
 
-        this._watchInterval = setInterval(function() {
+        this._watchInterval = setInterval(function () {
             if (!self._active) { self._cleanup(); return; }
 
             // Skip DOM scan if nothing mutated since last check
@@ -862,19 +804,19 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }, 60);
     };
 
-    PopupManager.prototype._cleanup = function() {
+    PopupManager.prototype._cleanup = function () {
         this._active = false;
         if (this._watchInterval) { clearInterval(this._watchInterval); this._watchInterval = null; }
-        if (this._observer) { try { this._observer.disconnect(); } catch (e) {} this._observer = null; }
+        if (this._observer) { try { this._observer.disconnect(); } catch (e) { } this._observer = null; }
     };
 
-    PopupManager.prototype._finish = function(result) {
+    PopupManager.prototype._finish = function (result) {
         var cb = this._onHandled;
         this._cleanup();
         if (cb) cb(result);
     };
 
-    PopupManager.prototype._findAllPopups = function() {
+    PopupManager.prototype._findAllPopups = function () {
         var found = [];
         var seen = new Set();
         var vw = window.innerWidth, vh = window.innerHeight;
@@ -890,7 +832,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 if (r.width < 100 || r.height < 60) continue;
                 seen.add(el); found.push(el);
             }
-        } catch (e) {}
+        } catch (e) { }
 
         // 2) Generic selectors
         var selectors = ['[role="dialog"]', '[role="alertdialog"]', '[class*="modal"]', '[class*="Modal"]',
@@ -908,13 +850,13 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                     if (r2.width > vw * 0.99 && r2.height > vh * 0.99) continue;
                     seen.add(e2); found.push(e2);
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
 
         return found;
     };
 
-    PopupManager.prototype._handlePopup = function(popup, type) {
+    PopupManager.prototype._handlePopup = function (popup, type) {
         this.logger.info('Handling ' + type + ' popup');
         if (type === 'PURCHASE') this._handlePurchase(popup);
         else if (type === 'CONFIRMATION') this._handleConfirmation(popup);
@@ -922,7 +864,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         else this._handleUnknown(popup);
     };
 
-    PopupManager.prototype._handlePurchase = function(popup) {
+    PopupManager.prototype._handlePurchase = function (popup) {
         this.logger.warn('💳 Purchase modal detected');
         if (this._purchaseAction === 'stop') {
             this._finish({ success: false, action: 'stopped', type: 'PURCHASE', reason: 'purchase_required', stopAcquiring: true });
@@ -937,12 +879,12 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         if (closeBtn) {
             try {
                 closeBtn.click();
-                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); } catch (e) {}
+                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); } catch (e) { }
                 document.body.style.overflow = '';
                 this._handledCount++;
                 this._finish({ success: true, action: 'purchase_closed', type: 'PURCHASE' });
                 return;
-            } catch (err) {}
+            } catch (err) { }
         }
         // Hard hide fallback
         try {
@@ -956,7 +898,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    PopupManager.prototype._handleConfirmation = function(popup) {
+    PopupManager.prototype._handleConfirmation = function (popup) {
         var answer = this._confirmationAnswer || 'yes';
         this.logger.info('Confirmation - answer: ' + answer);
         var buttons = popup.querySelectorAll('button, [role="button"], a[role="button"], input[type="button"], input[type="submit"], span[class*="btn"], div[class*="btn"]');
@@ -991,39 +933,39 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 this._handledCount++;
                 this._finish({ success: true, action: 'confirm_' + answer, type: 'CONFIRMATION' });
                 return;
-            } catch (err) {}
+            } catch (err) { }
         }
         this._finish({ success: false, reason: 'no_button', action: 'confirm_failed', type: 'CONFIRMATION' });
     };
 
-    PopupManager.prototype._handleNavigation = function(popup) {
+    PopupManager.prototype._handleNavigation = function (popup) {
         var btn = this._findCloseButton(popup);
-        if (btn) { try { btn.click(); } catch (e) {} }
+        if (btn) { try { btn.click(); } catch (e) { } }
         else {
             try {
                 document.body.click();
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-            } catch (e) {}
+            } catch (e) { }
         }
         this._finish({ success: true, action: 'nav_closed', type: 'NAVIGATION' });
     };
 
-    PopupManager.prototype._handleUnknown = function(popup) {
+    PopupManager.prototype._handleUnknown = function (popup) {
         var btn = this._findCloseButton(popup);
         if (btn) {
-            try { btn.click(); } catch (e) {}
+            try { btn.click(); } catch (e) { }
             this._finish({ success: true, action: 'closed', type: 'UNKNOWN' });
             return;
         }
         this._finish({ success: false, reason: 'unknown', action: 'unknown', type: 'UNKNOWN' });
     };
 
-    PopupManager.prototype._findCloseButton = function(popup) {
+    PopupManager.prototype._findCloseButton = function (popup) {
         var slc = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"]');
         if (slc && this._isVisible(slc)) return slc;
         var sels = ['[class*="close"]', '[aria-label*="close" i]', '[title*="close" i]', '[class*="cross"]'];
         for (var i = 0; i < sels.length; i++) {
-            try { var el = popup.querySelector(sels[i]); if (el && this._isVisible(el)) return el; } catch (e) {}
+            try { var el = popup.querySelector(sels[i]); if (el && this._isVisible(el)) return el; } catch (e) { }
         }
         var btns = popup.querySelectorAll('button, span[class*="close"], span[class*="SLC"]');
         for (var j = 0; j < btns.length; j++) {
@@ -1035,7 +977,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return null;
     };
 
-    PopupManager.prototype._isVisible = function(el) {
+    PopupManager.prototype._isVisible = function (el) {
         if (!el) return false;
         try {
             var r = el.getBoundingClientRect();
@@ -1045,8 +987,8 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         } catch (e) { return false; }
     };
 
-    PopupManager.prototype.cancel = function() { this._cleanup(); };
-    PopupManager.prototype.getCount = function() { return this._handledCount; };
+    PopupManager.prototype.cancel = function () { this._cleanup(); };
+    PopupManager.prototype.getCount = function () { return this._handledCount; };
 
     // ============================================================
     // MATCHING ENGINE & KEYWORD NORMALIZATION (v6.3 - GRAVITAS)
@@ -1065,7 +1007,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
 
     function tokenize(normalizedText) {
         if (!normalizedText) return [];
-        return normalizedText.split(/\s+/).filter(function(t) { return t.length > 0; });
+        return normalizedText.split(/\s+/).filter(function (t) { return t.length > 0; });
     }
 
     var COMMON_FORMS = [
@@ -1231,7 +1173,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     }
 
     // Stage A: Hard Eligibility Constraints
-    LeadMatcher.prototype.checkEligibility = function(lead, filter) {
+    LeadMatcher.prototype.checkEligibility = function (lead, filter) {
         var rawProd = lead.productName || '';
         var normProd = normalizeText(rawProd);
         var leadAttrs = extractAttributes(normProd);
@@ -1343,7 +1285,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     };
 
     // Stage B: Relevance Scoring (0 - 100)
-    LeadMatcher.prototype.computeScore = function(lead, filter) {
+    LeadMatcher.prototype.computeScore = function (lead, filter) {
         var rawProd = lead.productName || '';
         var rawMsg = lead.messageText || lead.queryMessage || '';
         var rawCombined = (rawProd + ' ' + rawMsg).trim();
@@ -1419,7 +1361,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                 'for': 1, 'in': 1, 'and': 1, 'with': 1, 'of': 1, 'the': 1, 'a': 1, 'an': 1,
                 'pharma': 1, 'pharmaceutical': 1, 'standard': 1, 'pure': 1, 'bulk': 1
             };
-            var substantiveKwTokens = kwTokens.filter(function(t) { return !QUALIFIER_WORDS[t]; });
+            var substantiveKwTokens = kwTokens.filter(function (t) { return !QUALIFIER_WORDS[t]; });
             var denom = substantiveKwTokens.length > 0 ? substantiveKwTokens : kwTokens;
 
             var matchedTokensCount = 0;
@@ -1539,7 +1481,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         };
     };
 
-    LeadMatcher.prototype.evaluate = function(lead, filter) {
+    LeadMatcher.prototype.evaluate = function (lead, filter) {
         var elig = this.checkEligibility(lead, filter);
         if (!elig.eligible) {
             return { passed: false, stage: 'A_ELIGIBILITY', reason: elig.reason, detail: elig.detail, score: 0 };
@@ -1561,8 +1503,8 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         };
     };
 
-    LeadMatcher.prototype.rankCandidates = function(candidates) {
-        return candidates.slice().sort(function(a, b) {
+    LeadMatcher.prototype.rankCandidates = function (candidates) {
+        return candidates.slice().sort(function (a, b) {
             if (b.score !== a.score) return b.score - a.score;
             if (b.confidence !== a.confidence) return b.confidence - a.confidence;
             return String(a.filter ? a.filter.id : '').localeCompare(String(b.filter ? b.filter.id : ''));
@@ -1575,7 +1517,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     function KeywordManager() {
         this.logger = new Logger('KeywordManager');
         this.keywords = { product: [], negative: [], location: [], required: [] };
-        this._localKeywords    = { product: [], negative: [], location: [], required: [] };
+        this._localKeywords = { product: [], negative: [], location: [], required: [] };
         this._supabaseKeywords = { product: [], negative: [], location: [], required: [] };
         this._supabaseEnabled = true;
         this.matcher = new LeadMatcher();
@@ -1584,7 +1526,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._filterInFlight = new Map();        // filterId -> Set of in-flight leadIds
     }
 
-    KeywordManager.prototype.getBuyerId = function(lead) {
+    KeywordManager.prototype.getBuyerId = function (lead) {
         if (!lead) return null;
         var mobile = (lead.senderMobile || (lead.contact && lead.contact.mobile) || lead.senderPhone || (lead.contact && lead.contact.phone) || '').replace(/\D+/g, '');
         if (mobile && mobile.length >= 7) return 'tel_' + mobile.slice(-10);
@@ -1597,13 +1539,13 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return null;
     };
 
-    KeywordManager.prototype.getActiveFilterCount = function() {
+    KeywordManager.prototype.getActiveFilterCount = function () {
         var self = this;
         if (this._supabaseEnabled) {
             if (!this._activeFilters || this._activeFilters.length === 0) {
                 return 0;
             }
-            return this._activeFilters.filter(function(f) {
+            return this._activeFilters.filter(function (f) {
                 if (f.isActive === false || f.is_active === false || f.deleted_at || f.is_deleted) return false;
                 var buyers = self._filterCompletedBuyers.get(f.id) || self._filterCompletedBuyers.get(String(f.id));
                 var count = buyers ? buyers.size : 0;
@@ -1626,7 +1568,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return 0;
     };
 
-    KeywordManager.prototype.isFilterEligible = function(filterId) {
+    KeywordManager.prototype.isFilterEligible = function (filterId) {
         if (!filterId) return false;
         var self = this;
         if (this._activeFilters && this._activeFilters.length > 0) {
@@ -1653,7 +1595,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         return false;
     };
 
-    KeywordManager.prototype.reserveSlot = function(filterId, leadId) {
+    KeywordManager.prototype.reserveSlot = function (filterId, leadId) {
         if (!filterId || !leadId) return;
         var fKey = String(filterId);
         if (!this._filterInFlight.has(fKey)) {
@@ -1662,7 +1604,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         this._filterInFlight.get(fKey).add(leadId);
     };
 
-    KeywordManager.prototype.releaseReservation = function(filterId, leadId) {
+    KeywordManager.prototype.releaseReservation = function (filterId, leadId) {
         if (!filterId || !leadId) return;
         var fKey = String(filterId);
         if (this._filterInFlight.has(fKey)) {
@@ -1670,7 +1612,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    KeywordManager.prototype.recordFilterSuccess = function(filterId, lead) {
+    KeywordManager.prototype.recordFilterSuccess = function (filterId, lead) {
         if (!filterId) return;
         var buyerId = this.getBuyerId(lead);
         var fKey = String(filterId);
@@ -1687,35 +1629,35 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    KeywordManager.prototype._persistCompletedBuyers = function() {
+    KeywordManager.prototype._persistCompletedBuyers = function () {
         var out = {};
-        this._filterCompletedBuyers.forEach(function(buyerSet, fId) {
+        this._filterCompletedBuyers.forEach(function (buyerSet, fId) {
             out[fId] = Array.from(buyerSet);
         });
         try {
             if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
                 chrome.storage.local.set({ filterCompletedBuyers: out });
             }
-        } catch (e) {}
+        } catch (e) { }
     };
 
-    KeywordManager.prototype.setSupabaseEnabled = function(enabled) {
+    KeywordManager.prototype.setSupabaseEnabled = function (enabled) {
         this._supabaseEnabled = enabled;
         this._rebuildKeywords();
     };
 
-    KeywordManager.prototype._normalize = function(text) {
+    KeywordManager.prototype._normalize = function (text) {
         return normalizeText(text);
     };
 
-    KeywordManager.prototype._textMatches = function(text, keyword) {
+    KeywordManager.prototype._textMatches = function (text, keyword) {
         return wordBoundaryMatch(normalizeText(text), normalizeText(keyword));
     };
 
-    KeywordManager.prototype.loadKeywords = function() {
+    KeywordManager.prototype.loadKeywords = function () {
         var self = this;
-        return new Promise(function(resolve) {
-            chrome.storage.local.get(['keywords', 'supabaseEnabled', 'filterCompletedBuyers', 'cached_filters_v1', 'supabase_filters_cache'], function(result) {
+        return new Promise(function (resolve) {
+            chrome.storage.local.get(['keywords', 'supabaseEnabled', 'filterCompletedBuyers', 'cached_filters_v1', 'supabase_filters_cache'], function (result) {
                 if (result && result.filterCompletedBuyers) {
                     try {
                         for (var fId in result.filterCompletedBuyers) {
@@ -1723,10 +1665,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
                                 self._filterCompletedBuyers.set(fId, new Set(result.filterCompletedBuyers[fId]));
                             }
                         }
-                    } catch (e) {}
+                    } catch (e) { }
                 }
                 self._localKeywords = {
-                    product:  (result.keywords && result.keywords.product)  || [],
+                    product: (result.keywords && result.keywords.product) || [],
                     negative: (result.keywords && result.keywords.negative) || [],
                     location: (result.keywords && result.keywords.location) || [],
                     required: (result.keywords && result.keywords.required) || []
@@ -1760,7 +1702,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         });
     };
 
-    KeywordManager.prototype.extractFromSupabaseFilters = function(filters) {
+    KeywordManager.prototype.extractFromSupabaseFilters = function (filters) {
         this._activeFilters = [];
         if (!filters || filters.length === 0) {
             this._supabaseKeywords = { product: [], negative: [], location: [], required: [] };
@@ -1770,15 +1712,15 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
 
         var INDIAN_STATES = {
-            'andhra pradesh':1,'arunachal pradesh':1,'assam':1,'bihar':1,'chhattisgarh':1,
-            'goa':1,'gujarat':1,'haryana':1,'himachal pradesh':1,'jharkhand':1,'karnataka':1,
-            'kerala':1,'madhya pradesh':1,'maharashtra':1,'manipur':1,'meghalaya':1,
-            'mizoram':1,'nagaland':1,'odisha':1,'orissa':1,'punjab':1,'rajasthan':1,
-            'sikkim':1,'tamil nadu':1,'telangana':1,'tripura':1,'uttar pradesh':1,
-            'uttarakhand':1,'uttaranchal':1,'west bengal':1,'delhi':1,'new delhi':1,
-            'jammu and kashmir':1,'jammu kashmir':1,'ladakh':1,'chandigarh':1,
-            'puducherry':1,'pondicherry':1,'andaman and nicobar islands':1,'lakshadweep':1,
-            'dadra and nagar haveli':1,'daman and diu':1
+            'andhra pradesh': 1, 'arunachal pradesh': 1, 'assam': 1, 'bihar': 1, 'chhattisgarh': 1,
+            'goa': 1, 'gujarat': 1, 'haryana': 1, 'himachal pradesh': 1, 'jharkhand': 1, 'karnataka': 1,
+            'kerala': 1, 'madhya pradesh': 1, 'maharashtra': 1, 'manipur': 1, 'meghalaya': 1,
+            'mizoram': 1, 'nagaland': 1, 'odisha': 1, 'orissa': 1, 'punjab': 1, 'rajasthan': 1,
+            'sikkim': 1, 'tamil nadu': 1, 'telangana': 1, 'tripura': 1, 'uttar pradesh': 1,
+            'uttarakhand': 1, 'uttaranchal': 1, 'west bengal': 1, 'delhi': 1, 'new delhi': 1,
+            'jammu and kashmir': 1, 'jammu kashmir': 1, 'ladakh': 1, 'chandigarh': 1,
+            'puducherry': 1, 'pondicherry': 1, 'andaman and nicobar islands': 1, 'lakshadweep': 1,
+            'dadra and nagar haveli': 1, 'daman and diu': 1
         };
 
         function normForMatch(t) {
@@ -1789,7 +1731,7 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         for (var i = 0; i < filters.length; i++) {
             var f = filters[i];
             var cfg = f.filter_config || {};
-            var uniqNorm = function(arr) {
+            var uniqNorm = function (arr) {
                 var seen = {}, out = [];
                 if (!Array.isArray(arr)) return out;
                 for (var x = 0; x < arr.length; x++) {
@@ -1861,28 +1803,28 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             rules.push({
                 id: f.id,
                 name: f.filter_name || f.name || ('filter_' + f.id),
-                keywords:         normKeywords,
-                matchMode:        (String(cfg.match_mode || cfg.matchMode || f.match_mode || f.matchMode || 'any').toLowerCase() === 'all') ? 'all' : 'any',
+                keywords: normKeywords,
+                matchMode: (String(cfg.match_mode || cfg.matchMode || f.match_mode || f.matchMode || 'any').toLowerCase() === 'all') ? 'all' : 'any',
                 negativeKeywords: uniqNorm(negNames),
                 requiredKeywords: uniqNorm(reqNames),
-                locations:        uniqNorm(locNames),
+                locations: uniqNorm(locNames),
                 restrictedCountries: uniqNorm(restCountries),
-                requireMobile:   cfg.require_mobile   === true || f.require_mobile === true,
+                requireMobile: cfg.require_mobile === true || f.require_mobile === true,
                 requireWhatsapp: cfg.require_whatsapp === true || f.require_whatsapp === true,
-                requireEmail:    cfg.require_email    === true || f.require_email === true,
-                quantityUnit:    typeof (cfg.quantity_unit || f.quantity_unit) === 'string' ? (cfg.quantity_unit || f.quantity_unit).toLowerCase().trim() : '',
-                minQuantity:     (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : ((typeof f.min_quantity === 'number' && f.min_quantity > 0) ? f.min_quantity : 0),
-                targetQuantity:  (typeof cfg.target_quantity === 'number' && cfg.target_quantity > 0) ? cfg.target_quantity : ((typeof f.target_lead_count === 'number' && f.target_lead_count > 0) ? f.target_lead_count : ((typeof f.target_quantity === 'number' && f.target_quantity > 0) ? f.target_quantity : 2)),
-                isActive:        f.is_active !== false && !isDeleted && isFilterValid,
-                rawFilter:       f,
-                _indianStates:   INDIAN_STATES
+                requireEmail: cfg.require_email === true || f.require_email === true,
+                quantityUnit: typeof (cfg.quantity_unit || f.quantity_unit) === 'string' ? (cfg.quantity_unit || f.quantity_unit).toLowerCase().trim() : '',
+                minQuantity: (typeof cfg.min_quantity === 'number' && cfg.min_quantity > 0) ? cfg.min_quantity : ((typeof f.min_quantity === 'number' && f.min_quantity > 0) ? f.min_quantity : 0),
+                targetQuantity: (typeof cfg.target_quantity === 'number' && cfg.target_quantity > 0) ? cfg.target_quantity : ((typeof f.target_lead_count === 'number' && f.target_lead_count > 0) ? f.target_lead_count : ((typeof f.target_quantity === 'number' && f.target_quantity > 0) ? f.target_quantity : 2)),
+                isActive: f.is_active !== false && !isDeleted && isFilterValid,
+                rawFilter: f,
+                _indianStates: INDIAN_STATES
             });
         }
         this._activeFilters = rules;
 
         // Keep flat lists for backward compatibility and status text
         var product = [], negative = [], location = [], required = [];
-        var addUnique = function(arr, item) {
+        var addUnique = function (arr, item) {
             if (!item || typeof item !== 'string') return;
             var pieces = item.split(/[,;\n\r]+/);
             for (var pi = 0; pi < pieces.length; pi++) {
@@ -1893,34 +1835,34 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         for (var j = 0; j < filters.length; j++) {
             var ff = filters[j];
             var cc = ff.filter_config || {};
-            if (Array.isArray(ff.product_keywords))  for (var a = 0; a < ff.product_keywords.length;  a++) addUnique(product,  ff.product_keywords[a]);
+            if (Array.isArray(ff.product_keywords)) for (var a = 0; a < ff.product_keywords.length; a++) addUnique(product, ff.product_keywords[a]);
             if (Array.isArray(ff.negative_keywords)) for (var b = 0; b < ff.negative_keywords.length; b++) addUnique(negative, ff.negative_keywords[b]);
             if (Array.isArray(ff.required_keywords)) for (var c = 0; c < ff.required_keywords.length; c++) addUnique(required, ff.required_keywords[c]);
             if (Array.isArray(ff.location_keywords)) for (var d = 0; d < ff.location_keywords.length; d++) addUnique(location, ff.location_keywords[d]);
-            if (Array.isArray(cc.product_names))     for (var e = 0; e < cc.product_names.length;     e++) addUnique(product,  cc.product_names[e]);
+            if (Array.isArray(cc.product_names)) for (var e = 0; e < cc.product_names.length; e++) addUnique(product, cc.product_names[e]);
             if (Array.isArray(cc.negative_keywords)) for (var g = 0; g < cc.negative_keywords.length; g++) addUnique(negative, cc.negative_keywords[g]);
             if (Array.isArray(cc.required_keywords)) for (var h = 0; h < cc.required_keywords.length; h++) addUnique(required, cc.required_keywords[h]);
-            if (Array.isArray(cc.countries))         for (var k1 = 0; k1 < cc.countries.length; k1++) addUnique(location, cc.countries[k1]);
+            if (Array.isArray(cc.countries)) for (var k1 = 0; k1 < cc.countries.length; k1++) addUnique(location, cc.countries[k1]);
         }
         this._supabaseKeywords = { product: product, negative: negative, location: location, required: required };
         this._rebuildKeywords();
         this.logger.info('📥 Supabase filters built', { rules: rules.length, product: product.length, activeCount: this.getActiveFilterCount() });
     };
 
-    KeywordManager.prototype._rebuildKeywords = function() {
+    KeywordManager.prototype._rebuildKeywords = function () {
         if (this._supabaseEnabled && (
             this._supabaseKeywords.product.length > 0 ||
             this._supabaseKeywords.negative.length > 0 ||
             this._supabaseKeywords.required.length > 0)) {
             this.keywords = {
-                product:  this._supabaseKeywords.product.slice(),
+                product: this._supabaseKeywords.product.slice(),
                 negative: this._supabaseKeywords.negative.slice(),
                 location: this._supabaseKeywords.location.slice(),
                 required: this._supabaseKeywords.required.slice()
             };
         } else {
             this.keywords = {
-                product:  this._localKeywords.product.slice(),
+                product: this._localKeywords.product.slice(),
                 negative: this._localKeywords.negative.slice(),
                 location: this._localKeywords.location.slice(),
                 required: this._localKeywords.required.slice()
@@ -1928,15 +1870,15 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         }
     };
 
-    KeywordManager.prototype.updateKeywords = function(newKeywords) {
+    KeywordManager.prototype.updateKeywords = function (newKeywords) {
         var self = this;
-        return new Promise(function(resolve) {
+        return new Promise(function (resolve) {
             for (var k in newKeywords) {
                 if (newKeywords.hasOwnProperty(k) && self._localKeywords.hasOwnProperty(k)) {
                     self._localKeywords[k] = newKeywords[k];
                 }
             }
-            chrome.storage.local.set({ keywords: self._localKeywords }, function() {
+            chrome.storage.local.set({ keywords: self._localKeywords }, function () {
                 self._rebuildKeywords();
                 resolve(true);
             });
@@ -1944,10 +1886,10 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     };
 
     // Evaluates a candidate lead against all active filters with Stage A eligibility & Stage B candidate ranking
-    KeywordManager.prototype.evaluateFilters = function(lead) {
+    KeywordManager.prototype.evaluateFilters = function (lead) {
         var self = this;
         var rules = this._activeFilters || [];
-        var activeRules = rules.filter(function(r) { return r.isActive !== false; });
+        var activeRules = rules.filter(function (r) { return r.isActive !== false; });
         if (activeRules.length === 0) {
             return { passed: false, reason: 'no_active_filter', matchedProducts: [], matchedRequired: [], matchedNegative: [] };
         }
@@ -2098,26 +2040,27 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
         };
     };
 
-    KeywordManager.prototype.getKeywords    = function(type) { return this.keywords[type] || []; };
-    KeywordManager.prototype.getAllKeywords = function() { return this.keywords; };
+    KeywordManager.prototype.getKeywords = function (type) { return this.keywords[type] || []; };
+    KeywordManager.prototype.getAllKeywords = function () { return this.keywords; };
 
     // ============================================================
-    // CHECK KEYWORDS — v6.2 SIGNATURE
+    // CHECK KEYWORDS — v6.3 SIGNATURE
     // ------------------------------------------------------------
     // checkKeywords(productName, messageText)
-    //   • product keyword  → must match productName (OR list, pass if list empty)
-    //   • negative keyword → reject if matches productName
+    //   • product keyword  → must match productName OR messageText (description)
+    //                        Fixes: medicine name in contents/description missed.
+    //   • negative keyword → reject if matches productName only (precision guard)
     //   • required keyword → at least one must match productName OR messageText
     // ============================================================
-    KeywordManager.prototype.checkKeywords = function(productName, messageText) {
+    KeywordManager.prototype.checkKeywords = function (productName, messageText) {
         productName = productName || '';
         messageText = messageText || '';
 
-        var req  = this.keywords.required || [];
-        var neg  = this.keywords.negative || [];
-        var prod = this.keywords.product  || [];
+        var req = this.keywords.required || [];
+        var neg = this.keywords.negative || [];
+        var prod = this.keywords.product || [];
 
-        // --- NEGATIVE GATE (productName only) ---
+        // --- NEGATIVE GATE (productName only — keep precision, don't reject on description) ---
         var negMatched = [];
         for (var j = 0; j < neg.length; j++) {
             if (this._textMatches(productName, neg[j])) negMatched.push(neg[j]);
@@ -2139,11 +2082,15 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
             }
         }
 
-        // --- PRODUCT GATE (productName only) ---
+        // --- PRODUCT GATE (productName OR messageText) ---
+        // Key fix: if the medicine/product name is in the description (messageText)
+        // rather than the card title, we still match it correctly.
         var prodMatched = [];
         if (prod.length > 0) {
             for (var k = 0; k < prod.length; k++) {
-                if (this._textMatches(productName, prod[k])) prodMatched.push(prod[k]);
+                if (this._textMatches(productName, prod[k]) || this._textMatches(messageText, prod[k])) {
+                    prodMatched.push(prod[k]);
+                }
             }
             if (prodMatched.length === 0) {
                 return { passed: false, reason: 'no_product_keyword', matchedProducts: [], matchedRequired: reqMatched, matchedNegative: [] };
@@ -2159,43 +2106,43 @@ LeadIdGenerator.prototype.generateFromElement = function(element) {
     // SAFETY CONTROLLER
     // ============================================================
     function SafetyController() {
-    this.mode = 'AUTOMATIC';
-    this._emergencyStop = false;
-    this.counters = { minute: 0, hour: 0, day: 0, session: 0 };
-    this.limits = { perMinute: 60, perHour: 400, perDay: 2000, perSession: 1000 };
-    this._lastMin = Date.now();
-    this._lastHour = Date.now();
-    this._lastDay = Date.now();
-}
-SafetyController.prototype._reset = function() {
-    var now = Date.now();
-    if (now - this._lastMin  > 60000)    { this.counters.minute = 0;  this._lastMin  = now; }
-    if (now - this._lastHour > 3600000)  { this.counters.hour   = 0;  this._lastHour = now; }
-    if (now - this._lastDay  > 86400000) { this.counters.day    = 0;  this._lastDay  = now; }
-};
-SafetyController.prototype.setMode = function(m) { this.mode = m; };
-SafetyController.prototype.setLimits = function(l) {
-    for (var k in l) if (l.hasOwnProperty(k) && this.limits.hasOwnProperty(k)) this.limits[k] = l[k];
-};
-SafetyController.prototype.canAcquire = function() {
-    this._reset();
-    if (this._emergencyStop) return { allowed: false, reason: 'EMERGENCY_STOP' };
-    if (this.mode === 'MONITOR') return { allowed: false, reason: 'MONITOR_MODE' };
-    if (this.mode === 'DRY_RUN') return { allowed: false, reason: 'DRY_RUN', dryRun: true };
-    if (this.counters.minute  >= this.limits.perMinute)  return { allowed: false, reason: 'MINUTE_LIMIT',  details: { used: this.counters.minute,  limit: this.limits.perMinute  } };
-    if (this.counters.hour    >= this.limits.perHour)    return { allowed: false, reason: 'HOUR_LIMIT',    details: { used: this.counters.hour,    limit: this.limits.perHour    } };
-    if (this.counters.day     >= this.limits.perDay)     return { allowed: false, reason: 'DAY_LIMIT',     details: { used: this.counters.day,     limit: this.limits.perDay     } };
-    if (this.counters.session >= this.limits.perSession) return { allowed: false, reason: 'SESSION_LIMIT', details: { used: this.counters.session, limit: this.limits.perSession } };
-    return { allowed: true };
-};
-SafetyController.prototype.recordAcquisition = function() {
-    this.counters.minute++; this.counters.hour++; this.counters.day++; this.counters.session++;
-};
-SafetyController.prototype.emergencyStopFn = function() { this._emergencyStop = true; };
-SafetyController.prototype.resume = function() { this._emergencyStop = false; };
-SafetyController.prototype.getStatus = function() {
-    return { mode: this.mode, emergencyStop: this._emergencyStop, counters: this.counters, limits: this.limits, cooldown: false, cooldownMs: 0 };
-};
+        this.mode = 'AUTOMATIC';
+        this._emergencyStop = false;
+        this.counters = { minute: 0, hour: 0, day: 0, session: 0 };
+        this.limits = { perMinute: 60, perHour: 400, perDay: 2000, perSession: 1000 };
+        this._lastMin = Date.now();
+        this._lastHour = Date.now();
+        this._lastDay = Date.now();
+    }
+    SafetyController.prototype._reset = function () {
+        var now = Date.now();
+        if (now - this._lastMin > 60000) { this.counters.minute = 0; this._lastMin = now; }
+        if (now - this._lastHour > 3600000) { this.counters.hour = 0; this._lastHour = now; }
+        if (now - this._lastDay > 86400000) { this.counters.day = 0; this._lastDay = now; }
+    };
+    SafetyController.prototype.setMode = function (m) { this.mode = m; };
+    SafetyController.prototype.setLimits = function (l) {
+        for (var k in l) if (l.hasOwnProperty(k) && this.limits.hasOwnProperty(k)) this.limits[k] = l[k];
+    };
+    SafetyController.prototype.canAcquire = function () {
+        this._reset();
+        if (this._emergencyStop) return { allowed: false, reason: 'EMERGENCY_STOP' };
+        if (this.mode === 'MONITOR') return { allowed: false, reason: 'MONITOR_MODE' };
+        if (this.mode === 'DRY_RUN') return { allowed: false, reason: 'DRY_RUN', dryRun: true };
+        if (this.counters.minute >= this.limits.perMinute) return { allowed: false, reason: 'MINUTE_LIMIT', details: { used: this.counters.minute, limit: this.limits.perMinute } };
+        if (this.counters.hour >= this.limits.perHour) return { allowed: false, reason: 'HOUR_LIMIT', details: { used: this.counters.hour, limit: this.limits.perHour } };
+        if (this.counters.day >= this.limits.perDay) return { allowed: false, reason: 'DAY_LIMIT', details: { used: this.counters.day, limit: this.limits.perDay } };
+        if (this.counters.session >= this.limits.perSession) return { allowed: false, reason: 'SESSION_LIMIT', details: { used: this.counters.session, limit: this.limits.perSession } };
+        return { allowed: true };
+    };
+    SafetyController.prototype.recordAcquisition = function () {
+        this.counters.minute++; this.counters.hour++; this.counters.day++; this.counters.session++;
+    };
+    SafetyController.prototype.emergencyStopFn = function () { this._emergencyStop = true; };
+    SafetyController.prototype.resume = function () { this._emergencyStop = false; };
+    SafetyController.prototype.getStatus = function () {
+        return { mode: this.mode, emergencyStop: this._emergencyStop, counters: this.counters, limits: this.limits, cooldown: false, cooldownMs: 0 };
+    };
 
     // ============================================================
     // DUPLICATE MANAGER
@@ -2205,11 +2152,11 @@ SafetyController.prototype.getStatus = function() {
         this._seen = new Set();
         this._loadedFromDb = false;
     }
-    DuplicateManager.prototype.loadFromDb = function() {
+    DuplicateManager.prototype.loadFromDb = function () {
         var self = this;
         if (this._loadedFromDb) return Promise.resolve();
         // Only load contacted / acquired leads — un-acquired leads are NEVER duplicates
-        return this.supabase.getRecentLeads(500).then(function(leads) {
+        return this.supabase.getRecentLeads(500).then(function (leads) {
             var loaded = 0;
             for (var i = 0; i < leads.length; i++) {
                 if (leads[i].is_contacted || leads[i].status === 'contacted') {
@@ -2220,12 +2167,12 @@ SafetyController.prototype.getStatus = function() {
             self._loadedFromDb = true;
             console.log('[Dup] Loaded ' + loaded + ' contacted leads from DB');
             return loaded;
-        }).catch(function() { return 0; });
+        }).catch(function () { return 0; });
     };
-    DuplicateManager.prototype.isDuplicate = function(leadId) { return this._seen.has(leadId); };
-    DuplicateManager.prototype.markSeen   = function(leadId) { this._seen.add(leadId); };
-    DuplicateManager.prototype.clear      = function() { this._seen = new Set(); };
-    DuplicateManager.prototype.cleanup    = function() {
+    DuplicateManager.prototype.isDuplicate = function (leadId) { return this._seen.has(leadId); };
+    DuplicateManager.prototype.markSeen = function (leadId) { this._seen.add(leadId); };
+    DuplicateManager.prototype.clear = function () { this._seen = new Set(); };
+    DuplicateManager.prototype.cleanup = function () {
         if (this._seen.size > 5000) {
             var arr = Array.from(this._seen);
             this._seen = new Set(arr.slice(-3000));
@@ -2236,14 +2183,14 @@ SafetyController.prototype.getStatus = function() {
     // STATE MACHINE
     // ============================================================
     function LeadStateMachine() { this._states = {}; }
-    LeadStateMachine.prototype.setState = function(id, state) {
+    LeadStateMachine.prototype.setState = function (id, state) {
         this._states[id] = state;
         return Promise.resolve(state);
     };
-    LeadStateMachine.prototype.getState = function(id) {
+    LeadStateMachine.prototype.getState = function (id) {
         return this._states[id];
     };
-    LeadStateMachine.prototype.getStats = function() {
+    LeadStateMachine.prototype.getStats = function () {
         var s = {};
         for (var k in this._states) { var v = this._states[k]; s[v] = (s[v] || 0) + 1; }
         return s;
@@ -2259,23 +2206,32 @@ SafetyController.prototype.getStatus = function() {
         this.processor = null;
         this._running = true;
         this._currentId = null;
+        this._currentUqid = null;
     }
-    LeadQueue.prototype.setProcessor = function(p) {
+    LeadQueue.prototype.setProcessor = function (p) {
         this.processor = p;
         this.logger.info('Processor set');
         this._process();
     };
-    LeadQueue.prototype.enqueue = function(lead) {
+    LeadQueue.prototype.enqueue = function (lead) {
+        // Dedup by leadId (primary key used by both DOM and network paths)
         if (this.processing && this._currentId === lead.leadId) return false;
         for (var i = 0; i < this.queue.length; i++) {
             if (this.queue[i].leadId === lead.leadId) return false;
         }
+        // Also dedup by uniqueQueryId — catches same physical lead arriving via
+        // both the network-intercept path (api_12345) and the DOM path (hash_abc).
+        if (lead.uniqueQueryId) {
+            if (this._currentUqid === lead.uniqueQueryId) return false;
+            for (var j = 0; j < this.queue.length; j++) {
+                if (this.queue[j].uniqueQueryId === lead.uniqueQueryId) return false;
+            }
+        }
         this.queue.push(lead);
-        // Kick the pump immediately
         this._process();
         return true;
     };
-    LeadQueue.prototype._process = function() {
+    LeadQueue.prototype._process = function () {
         var self = this;
         if (!this._running || !this.processor || this.queue.length === 0) return;
         // IndiaMART uses shared page-level dialogs; overlapping actions can consume
@@ -2285,20 +2241,23 @@ SafetyController.prototype.getStatus = function() {
         var lead = this.queue.shift();
         this.processing++;
         this._currentId = lead.leadId;
-        Promise.resolve().then(function() { return self.processor(lead); }).then(function() {
+        this._currentUqid = lead.uniqueQueryId || null;
+        Promise.resolve().then(function () { return self.processor(lead); }).then(function () {
             self.processing--;
             self._currentId = null;
+            self._currentUqid = null;
             if (self.queue.length > 0) self._process();
-        }).catch(function(err) {
+        }).catch(function (err) {
             self.logger.error('Processor error', { leadId: lead.leadId, error: err && err.message ? err.message : String(err) });
             self.processing--;
             self._currentId = null;
+            self._currentUqid = null;
             if (self.queue.length > 0) self._process();
         });
     };
-    LeadQueue.prototype.getStatus = function() { return { size: this.queue.length, processing: this.processing, running: this._running }; };
-    LeadQueue.prototype.pause  = function() { this._running = false; };
-    LeadQueue.prototype.resume = function() { this._running = true; this._process(); };
+    LeadQueue.prototype.getStatus = function () { return { size: this.queue.length, processing: this.processing, running: this._running }; };
+    LeadQueue.prototype.pause = function () { this._running = false; };
+    LeadQueue.prototype.resume = function () { this._running = true; this._process(); };
 
     // ============================================================
     // SCANNER (FASTER DEBOUNCE)
@@ -2318,7 +2277,7 @@ SafetyController.prototype.getStatus = function() {
         this._scanning = false;
         this._scanPending = false;
     }
-    Scanner.prototype._attachTopSentinel = function() {
+    Scanner.prototype._attachTopSentinel = function () {
         if (this._topSentinel) return;
         var s = document.createElement('div');
         s.id = 'bl-top-sentinel';
@@ -2326,7 +2285,7 @@ SafetyController.prototype.getStatus = function() {
         if (document.body) document.body.insertBefore(s, document.body.firstChild);
         this._topSentinel = s;
     };
-    Scanner.prototype._checkNewLeadsBanner = function() {
+    Scanner.prototype._checkNewLeadsBanner = function () {
         try {
             var banners = document.querySelectorAll(
                 '[class*="new_lead" i], [class*="newLead" i], .bl_new_toast, [id*="newLead" i], ' +
@@ -2346,12 +2305,12 @@ SafetyController.prototype.getStatus = function() {
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         return false;
     };
-    Scanner.prototype._setupObserver = function() {
+    Scanner.prototype._setupObserver = function () {
         if (this._observer) {
-            try { this._observer.disconnect(); } catch (e) {}
+            try { this._observer.disconnect(); } catch (e) { }
             this._observer = null;
         }
         var targetNode = (typeof document !== 'undefined' && (document.body || document.documentElement)) || null;
@@ -2360,11 +2319,11 @@ SafetyController.prototype.getStatus = function() {
         var self2 = this;
         try {
             if (typeof MutationObserver !== 'undefined' && targetNode) {
-                this._observer = new MutationObserver(function() {
+                this._observer = new MutationObserver(function () {
                     self2._checkNewLeadsBanner();
                     if (self2._scanPending) return;
                     self2._scanPending = true;
-                    setTimeout(function() {
+                    setTimeout(function () {
                         self2._scanPending = false;
                         self2._scan();
                     }, self2._debounceMs);
@@ -2376,9 +2335,9 @@ SafetyController.prototype.getStatus = function() {
                     attributeFilter: ['data-sold', 'class', 'style', 'id']
                 });
             }
-        } catch (e) {}
+        } catch (e) { }
     };
-    Scanner.prototype.startWatching = function(cb) {
+    Scanner.prototype.startWatching = function (cb) {
         if (this._running) return;
         this._callback = cb;
         this._running = true;
@@ -2387,7 +2346,7 @@ SafetyController.prototype.getStatus = function() {
         this._setupObserver();
 
         // Secondary reconciliation fallback: 500ms (sub-second pickup for newly arriving leads)
-        this._scanTimer = setInterval(function() {
+        this._scanTimer = setInterval(function () {
             if (self2._targetNode && !document.contains(self2._targetNode)) {
                 self2.logger.info('🔄 Target node replaced — reattaching observer');
                 self2._setupObserver();
@@ -2396,12 +2355,15 @@ SafetyController.prototype.getStatus = function() {
         }, this._reconciliationFallbackMs);
 
         this.logger.info('✅ Real-time event-driven scanner started (MutationObserver primary, 500ms reconciliation fallback)');
-        setTimeout(function() { self2._scan(); }, 50);
+        // Remove the 50ms initial scan — _startLoop fires _scan() via tryCards()
+        // at 0-100ms already. The immediate duplicate here is the source of
+        // the triple-scan problem.
+        // setTimeout(function() { self2._scan(); }, 50);  <-- REMOVED
     };
-    Scanner.prototype.stopWatching = function() {
+    Scanner.prototype.stopWatching = function () {
         this._running = false;
         if (this._observer) {
-            try { this._observer.disconnect(); } catch (e) {}
+            try { this._observer.disconnect(); } catch (e) { }
             this._observer = null;
         }
         if (this._scanTimer) {
@@ -2409,11 +2371,14 @@ SafetyController.prototype.getStatus = function() {
             this._scanTimer = null;
         }
     };
-    Scanner.prototype._scan = function() {
+    Scanner.prototype._scan = function () {
         if (this._scanning || !this._running) return false;
         if (this.orchestrator && this.orchestrator.keywordManager && this.orchestrator.keywordManager.getActiveFilterCount() === 0) {
             return false;
         }
+        // Abort scan immediately if IndiaMART rate-limit warning is visible on the page.
+        if (this._checkRateLimitWarning()) return false;
+
         this._scanning = true;
         try {
             // Auto-detect and click any "New Leads Available" banner to bring dynamic leads into portal DOM
@@ -2424,8 +2389,8 @@ SafetyController.prototype.getStatus = function() {
                 'div[id*="id_BLCard"], [class*="BLCard"], [class*="bl_card"], div[id*="BLCard"], ' +
                 'div[id*="BLbp"], [class*="bl-card"], [class*="listing_card"]'
             );
-            // Strict top-7 window: only evaluate and scan newest 7 leads in feed order
-            var cards = Array.prototype.slice.call(allCards, 0, 7);
+            // Limit to MAX_LEADS_PER_CYCLE — no scrolling to reveal more.
+            var cards = Array.prototype.slice.call(allCards, 0, MAX_LEADS_PER_CYCLE);
             var currentIds = {};
             var newCards = [];
             var idGen = this._idGen;
@@ -2433,7 +2398,19 @@ SafetyController.prototype.getStatus = function() {
             for (var i = 0; i < cards.length; i++) {
                 var el = cards[i];
                 var id = idGen.generateFromElement(el);
-                if (!id) continue;
+                if (!id) {
+                    // Card DOM exists but text content not yet rendered.
+                    // Schedule a quick re-scan so we don't permanently skip this card.
+                    if (!this._emptyCardRescanScheduled) {
+                        this._emptyCardRescanScheduled = true;
+                        var self3 = this;
+                        setTimeout(function () {
+                            self3._emptyCardRescanScheduled = false;
+                            if (self3._running) self3._scan();
+                        }, 150);
+                    }
+                    continue;
+                }
                 currentIds[id] = 1;
                 if (!known[id]) { known[id] = Date.now(); newCards.push({ element: el, id: id }); }
                 else { known[id] = Date.now(); }
@@ -2444,14 +2421,44 @@ SafetyController.prototype.getStatus = function() {
                 if (age > 1800000) delete known[key];
             }
             if (newCards.length > 0) this._callback(newCards);
-        } catch (e) {}
+        } catch (e) { }
         this._scanning = false;
     };
-    Scanner.prototype.resetEmitted = function() {
-    this._knownLeads = {};
-    this.logger.info('🔄 Scanner emitted-cache cleared — next scan will re-emit all DOM cards');
-};
-    Scanner.prototype.getStatus = function() { return { running: this._running, knownLeads: Object.keys(this._knownLeads).length }; };
+
+    // Detect IndiaMART's account rate-limit warning.
+    // Scoped to a known container (not full body) for performance.
+    // Debounced: checked at most once every 5 seconds.
+    Scanner.prototype._checkRateLimitWarning = function () {
+        try {
+            var now = Date.now();
+            if (this._lastRateLimitCheck && (now - this._lastRateLimitCheck) < 5000) return false;
+            this._lastRateLimitCheck = now;
+
+            // Check only the main content area, not entire body (performance)
+            var container = document.querySelector(
+                '#bltxn_main, .BuyLdC_main, [class*="BuyLd_main"], [class*="bltxn"], main, #main-content'
+            ) || document.body;
+            if (!container) return false;
+            var text = container.innerText ? container.innerText.toLowerCase() : '';
+            if (!text) return false;
+
+            for (var p = 0; p < RATE_LIMIT_PHRASES.length; p++) {
+                if (text.indexOf(RATE_LIMIT_PHRASES[p]) !== -1) {
+                    this.logger.warn('🚫 IndiaMART rate-limit warning detected — stopping all automated activity');
+                    if (this.orchestrator && typeof this.orchestrator._onRateLimitDetected === 'function') {
+                        this.orchestrator._onRateLimitDetected();
+                    }
+                    return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    };
+    Scanner.prototype.resetEmitted = function () {
+        this._knownLeads = {};
+        this.logger.info('🔄 Scanner emitted-cache cleared — next scan will re-emit all DOM cards');
+    };
+    Scanner.prototype.getStatus = function () { return { running: this._running, knownLeads: Object.keys(this._knownLeads).length }; };
 
     // ============================================================
     // PARSER — v6.2: SEPARATE FIELDS, NO CONCATENATION
@@ -2464,7 +2471,7 @@ SafetyController.prototype.getStatus = function() {
             .trim() || null;
     }
 
-        function normalizeUnit(u) {
+    function normalizeUnit(u) {
         if (!u) return null;
         u = String(u).toLowerCase().trim();
         if (u === 'box' || u === 'boxes') return 'box';
@@ -2496,8 +2503,8 @@ SafetyController.prototype.getStatus = function() {
             for (var i = 0; i < items.length; i++) {
                 var label = items[i].querySelector('span.SLC_c0');
                 if (!label) continue;
-var labelText = (label.textContent || '').trim().toLowerCase();
-if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer filled details') {
+                var labelText = (label.textContent || '').trim().toLowerCase();
+                if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer filled details') {
                     var strong = items[i].querySelector('strong');
                     if (strong) {
                         var parsed = parseQuantityString(strong.textContent);
@@ -2505,7 +2512,7 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         return null;
     }
 
@@ -2518,19 +2525,19 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
 
     function Parser() { this.logger = new Logger('Parser'); }
 
-    Parser.prototype.parseCard = function(el, leadId) {
+    Parser.prototype.parseCard = function (el, leadId) {
         try {
             // --- PRODUCT NAME (robust selector chain) ---
             var productEl = el.querySelector('.BLbp_title')
-              || el.querySelector('[class*="BuyLdC"] span.SLC_f18')
-              || el.querySelector('[class*="BuyLdC"] .SLC_f18')
-              || el.querySelector('span.SLC_f18')
-              || el.querySelector('.SLC_f18')
-              || el.querySelector('[class*="BLbp_title" i]')
-              || el.querySelector('[class*="BLbp_head" i]')
-              || el.querySelector('[class*="prod_name" i], [class*="product_name" i]')
-              || el.querySelector('[class*="title" i]')
-              || el.querySelector('h2, h3, h4');
+                || el.querySelector('[class*="BuyLdC"] span.SLC_f18')
+                || el.querySelector('[class*="BuyLdC"] .SLC_f18')
+                || el.querySelector('span.SLC_f18')
+                || el.querySelector('.SLC_f18')
+                || el.querySelector('[class*="BLbp_title" i]')
+                || el.querySelector('[class*="BLbp_head" i]')
+                || el.querySelector('[class*="prod_name" i], [class*="product_name" i]')
+                || el.querySelector('[class*="title" i]')
+                || el.querySelector('h2, h3, h4');
             var productName = productEl ? productEl.textContent.trim() : '';
             if (!productName || productName.length < 2) {
                 var searchFallback = el.querySelector('.BLbp_desc em, [class*="BuyLdC_msg"] em');
@@ -2550,7 +2557,7 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
             }
 
             // --- LOCATION EXTRACTION (DOMESTIC + FOREIGN) ---
-            var isTimeText = function(txt) {
+            var isTimeText = function (txt) {
                 if (!txt) return false;
                 var t = txt.trim().toLowerCase();
                 return /\b(?:\d+\s*(?:sec|second|min|minute|hr|hour|day|wk|week|month|yr|year)s?\s*ago|today|yesterday|just\s*now|\d+\s*(?:am|pm))\b/i.test(t) || t.indexOf('ago') !== -1;
@@ -2594,12 +2601,12 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
                     }
                     if (!countryIso && flagImg.src) {
                         var srcMatch = flagImg.src.match(/\/([a-z]{2})_flag[_s]*\.png/i) ||
-                                       flagImg.src.match(/\/flags?\/([a-z]{2})\./i) ||
-                                       flagImg.src.match(/\/flags?[_-]([a-z]{2})\./i);
+                            flagImg.src.match(/\/flags?\/([a-z]{2})\./i) ||
+                            flagImg.src.match(/\/flags?[_-]([a-z]{2})\./i);
                         if (srcMatch) countryIso = srcMatch[1].toUpperCase();
                     }
                 }
-            } catch (e) {}
+            } catch (e) { }
 
             // 2) CSS Flag elements (e.g. <span class="flags flags_us">, <i class="flag flag-ae">)
             if (!countryIso) {
@@ -2610,7 +2617,7 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
                         var m = cls.match(/\bflag[s]?[_-]([a-z]{2})\b/i);
                         if (m) { countryIso = m[1].toUpperCase(); break; }
                     }
-                } catch (e) {}
+                } catch (e) { }
             }
 
             // 3) Comprehensive Country Name Mapping
@@ -2630,7 +2637,7 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
             };
 
             if (!countryIso && location) {
-                var segments = location.toLowerCase().split(',').map(function(s) { return s.trim(); });
+                var segments = location.toLowerCase().split(',').map(function (s) { return s.trim(); });
                 for (var s = 0; s < segments.length; s++) {
                     for (var name in countryMap) {
                         if (segments[s] === name) { countryIso = countryMap[name]; break; }
@@ -2670,23 +2677,63 @@ if (labelText === 'quantity' || labelText === 'qty' || labelText === 'buyer fill
             if (!contact.mobile && el.querySelector('[class*="mobile" i], [class*="phone" i], [class*="call" i], [title*="mobile" i], [title*="phone" i]')) contact.mobile = 'available';
             if (!contact.email && el.querySelector('[class*="email" i], [class*="mail" i], [title*="email" i]')) contact.email = 'available';
 
-            // --- MESSAGE TEXT (buyer's requirement only — NOT title) ---
+            // --- MESSAGE TEXT + BUYER DETAILS PANEL CONTENT ---
+            // Combines: (a) description/requirement text, (b) all span/td text from
+            // the Buyer Details panel ("Buys", "Requirements", "Engagement" rows).
+            // This ensures filter keywords match even when the medicine / product name
+            // is written inside the Buyer Details panel rather than the card title.
             var messageText = '';
-var msgEl = el.querySelector('.BLbp_desc')
-         || el.querySelector('[class*="BuyLdC_msg"]');
-if (msgEl) {
-    var emEl = msgEl.querySelector('em');
-    messageText = (emEl ? emEl.textContent : msgEl.textContent).trim();
-    // Strip "Buyer Searched for " prefix if present
-    messageText = messageText.replace(/^buyer\s+searched\s+for\s+/i, '').trim();
-}
+            var msgEl = el.querySelector('.BLbp_desc')
+                || el.querySelector('[class*="BuyLdC_msg"]');
+            if (msgEl) {
+                var emEl = msgEl.querySelector('em');
+                messageText = (emEl ? emEl.textContent : msgEl.textContent).trim();
+                // Strip "Buyer Searched for " prefix if present
+                messageText = messageText.replace(/^buyer\s+searched\s+for\s+/i, '').trim();
+            }
+            // ── Buyer Details panel (right-hand side table rows) ──────────────
+            // Selectors cover IndiaMART's BuyLdC_EngDetails / BuyLdC_BuyerDetails
+            // sections that list "Buys", "Requirements", "Engagement" etc.
+            try {
+                var detailPanels = el.querySelectorAll(
+                    '[class*="BuyLdC_EngDtls"], [class*="BuyLdC_ByrDtl"], ' +
+                    '[class*="BuyLdC_EngDetails"], [class*="BuyLdC_BuyerDetail"], ' +
+                    '[class*="BuyLdC_Eng"], [class*="BLbp_engDetails"], ' +
+                    '[class*="BLbp_byr"], [class*="BLbp_byrDtl"], ' +
+                    '[class*="BLbp_buyerDetail"], [class*="byr_detail"], ' +
+                    '[class*="buyer_detail"], [class*="BLbp_rightPanel"]'
+                );
+                var panelTexts = [];
+                for (var dp = 0; dp < detailPanels.length; dp++) {
+                    var pt = (detailPanels[dp].textContent || '').trim();
+                    if (pt && panelTexts.indexOf(pt) === -1) panelTexts.push(pt);
+                }
+                // Also grab every span/td value on the right half of the card
+                // that is NOT part of a location/time block
+                var allSpans = el.querySelectorAll(
+                    '[class*="BuyLdC_"] span, [class*="BLbp_"] span, ' +
+                    '[class*="SLC_"] span, td span'
+                );
+                for (var sp = 0; sp < allSpans.length; sp++) {
+                    var spanTxt = (allSpans[sp].textContent || '').trim();
+                    if (!spanTxt || spanTxt.length < 2) continue;
+                    // Skip time strings and very short tokens
+                    if (/^\d+\s*(sec|min|hr|day|wk|month|yr)s?\s*ago$/i.test(spanTxt)) continue;
+                    if (panelTexts.indexOf(spanTxt) === -1) panelTexts.push(spanTxt);
+                }
+                if (panelTexts.length > 0) {
+                    var combined = panelTexts.join(' ');
+                    // Only extend messageText — don't replace it
+                    messageText = messageText ? messageText + ' ' + combined : combined;
+                }
+            } catch (e) { }
 
             // --- CATEGORY (informational, never matched against) ---
-           var mcatEl = el.querySelector('[class*="BuyLdC_Mcat"]')
-          || el.querySelector('[class*="BuyLdC_mcat"]')
-          || el.querySelector('[class*="mcat"]')
-          || el.querySelector('[class*="Mcat"]');
-var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
+            var mcatEl = el.querySelector('[class*="BuyLdC_Mcat"]')
+                || el.querySelector('[class*="BuyLdC_mcat"]')
+                || el.querySelector('[class*="mcat"]')
+                || el.querySelector('[class*="Mcat"]');
+            var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
             // Optional contact detail extraction (mobile numbers, emails)
             var senderMobile = null, senderEmail = null;
@@ -2695,7 +2742,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (textNodes && textNodes.length) senderMobile = textNodes[0].replace(/\s+/g, '');
                 var emails = el.textContent.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
                 if (emails && emails.length) senderEmail = emails[0];
-            } catch (e) {}
+            } catch (e) { }
             if (senderMobile && !contact.mobile) contact.mobile = 'available';
             if (senderEmail && !contact.email) contact.email = 'available';
 
@@ -2709,9 +2756,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             // Build unique lead ID distinguishing seller, product, location, quantity & requirement
             // Ensures multiple leads for the exact same product from different sellers are NOT treated as duplicates
             var queryIdPart = (leadId && leadId.indexOf('hash_') === -1) ? leadId : '';
-            var sellerPart  = (senderName || senderMobile || senderEmail || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
-            var prodPart    = (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40);
-            var locPart     = (location || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            var sellerPart = (senderName || senderMobile || senderEmail || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
+            var prodPart = (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40);
+            var locPart = (location || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
             var qtyStr = '';
             if (quantity && typeof quantity === 'object') {
                 qtyStr = String(quantity.min || '') + (quantity.unit ? '_' + quantity.unit : '');
@@ -2754,7 +2801,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 mcatName: mcatName || null,
                 queryMcatName: mcatName || null,
 
-                               location: location,
+                location: location,
                 city: location ? location.split(',')[0].trim() : null,
                 state: location ? location.split(',').pop().trim() : null,
                 countryIso: countryIso,
@@ -2775,11 +2822,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     };
 
-    Parser.prototype.normalize = function(lead) {
+    Parser.prototype.normalize = function (lead) {
         if (!lead) return null;
         lead.productName = (lead.productName || '').toLowerCase();
-        lead.state       = (lead.state || '').toLowerCase();
-        lead.city        = (lead.city || '').toLowerCase();
+        lead.state = (lead.state || '').toLowerCase();
+        lead.city = (lead.city || '').toLowerCase();
         return lead;
     };
 
@@ -2797,17 +2844,17 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._purchaseAction = 'close';
         this._timeout = 15000;
     }
-    ActionAdapter.prototype.setDryRun            = function(v) { this._dryRun = v; };
-    ActionAdapter.prototype.setAutoMinimize      = function(v) { this._autoMinimize = v; };
-    ActionAdapter.prototype.setConfirmationAnswer= function(v) { this._confirmationAnswer = v; };
-    ActionAdapter.prototype.setPurchaseAction    = function(v) { this._purchaseAction = v; };
-    ActionAdapter.prototype.setPopupTimeout      = function(v) { this._timeout = v; };
+    ActionAdapter.prototype.setDryRun = function (v) { this._dryRun = v; };
+    ActionAdapter.prototype.setAutoMinimize = function (v) { this._autoMinimize = v; };
+    ActionAdapter.prototype.setConfirmationAnswer = function (v) { this._confirmationAnswer = v; };
+    ActionAdapter.prototype.setPurchaseAction = function (v) { this._purchaseAction = v; };
+    ActionAdapter.prototype.setPopupTimeout = function (v) { this._timeout = v; };
 
     function simulateClick(el) {
         if (!el) return false;
         try {
             if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        } catch (e) {}
+        } catch (e) { }
         try {
             if (el.disabled || el.getAttribute('aria-disabled') === 'true' ||
                 (el.classList && el.classList.contains('disabled'))) return false;
@@ -2820,13 +2867,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 clientX: cx, clientY: cy, screenX: cx, screenY: cy, buttons: 1
             };
             // Prime portal pointer handlers, then use the browser activation path once.
-            try { el.dispatchEvent(new PointerEvent('pointerdown', eventOpts)); } catch (e) {}
-            try { el.dispatchEvent(new MouseEvent('mousedown', eventOpts)); } catch (e) {}
-            try { if (typeof el.focus === 'function') el.focus(); } catch (e) {}
-            try { el.dispatchEvent(new PointerEvent('pointerup', eventOpts)); } catch (e) {}
-            try { el.dispatchEvent(new MouseEvent('mouseup', eventOpts)); } catch (e) {}
+            try { el.dispatchEvent(new PointerEvent('pointerdown', eventOpts)); } catch (e) { }
+            try { el.dispatchEvent(new MouseEvent('mousedown', eventOpts)); } catch (e) { }
+            try { if (typeof el.focus === 'function') el.focus(); } catch (e) { }
+            try { el.dispatchEvent(new PointerEvent('pointerup', eventOpts)); } catch (e) { }
+            try { el.dispatchEvent(new MouseEvent('mouseup', eventOpts)); } catch (e) { }
             if (typeof el.click === 'function') {
-                try { el.click(); } catch (e) {}
+                try { el.click(); } catch (e) { }
             }
             return true;
         } catch (e) {
@@ -2834,231 +2881,306 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     }
 
-    ActionAdapter.prototype.acquire = function(lead) {
+    ActionAdapter.prototype.acquire = function (lead) {
         var self = this;
         var log = this.logger;
-        return new Promise(function(resolve) {
+        return new Promise(function (resolve) {
             if (self._dryRun) { resolve({ success: false, simulated: true, message: 'DRY_RUN' }); return; }
-            if (!lead.raw || !lead.raw.element) { resolve({ success: false, message: 'No element' }); return; }
             if (self._clicked[lead.leadId]) { resolve({ success: false, message: 'Already clicked' }); return; }
 
-            try {
-                var el = lead.raw.element;
-                var button = null;
-                var buttons = el.querySelectorAll('button, a, [role="button"], [class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], [class*="btn"], [class*="contact" i]');
-                for (var i = 0; i < buttons.length; i++) {
-                    var t = (buttons[i].textContent || buttons[i].value || '').trim().toLowerCase();
-                    if (t.indexOf('contact buyer') !== -1 || t.indexOf('contact now') !== -1 ||
-                        t.indexOf('connect with buyer') !== -1 || t.indexOf('send enquiry') !== -1 ||
-                        t.indexOf('view contact') !== -1 || t.indexOf('reply now') !== -1) {
-                        button = buttons[i];
-                        break;
-                    }
+            // ── Network-intercepted leads have no DOM element yet ──
+            // Fast-poll every 15ms for the card to appear, then proceed.
+            function findElementAndProceed(el) {
+                if (el) {
+                    doAcquire(el);
+                    return;
                 }
-                if (!button) {
-                    for (var j = 0; j < buttons.length; j++) {
-                        var t2 = (buttons[j].textContent || buttons[j].value || '').trim().toLowerCase();
-                        if (t2.indexOf('contact') !== -1 || t2.indexOf('connect') !== -1 || t2.indexOf('enquiry') !== -1 || t2.indexOf('reply') !== -1) {
-                            button = buttons[j];
+                // Lead came from network intercept — wait for DOM card to render
+                var uqid = lead.uniqueQueryId || '';
+                var pollStart = Date.now();
+                var MAX_POLL_MS = 3000; // max 3s wait for DOM
+                var pollInterval = setInterval(function () {
+                    // Try to find the card by data attributes or href matching the query ID
+                    var found = null;
+                    if (uqid) {
+                        found = document.querySelector(
+                            '[data-lead-id="' + uqid + '"], ' +
+                            '[data-query-id="' + uqid + '"], ' +
+                            '[data-blid="' + uqid + '"]'
+                        );
+                        if (!found) {
+                            // Search through card links for query ID in href
+                            var cards = document.querySelectorAll(
+                                '[class*="BuyLdC_cont"], [class*="BLbp_card"], .BLbp_card, [class*="BuyLdC_Card"], ' +
+                                'div[id*="id_BLCard"], [class*="BLCard"]'
+                            );
+                            for (var ci = 0; ci < cards.length; ci++) {
+                                var cHtml = cards[ci].innerHTML || '';
+                                if (cHtml.indexOf(uqid) !== -1) {
+                                    found = cards[ci];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (found) {
+                        clearInterval(pollInterval);
+                        log.info('\u26a1 DOM card found for network lead in ' + (Date.now() - pollStart) + 'ms');
+                        doAcquire(found);
+                        return;
+                    }
+                    if (Date.now() - pollStart > MAX_POLL_MS) {
+                        clearInterval(pollInterval);
+                        // Last resort: click the first visible unacquired contact button on the page
+                        var fallbackBtns = document.querySelectorAll('button.BuyLdC_Cta, [class*="BuyLdC_Cta"], [class*="SLC_FillCTA"]');
+                        for (var fb = 0; fb < fallbackBtns.length; fb++) {
+                            var fbt = (fallbackBtns[fb].textContent || '').trim().toLowerCase();
+                            if (fbt.indexOf('contact') !== -1 && !fallbackBtns[fb].disabled) {
+                                var parentCard = fallbackBtns[fb].closest('[class*="BuyLdC_cont"], [class*="BLbp_card"], [class*="BuyLdC_Card"]');
+                                if (parentCard && !parentCard.hasAttribute('data-leadsync-acquired')) {
+                                    log.info('\u26a1 Fallback: using first unacquired card');
+                                    doAcquire(parentCard);
+                                    return;
+                                }
+                            }
+                        }
+                        resolve({ success: false, message: 'DOM card never appeared for network lead' });
+                    }
+                }, 15);
+            }
+
+            function doAcquire(el) {
+                try {
+                    var button = null;
+                    var buttons = el.querySelectorAll('button, a, [role="button"], [class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], [class*="btn"], [class*="contact" i]');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var t = (buttons[i].textContent || buttons[i].value || '').trim().toLowerCase();
+                        if (t.indexOf('contact buyer') !== -1 || t.indexOf('contact now') !== -1 ||
+                            t.indexOf('connect with buyer') !== -1 || t.indexOf('send enquiry') !== -1 ||
+                            t.indexOf('view contact') !== -1 || t.indexOf('reply now') !== -1) {
+                            button = buttons[i];
                             break;
                         }
                     }
-                }
-                if (!button) button = el.querySelector('[class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], button.BuyLdC_Cta, [class*="contact"]');
-                if (!button) { resolve({ success: false, message: 'No button' }); return; }
-
-                self._clicked[lead.leadId] = true;
-                simulateClick(button);
-                log.info('⚡ Clicked acquisition button', { leadId: lead.leadId });
-
-                var start = Date.now();
-                var maxTimeout = Math.max(3000, parseInt(self._timeout, 10) || 5000);
-                var interval = setInterval(function() {
-                    // Check if card button itself transitioned to contacted state in DOM
-                    var btnText = (button.textContent || button.value || '').trim().toLowerCase();
-                    var isCardContacted = button.hasAttribute('disabled') ||
-                        button.classList.contains('disabled') ||
-                        btnText.indexOf('contacted') !== -1 ||
-                        btnText.indexOf('already contact') !== -1 ||
-                        btnText.indexOf('enquiry sent') !== -1 ||
-                        btnText.indexOf('view contact') !== -1 ||
-                        btnText.indexOf('view number') !== -1;
-
-                    if (isCardContacted) {
-                        clearInterval(interval);
-                        if (el) {
-                            try {
-                                el.setAttribute('data-leadsync-acquired', 'true');
-                                el.classList.add('bl-acquired-card');
-                            } catch (e) {}
+                    if (!button) {
+                        for (var j = 0; j < buttons.length; j++) {
+                            var t2 = (buttons[j].textContent || buttons[j].value || '').trim().toLowerCase();
+                            if (t2.indexOf('contact') !== -1 || t2.indexOf('connect') !== -1 || t2.indexOf('enquiry') !== -1 || t2.indexOf('reply') !== -1) {
+                                button = buttons[j];
+                                break;
+                            }
                         }
-                        log.info('✅ Acquisition verified directly on card button', { leadId: lead.leadId, status: btnText });
-                        resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'card_updated', popup: { success: true } });
-                        return;
+                    }
+                    if (!button) button = el.querySelector('[class*="BuyLdC_btn"], [class*="SLC_FillCTA"], [class*="BuyLdC_Cta"], [class*="BuyLdC_cta"], button.BuyLdC_Cta, [class*="contact"]');
+                    if (!button) { resolve({ success: false, message: 'No button' }); return; }
+
+                    self._clicked[lead.leadId] = true;
+
+                    // Register in-flight lead on orchestrator so network-interceptor's ACQ
+                    // confirmation message can resolve this promise instantly (bot-speed path).
+                    if (self.orchestrator) {
+                        self.orchestrator._inFlightLead = lead;
+                        self.orchestrator._resolveInFlight = function (result) {
+                            if (interval) clearInterval(interval);
+                            resolve(result);
+                        };
                     }
 
-                    var popup = null;
-                    var candidates = document.querySelectorAll(
-                        '.SLC_PopCntr, [class*="SLC_PopCntr"], [class*="Cnt_blpack"], [role="dialog"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]'
-                    );
-                    for (var k = 0; k < candidates.length; k++) {
-                        var c = candidates[k];
-                        if (c.id && c.id.indexOf('bl-') === 0) continue;
-                        var r = c.getBoundingClientRect();
-                        if (r.width > 100 && r.height > 60) { popup = c; break; }
-                    }
+                    simulateClick(button);
+                    log.info('\u26a1 Clicked acquisition button', { leadId: lead.leadId });
 
-                    if (popup) {
-                        clearInterval(interval);
-                        log.info('⏱️ Popup dialog detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
-                        var text = (popup.textContent || '').toLowerCase();
-                        var isInsufficientBalance = text.indexOf('insufficient balance') !== -1 ||
-                            text.indexOf('buy points') !== -1 ||
-                            text.indexOf('recharge') !== -1 ||
-                            text.indexOf('balance exhausted') !== -1 ||
-                            text.indexOf('points required') !== -1 ||
-                            text.indexOf('purchase buylead') !== -1 ||
-                            text.indexOf("to view buyer's contact details") !== -1 ||
-                            text.indexOf('per buylead') !== -1 ||
-                            (text.indexOf('buy') !== -1 && text.indexOf('₹') !== -1);
-
-                        var isSubscriptionRequired = text.indexOf('subscription expired') !== -1 ||
-                            text.indexOf('missing subscription') !== -1 ||
-                            text.indexOf('renew subscription') !== -1 ||
-                            text.indexOf('upgrade plan') !== -1 ||
-                            text.indexOf('subscription required') !== -1 ||
-                            text.indexOf('no paid subscription') !== -1 ||
-                            text.indexOf('paid plan required') !== -1 ||
-                            text.indexOf('subscribe to access') !== -1;
-
-                        if (isInsufficientBalance || isSubscriptionRequired) {
-                            var code = isSubscriptionRequired ? 'SUBSCRIPTION_REQUIRED' : 'INSUFFICIENT_BALANCE';
-                            var msg = isSubscriptionRequired ? 'Subscription inactive or expired — renew subscription' : 'Insufficient BuyLead balance — recharge required';
-                            var closeBtn = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
-                            if (!closeBtn) {
-                                var allBtns = popup.querySelectorAll('button, span');
-                                for (var b = 0; b < allBtns.length; b++) {
-                                    var bt = (allBtns[b].textContent || '').trim();
-                                    if (bt === '×' || bt === '✕' || bt === 'X' || bt.toLowerCase() === 'close') { closeBtn = allBtns[b]; break; }
-                                }
-                            }
-                            if (closeBtn) { try { simulateClick(closeBtn); } catch(e) {} }
-                            document.body.style.overflow = '';
-                            log.warn('⚠️ Account limitation detected: ' + code, { leadId: lead.leadId });
-                            resolve({ success: false, code: code, action: 'account_blocked', message: msg });
-                            return;
-                        }
-
-                        // Check for requirement notes / message textarea in enquiry form and fill if empty
-                        var reqInput = popup.querySelector('textarea, input[type="text"][name*="msg"], input[type="text"][name*="enquiry"], input[type="text"][name*="requirement"], input[type="text"][placeholder*="requirement" i]');
-                        if (reqInput && (!reqInput.value || !reqInput.value.trim())) {
-                            try {
-                                reqInput.value = 'Interested in your requirement. Please share further details.';
-                                reqInput.dispatchEvent(new Event('input', { bubbles: true }));
-                                reqInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            } catch (e) {}
-                        }
-
-                        // PAID ACCOUNT / ENQUIRY POPUP / CONFIRMATION PROMPTS: look for affirmative contact/send/proceed button
-                        var actionBtns = popup.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a[role="button"], a[class*="btn"], div[class*="btn"], span[class*="btn"], [class*="submit"], [class*="send"], [class*="cta"], [class*="Cta"], [class*="SLC_FillCTA"], [class*="contact"]');
-                        var sendBtn = null;
-                        var affirmativePhrases = [
-                            'contact buyer', 'contact now', 'connect with buyer', 'connect buyer', 'contact',
-                            'send enquiry', 'send reply', 'send message', 'send quotation', 'send now', 'send',
-                            'submit enquiry', 'submit requirement', 'submit',
-                            'proceed', 'confirm', 'continue', 'accept', 'yes', 'ok', 'reply'
-                        ];
-
-                        for (var cb = 0; cb < actionBtns.length; cb++) {
-                            var btnEl = actionBtns[cb];
-                            var ct = (btnEl.textContent || btnEl.value || '').trim().toLowerCase();
-                            if (ct === '×' || ct === '✕' || ct === 'x' || ct === 'close' || ct === 'cancel' || ct === 'dismiss' || ct === 'no' || ct === 'skip') {
-                                continue;
-                            }
-                            for (var ap = 0; ap < affirmativePhrases.length; ap++) {
-                                if (ct === affirmativePhrases[ap] || ct.indexOf(affirmativePhrases[ap]) !== -1) {
-                                    sendBtn = btnEl;
-                                    break;
-                                }
-                            }
-                            if (sendBtn) break;
-                        }
-
-                        // Fallback to primary CTA if button doesn't have exact keywords
-                        if (!sendBtn) {
-                            for (var fb = 0; fb < actionBtns.length; fb++) {
-                                var bEl = actionBtns[fb];
-                                var bText = (bEl.textContent || bEl.value || '').trim().toLowerCase();
-                                if (bText === '×' || bText === '✕' || bText === 'x' || bText === 'close' || bText === 'cancel' || bText === 'dismiss' || bText === 'no') continue;
-                                if (bEl.classList.contains('SLC_FillCTA') || bEl.classList.contains('btn-primary') || bEl.getAttribute('type') === 'submit') {
-                                    sendBtn = bEl;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (sendBtn) {
-                            try { simulateClick(sendBtn); } catch(e) {}
-                            log.info('⚡ Clicked affirmative action in prompt: ' + ((sendBtn.textContent || sendBtn.value || '').trim()), { leadId: lead.leadId });
-                            if (el) {
-                                try {
-                                    el.setAttribute('data-leadsync-acquired', 'true');
-                                    el.classList.add('bl-acquired-card');
-                                } catch (e) {}
-                            }
-                            setTimeout(function() {
-                                // Close lingering modal or overlay if still in DOM
-                                try {
-                                    var lingeringClose = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"]');
-                                    if (lingeringClose) simulateClick(lingeringClose);
-                                } catch (e) {}
-                                document.body.style.overflow = '';
-                                resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'sent', popup: { success: true } });
-                            }, 150);
-                            return;
-                        }
-
-                        // Close secondary non-actionable prompt
-                        var closeBtn2 = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
-                        if (closeBtn2) {
-                            try { simulateClick(closeBtn2); } catch(e) {}
-                        } else {
-                            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch(e) {}
-                        }
-                        document.body.style.overflow = '';
-                        resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'confirmed', popup: { success: true } });
-                        return;
-                    }
-
-                    // Timeout condition: check if card verified; if not, return failure (no fake success)
-                    if (Date.now() - start > maxTimeout) {
-                        clearInterval(interval);
-                        var finalBtnText = (button.textContent || button.value || '').trim().toLowerCase();
-                        var finalVerified = button.hasAttribute('disabled') ||
+                    var start = Date.now();
+                    var maxTimeout = Math.max(3000, parseInt(self._timeout, 10) || 5000);
+                    var interval = setInterval(function () {
+                        // Check if card button itself transitioned to contacted state in DOM
+                        var btnText = (button.textContent || button.value || '').trim().toLowerCase();
+                        var isCardContacted = button.hasAttribute('disabled') ||
                             button.classList.contains('disabled') ||
-                            finalBtnText.indexOf('contacted') !== -1 ||
-                            finalBtnText.indexOf('already contact') !== -1 ||
-                            finalBtnText.indexOf('enquiry sent') !== -1 ||
-                            finalBtnText.indexOf('view contact') !== -1 ||
-                            finalBtnText.indexOf('view number') !== -1;
+                            btnText.indexOf('contacted') !== -1 ||
+                            btnText.indexOf('already contact') !== -1 ||
+                            btnText.indexOf('enquiry sent') !== -1 ||
+                            btnText.indexOf('view contact') !== -1 ||
+                            btnText.indexOf('view number') !== -1;
 
-                        if (finalVerified) {
+                        if (isCardContacted) {
+                            clearInterval(interval);
                             if (el) {
                                 try {
                                     el.setAttribute('data-leadsync-acquired', 'true');
                                     el.classList.add('bl-acquired-card');
-                                } catch (e) {}
+                                } catch (e) { }
                             }
+                            log.info('✅ Acquisition verified directly on card button', { leadId: lead.leadId, status: btnText });
                             resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'card_updated', popup: { success: true } });
-                        } else {
-                            resolve({ success: false, action: 'timeout_no_confirmation', message: 'No confirmation or popup response received' });
+                            return;
                         }
-                    }
-                }, 25);
 
-            } catch (err) {
-                resolve({ success: false, message: err && err.message ? err.message : String(err) });
-            }
+                        var popup = null;
+                        var candidates = document.querySelectorAll(
+                            '.SLC_PopCntr, [class*="SLC_PopCntr"], [class*="Cnt_blpack"], [role="dialog"], [class*="modal"], [class*="Modal"], [class*="popup"], [class*="Popup"]'
+                        );
+                        for (var k = 0; k < candidates.length; k++) {
+                            var c = candidates[k];
+                            if (c.id && c.id.indexOf('bl-') === 0) continue;
+                            var r = c.getBoundingClientRect();
+                            if (r.width > 100 && r.height > 60) { popup = c; break; }
+                        }
+
+                        if (popup) {
+                            clearInterval(interval);
+                            log.info('⏱️ Popup dialog detected in ' + (Date.now() - start) + 'ms', { leadId: lead.leadId });
+                            var text = (popup.textContent || '').toLowerCase();
+                            var isInsufficientBalance = text.indexOf('insufficient balance') !== -1 ||
+                                text.indexOf('buy points') !== -1 ||
+                                text.indexOf('recharge') !== -1 ||
+                                text.indexOf('balance exhausted') !== -1 ||
+                                text.indexOf('points required') !== -1 ||
+                                text.indexOf('purchase buylead') !== -1 ||
+                                text.indexOf("to view buyer's contact details") !== -1 ||
+                                text.indexOf('per buylead') !== -1 ||
+                                (text.indexOf('buy') !== -1 && text.indexOf('₹') !== -1);
+
+                            var isSubscriptionRequired = text.indexOf('subscription expired') !== -1 ||
+                                text.indexOf('missing subscription') !== -1 ||
+                                text.indexOf('renew subscription') !== -1 ||
+                                text.indexOf('upgrade plan') !== -1 ||
+                                text.indexOf('subscription required') !== -1 ||
+                                text.indexOf('no paid subscription') !== -1 ||
+                                text.indexOf('paid plan required') !== -1 ||
+                                text.indexOf('subscribe to access') !== -1;
+
+                            if (isInsufficientBalance || isSubscriptionRequired) {
+                                var code = isSubscriptionRequired ? 'SUBSCRIPTION_REQUIRED' : 'INSUFFICIENT_BALANCE';
+                                var msg = isSubscriptionRequired ? 'Subscription inactive or expired — renew subscription' : 'Insufficient BuyLead balance — recharge required';
+                                var closeBtn = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
+                                if (!closeBtn) {
+                                    var allBtns = popup.querySelectorAll('button, span');
+                                    for (var b = 0; b < allBtns.length; b++) {
+                                        var bt = (allBtns[b].textContent || '').trim();
+                                        if (bt === '×' || bt === '✕' || bt === 'X' || bt.toLowerCase() === 'close') { closeBtn = allBtns[b]; break; }
+                                    }
+                                }
+                                if (closeBtn) { try { simulateClick(closeBtn); } catch (e) { } }
+                                document.body.style.overflow = '';
+                                log.warn('⚠️ Account limitation detected: ' + code, { leadId: lead.leadId });
+                                resolve({ success: false, code: code, action: 'account_blocked', message: msg });
+                                return;
+                            }
+
+                            // Check for requirement notes / message textarea in enquiry form and fill if empty
+                            var reqInput = popup.querySelector('textarea, input[type="text"][name*="msg"], input[type="text"][name*="enquiry"], input[type="text"][name*="requirement"], input[type="text"][placeholder*="requirement" i]');
+                            if (reqInput && (!reqInput.value || !reqInput.value.trim())) {
+                                try {
+                                    reqInput.value = 'Interested in your requirement. Please share further details.';
+                                    reqInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                    reqInput.dispatchEvent(new Event('change', { bubbles: true }));
+                                } catch (e) { }
+                            }
+
+                            // PAID ACCOUNT / ENQUIRY POPUP / CONFIRMATION PROMPTS: look for affirmative contact/send/proceed button
+                            var actionBtns = popup.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a[role="button"], a[class*="btn"], div[class*="btn"], span[class*="btn"], [class*="submit"], [class*="send"], [class*="cta"], [class*="Cta"], [class*="SLC_FillCTA"], [class*="contact"]');
+                            var sendBtn = null;
+                            var affirmativePhrases = [
+                                'contact buyer', 'contact now', 'connect with buyer', 'connect buyer', 'contact',
+                                'send enquiry', 'send reply', 'send message', 'send quotation', 'send now', 'send',
+                                'submit enquiry', 'submit requirement', 'submit',
+                                'proceed', 'confirm', 'continue', 'accept', 'yes', 'ok', 'reply'
+                            ];
+
+                            for (var cb = 0; cb < actionBtns.length; cb++) {
+                                var btnEl = actionBtns[cb];
+                                var ct = (btnEl.textContent || btnEl.value || '').trim().toLowerCase();
+                                if (ct === '×' || ct === '✕' || ct === 'x' || ct === 'close' || ct === 'cancel' || ct === 'dismiss' || ct === 'no' || ct === 'skip') {
+                                    continue;
+                                }
+                                for (var ap = 0; ap < affirmativePhrases.length; ap++) {
+                                    if (ct === affirmativePhrases[ap] || ct.indexOf(affirmativePhrases[ap]) !== -1) {
+                                        sendBtn = btnEl;
+                                        break;
+                                    }
+                                }
+                                if (sendBtn) break;
+                            }
+
+                            // Fallback to primary CTA if button doesn't have exact keywords
+                            if (!sendBtn) {
+                                for (var fb = 0; fb < actionBtns.length; fb++) {
+                                    var bEl = actionBtns[fb];
+                                    var bText = (bEl.textContent || bEl.value || '').trim().toLowerCase();
+                                    if (bText === '×' || bText === '✕' || bText === 'x' || bText === 'close' || bText === 'cancel' || bText === 'dismiss' || bText === 'no') continue;
+                                    if (bEl.classList.contains('SLC_FillCTA') || bEl.classList.contains('btn-primary') || bEl.getAttribute('type') === 'submit') {
+                                        sendBtn = bEl;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (sendBtn) {
+                                try { simulateClick(sendBtn); } catch (e) { }
+                                log.info('⚡ Clicked affirmative action in prompt: ' + ((sendBtn.textContent || sendBtn.value || '').trim()), { leadId: lead.leadId });
+                                if (el) {
+                                    try {
+                                        el.setAttribute('data-leadsync-acquired', 'true');
+                                        el.classList.add('bl-acquired-card');
+                                    } catch (e) { }
+                                }
+                                setTimeout(function () {
+                                    try {
+                                        var lingeringClose = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"]');
+                                        if (lingeringClose) simulateClick(lingeringClose);
+                                    } catch (e) { }
+                                    document.body.style.overflow = '';
+                                    resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'sent', popup: { success: true } });
+                                }, 30);
+                                return;
+                            }
+
+                            // Close secondary non-actionable prompt
+                            var closeBtn2 = popup.querySelector('.SLC_pa.SLC_cp, [class*="SLC_pa"][class*="SLC_cp"], button[class*="close"], [aria-label="Close"], [class*="close"]');
+                            if (closeBtn2) {
+                                try { simulateClick(closeBtn2); } catch (e) { }
+                            } else {
+                                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch (e) { }
+                            }
+                            document.body.style.overflow = '';
+                            resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'confirmed', popup: { success: true } });
+                            return;
+                        }
+
+                        // Timeout condition: check if card verified; if not, return failure (no fake success)
+                        if (Date.now() - start > maxTimeout) {
+                            clearInterval(interval);
+                            var finalBtnText = (button.textContent || button.value || '').trim().toLowerCase();
+                            var finalVerified = button.hasAttribute('disabled') ||
+                                button.classList.contains('disabled') ||
+                                finalBtnText.indexOf('contacted') !== -1 ||
+                                finalBtnText.indexOf('already contact') !== -1 ||
+                                finalBtnText.indexOf('enquiry sent') !== -1 ||
+                                finalBtnText.indexOf('view contact') !== -1 ||
+                                finalBtnText.indexOf('view number') !== -1;
+
+                            if (finalVerified) {
+                                if (el) {
+                                    try {
+                                        el.setAttribute('data-leadsync-acquired', 'true');
+                                        el.classList.add('bl-acquired-card');
+                                    } catch (e) { }
+                                }
+                                resolve({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'card_updated', popup: { success: true } });
+                            } else {
+                                resolve({ success: false, action: 'timeout_no_confirmation', message: 'No confirmation or popup response received' });
+                            }
+                        }
+                    }, 25);
+
+                } catch (err) {
+                    resolve({ success: false, message: err && err.message ? err.message : String(err) });
+                }
+            } // end doAcquire
+
+            // Kick off: find or wait for the element
+            var startEl = (lead.raw && lead.raw.element) ? lead.raw.element : null;
+            findElementAndProceed(startEl);
         });
     };
 
@@ -3078,22 +3200,22 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this.preferredStates = ['maharashtra'];
         this.preferredCountries = ['IN'];
     }
-    LeadScorer.prototype.setWeights = function(weights) {
+    LeadScorer.prototype.setWeights = function (weights) {
         if (!weights) return;
         for (var k in weights) if (weights.hasOwnProperty(k) && this.weights.hasOwnProperty(k)) this.weights[k] = weights[k];
     };
-    LeadScorer.prototype.setPenalties = function(penalties) {
+    LeadScorer.prototype.setPenalties = function (penalties) {
         if (!penalties) return;
         for (var k in penalties) if (penalties.hasOwnProperty(k) && this.penalties.hasOwnProperty(k)) this.penalties[k] = penalties[k];
     };
-    LeadScorer.prototype.setPreferredStates = function(states) {
-        if (Array.isArray(states)) this.preferredStates = states.map(function(s) { return String(s).toLowerCase().trim(); });
+    LeadScorer.prototype.setPreferredStates = function (states) {
+        if (Array.isArray(states)) this.preferredStates = states.map(function (s) { return String(s).toLowerCase().trim(); });
     };
-    LeadScorer.prototype.setPreferredCountries = function(countries) {
-        if (Array.isArray(countries)) this.preferredCountries = countries.map(function(c) { return String(c).toUpperCase().trim(); });
+    LeadScorer.prototype.setPreferredCountries = function (countries) {
+        if (Array.isArray(countries)) this.preferredCountries = countries.map(function (c) { return String(c).toUpperCase().trim(); });
     };
 
-    LeadScorer.prototype.scoreLead = function(lead, matchRes) {
+    LeadScorer.prototype.scoreLead = function (lead, matchRes) {
         var score = this.weights.base;
         var reasons = [];
 
@@ -3147,7 +3269,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var hasContact = false;
         if (lead.contact) {
             if (lead.contact.mobile) { score += this.weights.hasMobile; hasContact = true; reasons.push('mobile+' + this.weights.hasMobile); }
-            if (lead.contact.email)  { score += this.weights.hasEmail;  hasContact = true; reasons.push('email+' + this.weights.hasEmail); }
+            if (lead.contact.email) { score += this.weights.hasEmail; hasContact = true; reasons.push('email+' + this.weights.hasEmail); }
             if (lead.contact.phone && !lead.contact.mobile) { score += this.weights.hasPhone; hasContact = true; reasons.push('phone+' + this.weights.hasPhone); }
         }
         if (!hasContact) {
@@ -3164,8 +3286,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return { score: score, eligible: score >= this.minimumScore, reasons: reasons };
     };
 
-    LeadScorer.prototype.isEligible       = function(r) { return r.eligible; };
-    LeadScorer.prototype.setMinimumScore  = function(s) { this.minimumScore = s; };
+    LeadScorer.prototype.isEligible = function (r) { return r.eligible; };
+    LeadScorer.prototype.setMinimumScore = function (s) { this.minimumScore = s; };
 
     // ============================================================
     // CENTRALIZED PERFORMANCE METRICS SERVICE (v6.3 - GRAVITAS)
@@ -3185,7 +3307,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._sampleLimit = 20;
     }
 
-    PerformanceMetrics.prototype.resetCycle = function(cycleId) {
+    PerformanceMetrics.prototype.resetCycle = function (cycleId) {
         this._currentCycleId = cycleId || ('cycle_' + Date.now());
         this._acquisitions = [];
         this._attempts = 0;
@@ -3196,22 +3318,22 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._completedSuccesses = 0;
     };
 
-    PerformanceMetrics.prototype.recordLeadAttemptCompleted = function(leadId, success) {
+    PerformanceMetrics.prototype.recordLeadAttemptCompleted = function (leadId, success) {
         this._completedAttempts = (this._completedAttempts || 0) + 1;
         if (success) {
             this._completedSuccesses = (this._completedSuccesses || 0) + 1;
         }
     };
 
-    PerformanceMetrics.prototype.setActiveFiltersCount = function(count) {
+    PerformanceMetrics.prototype.setActiveFiltersCount = function (count) {
         this._activeFiltersCount = Math.max(0, parseInt(count, 10) || 0);
     };
 
-    PerformanceMetrics.prototype.getActiveFiltersCount = function() {
+    PerformanceMetrics.prototype.getActiveFiltersCount = function () {
         return this._activeFiltersCount;
     };
 
-    PerformanceMetrics.prototype.recordDetection = function(leadId, timestamp) {
+    PerformanceMetrics.prototype.recordDetection = function (leadId, timestamp) {
         if (!leadId) return;
         var t = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
         if (!this._detections.has(leadId)) {
@@ -3219,17 +3341,17 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     };
 
-    PerformanceMetrics.prototype.recordMatch = function(leadId, timestamp) {
+    PerformanceMetrics.prototype.recordMatch = function (leadId, timestamp) {
         if (!leadId) return;
         var t = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
         this._matches.set(leadId, t);
     };
 
-    PerformanceMetrics.prototype.recordAcquisitionAttempt = function(leadId) {
+    PerformanceMetrics.prototype.recordAcquisitionAttempt = function (leadId) {
         this._attempts++;
     };
 
-    PerformanceMetrics.prototype.recordAcquisitionSuccess = function(leadId, timestamp) {
+    PerformanceMetrics.prototype.recordAcquisitionSuccess = function (leadId, timestamp) {
         var now = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
         var detectedAt = this._detections.get(leadId) || (this._matches ? this._matches.get(leadId) : null);
         var durationMs = detectedAt ? Math.max(0, now - detectedAt) : (this._lastDurationMs || 450);
@@ -3247,12 +3369,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._detections.delete(leadId);
     };
 
-    PerformanceMetrics.prototype.recordAcquisitionFailure = function(leadId, reason) {
+    PerformanceMetrics.prototype.recordAcquisitionFailure = function (leadId, reason) {
         this._failedAttempts++;
         this._detections.delete(leadId);
     };
 
-    PerformanceMetrics.prototype.recordContactSuccess = function(leadId, timestamp) {
+    PerformanceMetrics.prototype.recordContactSuccess = function (leadId, timestamp) {
         var now = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
         var matchedAt = this._matches.get(leadId) || now;
         var durationMs = Math.max(0, now - matchedAt);
@@ -3266,12 +3388,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._matches.delete(leadId);
     };
 
-    PerformanceMetrics.prototype.recordContactFailure = function(leadId, reason) {
+    PerformanceMetrics.prototype.recordContactFailure = function (leadId, reason) {
         this._failedContacts++;
         this._matches.delete(leadId);
     };
 
-    PerformanceMetrics.prototype.getSpeedPerAcquisition = function() {
+    PerformanceMetrics.prototype.getSpeedPerAcquisition = function () {
         if (this._acquisitions.length === 0) {
             return {
                 hasData: false,
@@ -3309,7 +3431,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
-    PerformanceMetrics.prototype.getAcceptanceRate = function() {
+    PerformanceMetrics.prototype.getAcceptanceRate = function () {
         var totalAttempts = this._completedAttempts || this._attempts;
         if (totalAttempts === 0) {
             return {
@@ -3339,7 +3461,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
-    PerformanceMetrics.prototype.getSummary = function() {
+    PerformanceMetrics.prototype.getSummary = function () {
         var speed = this.getSpeedPerAcquisition();
         var acc = this.getAcceptanceRate();
         return {
@@ -3354,7 +3476,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
-    PerformanceMetrics.prototype.exportState = function() {
+    PerformanceMetrics.prototype.exportState = function () {
         return {
             acquisitions: this._acquisitions ? this._acquisitions.slice(-50) : [],
             contacts: this._contacts ? this._contacts.slice(-50) : [],
@@ -3368,7 +3490,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
-    PerformanceMetrics.prototype.importState = function(state) {
+    PerformanceMetrics.prototype.importState = function (state) {
         if (!state || typeof state !== 'object') return;
         if (Array.isArray(state.acquisitions)) this._acquisitions = state.acquisitions;
         if (Array.isArray(state.contacts)) this._contacts = state.contacts;
@@ -3416,12 +3538,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._inFlight = new Set();
     }
 
-    LeadLifecycleManager.prototype.getState = function(leadId) {
+    LeadLifecycleManager.prototype.getState = function (leadId) {
         var entry = this._states.get(leadId);
         return entry ? entry.state : null;
     };
 
-    LeadLifecycleManager.prototype.transition = function(leadId, newState, meta) {
+    LeadLifecycleManager.prototype.transition = function (leadId, newState, meta) {
         if (!leadId) return { ok: false, error: 'missing_lead_id' };
         if (!LEAD_STATES[newState]) return { ok: false, error: 'invalid_target_state: ' + newState };
 
@@ -3465,13 +3587,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return { ok: true, previousState: currentState, currentState: newState };
     };
 
-    LeadLifecycleManager.prototype.isInFlight = function(leadId) {
+    LeadLifecycleManager.prototype.isInFlight = function (leadId) {
         return this._inFlight.has(leadId);
     };
 
-    LeadLifecycleManager.prototype.getSummary = function() {
+    LeadLifecycleManager.prototype.getSummary = function () {
         var counts = {};
-        this._states.forEach(function(val) {
+        this._states.forEach(function (val) {
             counts[val.state] = (counts[val.state] || 0) + 1;
         });
         return {
@@ -3489,11 +3611,144 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     };
 
     // ============================================================
+    // ACQ API CALLER — Direct bot-speed API acquisition
+    // ============================================================
+    // Stores the URL/body template captured from the first real acquisition
+    // and replicates it directly via fetch() for subsequent pre-approved leads.
+    // Uses real session cookies (credentials:'include') — indistinguishable from
+    // IndiaMART's own page JS on the wire.
+    function AcqApiCaller() {
+        this._template = null;
+        this._STORAGE_KEY = 'leadsync_acq_template_v1';
+        // Auto-load persisted template from previous session
+        this._loadFromStorage();
+    }
+
+    // Load persisted template from chrome.storage.local (survives reloads + restarts)
+    AcqApiCaller.prototype._loadFromStorage = function () {
+        var self = this;
+        try {
+            chrome.storage.local.get([this._STORAGE_KEY], function (res) {
+                var stored = res && res[self._STORAGE_KEY];
+                if (stored && stored.url && !self._template) {
+                    // Validate: must be an IndiaMART URL
+                    if (stored.url.indexOf('indiamart.com') !== -1 || stored.url.indexOf('seller.') !== -1) {
+                        self._template = stored;
+                        console.log('[LeadSync] AcqApiCaller: template restored from storage:', stored.url);
+                    }
+                }
+            });
+        } catch (e) {}
+    };
+
+    // Persist template to chrome.storage.local after first capture
+    AcqApiCaller.prototype._saveToStorage = function () {
+        if (!this._template) return;
+        try {
+            var payload = {};
+            payload[this._STORAGE_KEY] = this._template;
+            chrome.storage.local.set(payload);
+        } catch (e) {}
+    };
+
+    AcqApiCaller.prototype.hasTemplate = function () {
+        return !!this._template;
+    };
+
+    AcqApiCaller.prototype.storeTemplate = function (msg) {
+        if (this._template) return; // keep first capture only
+        if (!msg.url) return;
+        this._template = {
+            url:         msg.url,
+            method:      (msg.method || 'POST').toUpperCase(),
+            body:        msg.body  || '',
+            contentType: msg.contentType || 'application/x-www-form-urlencoded',
+            capturedAt:  Date.now()
+        };
+        console.log('[LeadSync] AcqApiCaller: template captured + persisted:', msg.url);
+        // Persist so every future session uses direct API from lead #1
+        this._saveToStorage();
+    };
+
+    // Clear stored template (call if API starts failing — forces re-capture on next real click)
+    AcqApiCaller.prototype.clearTemplate = function () {
+        this._template = null;
+        try {
+            var clr = {};
+            clr[this._STORAGE_KEY] = null;
+            chrome.storage.local.remove(this._STORAGE_KEY);
+        } catch (e) {}
+        console.log('[LeadSync] AcqApiCaller: template cleared — will re-capture on next acquisition');
+    };
+
+    // Directly call IndiaMART's contact-buyer API with this lead's IDs.
+    // Uses credentials:'include' so real session cookies are sent automatically.
+    // Wire-level identical to IndiaMART's own page JS making the same call.
+    AcqApiCaller.prototype.call = function (lead) {
+        if (!this._template) return Promise.resolve({ success: false, reason: 'no_template' });
+
+        var tpl  = this._template;
+        var url  = tpl.url;
+        var body = tpl.body;
+
+        // All known IndiaMART lead ID field names
+        var replacements = [
+            ['uniqueQueryId', lead.uniqueQueryId || ''],
+            ['query_id',      lead.uniqueQueryId || ''],
+            ['queryId',       lead.uniqueQueryId || ''],
+            ['buyerId',       lead.buyerId || lead.buyer_id || ''],
+            ['buyer_id',      lead.buyerId || lead.buyer_id || ''],
+            ['glid',          lead.glid    || lead.leadId   || ''],
+            ['leadId',        lead.leadId  || '']
+        ];
+
+        for (var ri = 0; ri < replacements.length; ri++) {
+            var key = replacements[ri][0];
+            var val = replacements[ri][1];
+            if (!val) continue;
+            url  = url.replace(new RegExp('([?&]' + key + '=)[^&]*', 'gi'),  '$1' + encodeURIComponent(val));
+            body = body.replace(new RegExp('([?&]?' + key + '=)[^&]*', 'gi'), '$1' + encodeURIComponent(val));
+        }
+
+        var self = this;
+        var fetchOpts = {
+            method:      tpl.method,
+            credentials: 'include',  // real IndiaMART session cookies, auto-attached
+            headers: {
+                'Content-Type':     tpl.contentType || 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept':           'application/json, text/plain, */*'
+            }
+        };
+        if (tpl.method !== 'GET' && body) fetchOpts.body = body;
+
+        return fetch(url, fetchOpts)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var ok = data.CODE === '200' || data.CODE === 200
+                      || data.code === 200   || data.status === 'success'
+                      || data.success === true || data.STATUS === 'SUCCESS';
+                // If the API returns an auth/session error, clear template so it re-captures
+                if (!ok && (data.CODE === '401' || data.CODE === '403' ||
+                            data.code === 401  || data.code === 403)) {
+                    self.clearTemplate();
+                }
+                return { success: ok, action: 'direct_api',
+                         code: data.CODE || data.code || '',
+                         msg:  data.MESSAGE || data.message || data.msg || '' };
+            })
+            .catch(function (e) {
+                return { success: false, reason: e && e.message, action: 'direct_api_error' };
+            });
+    };
+
+
+    // ============================================================
     // ORCHESTRATOR
     // ============================================================
     function Orchestrator() {
         this.logger = new Logger('Orchestrator');
-        this.logger.info('🚀 Initializing v6.3.0 (Gravitas Refactor)');
+        this.logger.info('🚀 Initializing v6.4.1 (Bot-Speed Direct API)');
 
         this.supabase = new window.SupabaseService();
         this.supabase.setLogger(this.logger);
@@ -3509,6 +3764,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this.parser = new Parser();
         this.popupManager = new PopupManager();
         this.actionAdapter = new ActionAdapter(this.popupManager);
+        this.actionAdapter.orchestrator = this;  // bot-speed ACQ confirmation wiring
+        this.acqApiCaller = new AcqApiCaller();  // Option 1: direct API acquire
+        this._inFlightLead = null;               // set by ActionAdapter.acquire after button click
+        this._resolveInFlight = null;            // resolved by network ACQ confirm message
+        this._preApprovedLeads = new Map();      // leads matched at API level, awaiting DOM card
         this.scorer = new LeadScorer();
         this.navigator = new PageNavigator(this);
         this.metrics = new PerformanceMetrics();
@@ -3556,7 +3816,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (savedMetrics && this.metrics && typeof this.metrics.importState === 'function') {
                     try {
                         this.metrics.importState(JSON.parse(savedMetrics));
-                    } catch (e) {}
+                    } catch (e) { }
                 }
                 var autoResume = sessionStorage.getItem('bl_scanner_auto_resume');
                 if (autoResume === 'false') {
@@ -3571,8 +3831,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 sessionStorage.removeItem('bl_reload_pending');
                 sessionStorage.removeItem('bl_last_reload_flag');
             }
-        } catch (e) {}
-        this._isPaused = false;
+        } catch (e) { }
+        // Only force-clear isPaused if this is NOT a post-reload resume where the
+        // autoResume flag explicitly asked us to stay paused.
+        if (this._isPaused !== true) {
+            this._isPaused = false;
+        }
         this._scannerState = SCANNER_STATES.IDLE;
         this._currentCycleId = 'cycle_' + Date.now();
         this._currentCycleSeenLeads = new Set();
@@ -3580,43 +3844,43 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this._acquiredRecords = [];
         var selfAcq = this;
         try {
-            chrome.storage.local.get(['acquiredLeadIds', 'acquiredRecords'], function(res) {
+            chrome.storage.local.get(['acquiredLeadIds', 'acquiredRecords'], function (res) {
                 if (res && Array.isArray(res.acquiredLeadIds)) {
-                    res.acquiredLeadIds.forEach(function(id) { selfAcq._acquiredLeadIds.add(String(id)); });
+                    res.acquiredLeadIds.forEach(function (id) { selfAcq._acquiredLeadIds.add(String(id)); });
                 }
                 if (res && Array.isArray(res.acquiredRecords)) {
                     selfAcq._acquiredRecords = res.acquiredRecords;
                 }
                 selfAcq.logger.info('Loaded ' + selfAcq._acquiredLeadIds.size + ' previously acquired leads and ' + selfAcq._acquiredRecords.length + ' seller verification records.');
             });
-        } catch (e) {}
+        } catch (e) { }
 
         this.config = Object.assign({}, DEFAULT_CONFIG);
         this._initialized = false;
         this._statsTimer = null;
         this._cleanupTimer = null;
         this._statusPanelTimer = null;
-                        this._supabaseEnabled = true;
+        this._supabaseEnabled = true;
         this._initTime = Date.now();
         this._syncRetryAttempt = 0;
         this._syncRetryNextAt = 0;
 
         var self = this;
-        this._loadConfig().then(function() { self._init(); });
+        this._loadConfig().then(function () { self._init(); });
     }
 
-    Orchestrator.prototype._loadConfig = function() {
+    Orchestrator.prototype._loadConfig = function () {
         var self = this;
-        return new Promise(function(resolve) {
-            chrome.storage.local.get(DEFAULT_CONFIG, function(c) {
+        return new Promise(function (resolve) {
+            chrome.storage.local.get(DEFAULT_CONFIG, function (c) {
                 self.config = Object.assign({}, DEFAULT_CONFIG, c);
-                if (c.scoreWeights)   self.config.scoreWeights   = Object.assign({}, DEFAULT_CONFIG.scoreWeights,   c.scoreWeights);
+                if (c.scoreWeights) self.config.scoreWeights = Object.assign({}, DEFAULT_CONFIG.scoreWeights, c.scoreWeights);
                 if (c.scorePenalties) self.config.scorePenalties = Object.assign({}, DEFAULT_CONFIG.scorePenalties, c.scorePenalties);
 
                 self.config.strictCountryMode = self.config.strictCountryMode === true;
-                self.config.allowedCountries = (self.config.allowedCountries || ['IN']).map(function(x) {
+                self.config.allowedCountries = (self.config.allowedCountries || ['IN']).map(function (x) {
                     return String(x).toUpperCase().trim();
-                }).filter(function(x) { return x; });
+                }).filter(function (x) { return x; });
                 self.config.strictCountryRejectUnknown = self.config.strictCountryRejectUnknown !== false;
 
                 self._supabaseEnabled = self.config.supabaseEnabled !== false;
@@ -3634,12 +3898,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 self.config.skipSoldOut = self.config.stopSold;
 
                 self.safety.setLimits({
-                    perMinute:  self.config.maxPerMinute,
-                    perHour:    self.config.maxPerHour,
-                    perDay:     self.config.maxPerDay,
+                    perMinute: self.config.maxPerMinute,
+                    perHour: self.config.maxPerHour,
+                    perDay: self.config.maxPerDay,
                     perSession: self.config.maxPerSession
                 });
-                                self.safety.setMode(self.config.mode);
+                self.safety.setMode(self.config.mode);
 
                 self.actionAdapter.setDryRun(self.config.mode === 'DRY_RUN');
                 self.actionAdapter.setAutoMinimize(self.config.autoMinimize);
@@ -3662,10 +3926,10 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             });
         });
     };
-        Orchestrator.prototype._init = function() {
-    var self = this;
-    this._injectPanelStyles();
-    this.logger.info('Mode: ' + this.config.mode);
+    Orchestrator.prototype._init = function () {
+        var self = this;
+        this._injectPanelStyles();
+        this.logger.info('Mode: ' + this.config.mode);
         this.logger.info('Supabase mode: ' + (this._supabaseEnabled ? 'ON' : 'OFF'));
         if (this.config.strictCountryMode) {
             this.logger.info('🌍 STRICT COUNTRY ON — allowed: ' + this.config.allowedCountries.join(', '));
@@ -3673,31 +3937,53 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
         this.duplicateManager.clear();
 
-                this.keywordManager.loadKeywords().then(function() {
+        this.keywordManager.loadKeywords().then(function () {
             // Setup UI + periodic tasks IMMEDIATELY so panel shows during retries
-            self.queue.setProcessor(function(lead) { return self._processLead(lead); });
+            self.queue.setProcessor(function (lead) { return self._processLead(lead); });
             self._startPeriodicTasks();
             self._setupUI();
             self._broadcastStatus();
 
             // Immediately mark initialized and start scanner in real-time
             self._initialized = true;
+
+            // ── Fast-path: restore filters from sessionStorage cache instantly ──
+            // This allows the scanner to start and match leads IMMEDIATELY after
+            // a hard reload without waiting for the Supabase network round-trip.
+            var cacheRestored = false;
+            try {
+                var cachedFilters = sessionStorage.getItem('bl_cached_filters');
+                var cachedAt = parseInt(sessionStorage.getItem('bl_cached_filters_ts') || '0', 10);
+                var cacheAge = Date.now() - cachedAt;
+                // Use cache if < 5 minutes old (filters rarely change that fast)
+                if (cachedFilters && cacheAge < 300000) {
+                    var parsed = JSON.parse(cachedFilters);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        self.keywordManager.extractFromSupabaseFilters(parsed);
+                        self.supabase._filtersLoaded = true;
+                        cacheRestored = true;
+                        self.logger.info('⚡ Filters restored from cache (' + parsed.length + ' filters, age ' + Math.round(cacheAge / 1000) + 's) — scanner starting immediately');
+                    }
+                }
+            } catch (e) { }
+
             self._updateScannerLifecycleState('init');
             self.logger.info('✅ Ready — initialized (scanner state: ' + self._scannerState + ')');
             self._broadcastStatus();
 
-            // In background, sync with Supabase and load DB history without blocking scanner
+            // In background, sync with Supabase (refresh cache + handle changes)
             if (self._supabaseEnabled) {
-                self._syncSupabaseKeywords().catch(function(err) {
+                self._syncSupabaseKeywords().catch(function (err) {
                     self.logger.warn('Background Supabase sync notice: ' + (err && err.message));
                 });
             }
         });
     };
 
-    Orchestrator.prototype.startNewCycle = function(cycleId, resetMetrics) {
+    Orchestrator.prototype.startNewCycle = function (cycleId, resetMetrics) {
         this._currentCycleId = cycleId || ('cycle_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7));
         this.stats.cycleScanned = 0;
+        this._cycleAcquiredThisScan = false; // reset per-cycle acquisition flag
         if (this._currentCycleSeenLeads) {
             this._currentCycleSeenLeads.clear();
         } else {
@@ -3713,7 +3999,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return this._currentCycleId;
     };
 
-    Orchestrator.prototype._updateScannerLifecycleState = function(reason) {
+    Orchestrator.prototype._updateScannerLifecycleState = function (reason) {
         var activeFilterCount = this.keywordManager ? this.keywordManager.getActiveFilterCount() : 0;
         if (this.metrics) {
             this.metrics.setActiveFiltersCount(activeFilterCount);
@@ -3754,12 +4040,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             this.startNewCycle();
             var self = this;
             if (this.scanner) {
-                this.scanner.startWatching(function(cards) {
+                this.scanner.startWatching(function (cards) {
                     self._onCardsDetected(cards);
                 });
                 this.scanner._scan();
             }
-            if (this.config.autoScroll && this.navigator && !this.navigator._running) {
+            if (this.navigator && !this.navigator._running) {
                 this.navigator.start();
             }
             this._broadcastStatus();
@@ -3769,7 +4055,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return this._scannerState;
     };
 
-    Orchestrator.prototype._syncSupabaseKeywords = function(retryAttempt) {
+    Orchestrator.prototype._syncSupabaseKeywords = function (retryAttempt) {
         var self = this;
         retryAttempt = retryAttempt || 0;
         var MAX_RETRIES = 5;
@@ -3781,25 +4067,31 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             this.logger.info('🔄 Retry ' + retryAttempt + '/' + MAX_RETRIES + ' — syncing keywords from Supabase...');
         }
 
-        return this.supabase.loadFilters(false).then(function(success) {
+        return this.supabase.loadFilters(false).then(function (success) {
             if (!success) {
                 throw new Error('Supabase fetch failed (network/server)');
             }
 
             var filtersArray = self.supabase.getFilters();
-            self.logger.info('📥 Loaded ' + filtersArray.length + ' filters');
+            self.logger.info('📥 Loaded ' + filtersArray.length + ' filters from Supabase');
             self.keywordManager.extractFromSupabaseFilters(filtersArray);
             self.supabase.updateFilterStatus(true);
+
+            // ── Persist filters to sessionStorage for instant restore after next reload ──
+            try {
+                sessionStorage.setItem('bl_cached_filters', JSON.stringify(filtersArray));
+                sessionStorage.setItem('bl_cached_filters_ts', String(Date.now()));
+            } catch (e) { }
 
             // Success — clear retry state
             self._syncRetryAttempt = 0;
             self._syncRetryNextAt = 0;
 
             return self.duplicateManager.loadFromDb();
-        }).then(function() {
+        }).then(function () {
             self._updateScannerLifecycleState('supabase_synced');
             self._broadcastStatus();
-        }).catch(function(err) {
+        }).catch(function (err) {
             self.logger.error('❌ Sync failed: ' + err.message);
 
             // Schedule retry (only if Supabase still enabled)
@@ -3810,8 +4102,8 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 self.logger.warn('⏳ Retry ' + (retryAttempt + 1) + '/' + MAX_RETRIES + ' in ' + Math.round(delay / 1000) + 's');
                 self._broadcastStatus();
 
-                return new Promise(function(resolve) {
-                    setTimeout(function() {
+                return new Promise(function (resolve) {
+                    setTimeout(function () {
                         self._syncSupabaseKeywords(retryAttempt + 1).then(resolve, resolve);
                     }, delay);
                 });
@@ -3823,7 +4115,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             }
         });
     };
-          Orchestrator.prototype._injectPanelStyles = function() {
+    Orchestrator.prototype._injectPanelStyles = function () {
         if (document.getElementById('bl-panel-styles')) return;
         var style = document.createElement('style');
         style.id = 'bl-panel-styles';
@@ -4178,24 +4470,24 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         `;
         document.head.appendChild(style);
     };
-    Orchestrator.prototype._startPeriodicTasks = function() {
+    Orchestrator.prototype._startPeriodicTasks = function () {
         var self = this;
-        this._statsTimer = setInterval(function() {
+        this._statsTimer = setInterval(function () {
             if (self._supabaseEnabled) {
                 self.supabase.updateFilterStats(self.stats.discovered, self.stats.acquired, self.stats.acquired);
             }
         }, 30000);
-        this._cleanupTimer = setInterval(function() { self.duplicateManager.cleanup(); }, 120000);
+        this._cleanupTimer = setInterval(function () { self.duplicateManager.cleanup(); }, 120000);
 
         // Check for dynamic filter changes from Supabase every 3.5s while scanning
-        this._filterWatchTimer = setInterval(function() {
+        this._filterWatchTimer = setInterval(function () {
             if (!self._isPaused) {
                 self._checkDynamicFilterChanges();
             }
         }, 1200);
     };
 
-        Orchestrator.prototype._setupUI = function() {
+    Orchestrator.prototype._setupUI = function () {
         var existing = document.getElementById('bl-safety-status');
         if (existing) existing.remove();
         var self = this;
@@ -4214,51 +4506,51 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
 
         var iconUrl = '';
-        try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) {}
+        try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) { }
 
         panel.innerHTML =
             '<div class="bl-panel-header" id="bl-panel-header">' +
-                (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
-                '<span class="bl-panel-title">BuyLead</span>' +
-                '<span class="bl-status-dot" id="bl-status-dot"></span>' +
-                '<button class="bl-panel-toggle" id="bl-panel-toggle" type="button">−</button>' +
+            (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
+            '<span class="bl-panel-title">BuyLead</span>' +
+            '<span class="bl-status-dot" id="bl-status-dot"></span>' +
+            '<button class="bl-panel-toggle" id="bl-panel-toggle" type="button">−</button>' +
             '</div>' +
             '<div class="bl-panel-body" id="bl-panel-body">' +
-                '<div class="bl-row"><span id="bl-status-text" class="bl-strong">Init...</span></div>' +
-                '<div class="bl-row bl-stats-row">' +
-                    '<span class="bl-stat-group"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span></span>' +
-                    '<span class="bl-dim">·</span>' +
-                    '<span class="bl-stat-group"><span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span></span>' +
-                    '<span class="bl-dim">·</span>' +
-                    '<span class="bl-stat-group"><span class="bl-dim">Matched</span> <span id="bl-stat-filtered" class="bl-strong">0</span></span>' +
-                '</div>' +
-                '<div class="bl-row bl-stop-sold-row">' +
-                    '<span class="bl-dim">Stop Sold</span>' +
-                    '<button id="bl-stop-sold-btn" class="bl-toggle-btn" type="button" aria-pressed="true" title="Stop Sold: ON (Skipping sold-out leads)">' +
-                        '<span id="bl-stop-sold-indicator" class="bl-indicator active"></span>' +
-                        '<span id="bl-stop-sold-label" class="bl-toggle-label">ON</span>' +
-                    '</button>' +
-                '</div>' +
-                '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
-                '<div class="bl-row bl-ctrl-row">' +
-                    '<button id="bl-stop-btn" class="bl-ctrl-btn bl-ctrl-stop" type="button">⏸ Pause</button>' +
-                    '<button id="bl-resume-btn" class="bl-ctrl-btn bl-ctrl-resume" type="button" style="display:none">▶ Resume</button>' +
-                    '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">' +
-                        '<span>⚡ Filters</span>' +
-                        '<span id="bl-filters-count" class="bl-badge">0</span>' +
-                    '</button>' +
-                '</div>' +
-                '<div class="bl-row bl-metrics-row">' +
-                    '<div class="bl-metric-card" title="Average elapsed time between lead detection and verified acquisition">' +
-                        '<span class="bl-metric-label">Speed:</span>' +
-                        '<span id="bl-stat-speed" class="bl-metric-val">0s</span>' +
-                    '</div>' +
-                    '<div class="bl-metric-card" title="Verified successful acquisitions divided by eligible completed attempts">' +
-                        '<span class="bl-metric-label">Acceptance:</span>' +
-                        '<span id="bl-stat-acceptance" class="bl-metric-val">0%</span>' +
-                    '</div>' +
-                '</div>' +
-                '<div class="bl-warning" id="bl-warning-text"></div>' +
+            '<div class="bl-row"><span id="bl-status-text" class="bl-strong">Init...</span></div>' +
+            '<div class="bl-row bl-stats-row">' +
+            '<span class="bl-stat-group"><span class="bl-dim">Scanned</span> <span id="bl-stat-scanned" class="bl-strong">0</span></span>' +
+            '<span class="bl-dim">·</span>' +
+            '<span class="bl-stat-group"><span class="bl-dim">Acquired</span> <span id="bl-stat-acquired" class="bl-strong">0</span></span>' +
+            '<span class="bl-dim">·</span>' +
+            '<span class="bl-stat-group"><span class="bl-dim">Matched</span> <span id="bl-stat-filtered" class="bl-strong">0</span></span>' +
+            '</div>' +
+            '<div class="bl-row bl-stop-sold-row">' +
+            '<span class="bl-dim">Stop Sold</span>' +
+            '<button id="bl-stop-sold-btn" class="bl-toggle-btn" type="button" aria-pressed="true" title="Stop Sold: ON (Skipping sold-out leads)">' +
+            '<span id="bl-stop-sold-indicator" class="bl-indicator active"></span>' +
+            '<span id="bl-stop-sold-label" class="bl-toggle-label">ON</span>' +
+            '</button>' +
+            '</div>' +
+            '<div class="bl-row"><span id="bl-connection-text" class="bl-dim">CRM</span></div>' +
+            '<div class="bl-row bl-ctrl-row">' +
+            '<button id="bl-stop-btn" class="bl-ctrl-btn bl-ctrl-stop" type="button">⏸ Pause</button>' +
+            '<button id="bl-resume-btn" class="bl-ctrl-btn bl-ctrl-resume" type="button" style="display:none">▶ Resume</button>' +
+            '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">' +
+            '<span>⚡ Filters</span>' +
+            '<span id="bl-filters-count" class="bl-badge">0</span>' +
+            '</button>' +
+            '</div>' +
+            '<div class="bl-row bl-metrics-row">' +
+            '<div class="bl-metric-card" title="Average elapsed time between lead detection and verified acquisition">' +
+            '<span class="bl-metric-label">Speed:</span>' +
+            '<span id="bl-stat-speed" class="bl-metric-val">0s</span>' +
+            '</div>' +
+            '<div class="bl-metric-card" title="Verified successful acquisitions divided by eligible completed attempts">' +
+            '<span class="bl-metric-label">Acceptance:</span>' +
+            '<span id="bl-stat-acceptance" class="bl-metric-val">0%</span>' +
+            '</div>' +
+            '</div>' +
+            '<div class="bl-warning" id="bl-warning-text"></div>' +
             '</div>';
 
         document.body.appendChild(panel);
@@ -4268,7 +4560,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
         var toggleBtn = document.getElementById('bl-panel-toggle');
         if (toggleBtn) {
-            toggleBtn.addEventListener('click', function(e) {
+            toggleBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
                 var isCollapsed = document.getElementById('bl-panel-body').style.display === 'none';
                 self._setPanelCollapsed(!isCollapsed);
@@ -4280,7 +4572,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var stopSoldBtn = document.getElementById('bl-stop-sold-btn');
         if (stopSoldBtn) {
             this._updateStopSoldUI();
-            stopSoldBtn.addEventListener('click', function(e) {
+            stopSoldBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
                 var current = self.config.stopSold !== false;
                 self.setStopSold(!current);
@@ -4288,16 +4580,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
 
         // ── Stop / Resume buttons ──
-        var stopBtn   = document.getElementById('bl-stop-btn');
+        var stopBtn = document.getElementById('bl-stop-btn');
         var resumeBtn = document.getElementById('bl-resume-btn');
         if (stopBtn) {
-            stopBtn.addEventListener('click', function(e) {
+            stopBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
                 self.emergencyStop();
             });
         }
         if (resumeBtn) {
-            resumeBtn.addEventListener('click', function(e) {
+            resumeBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
                 self.resume();
             });
@@ -4306,12 +4598,12 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         // ── Filters CRM button ──
         var filtersBtn = document.getElementById('bl-filters-btn');
         if (filtersBtn) {
-            filtersBtn.addEventListener('click', function(e) {
+            filtersBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
-                var crmFiltersUrl = 'https://ind-prtx-test.vercel.app/filters';
+                var crmFiltersUrl = 'https://leadsync-tau.vercel.app/';
                 try {
                     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-                        chrome.runtime.sendMessage({ action: 'OPEN_TAB', url: crmFiltersUrl }, function() {
+                        chrome.runtime.sendMessage({ action: 'OPEN_TAB', url: crmFiltersUrl }, function () {
                             if (chrome.runtime.lastError) {
                                 window.open(crmFiltersUrl, '_blank');
                             }
@@ -4325,20 +4617,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             });
         }
 
-        window.addEventListener('resize', function() { self._keepPanelInView(); });
+        window.addEventListener('resize', function () { self._keepPanelInView(); });
         this._startStatusUpdates();
     };
 
-    Orchestrator.prototype._setPanelCollapsed = function(c) {
+    Orchestrator.prototype._setPanelCollapsed = function (c) {
         var body = document.getElementById('bl-panel-body');
-        var btn  = document.getElementById('bl-panel-toggle');
+        var btn = document.getElementById('bl-panel-toggle');
         if (!body || !btn) return;
         body.style.display = c ? 'none' : 'block';
         btn.textContent = c ? '+' : '−';
         this._panelCollapsed = c;
     };
 
-    Orchestrator.prototype._setupDrag = function(panel) {
+    Orchestrator.prototype._setupDrag = function (panel) {
         var self = this;
         var header = document.getElementById('bl-panel-header');
         if (!header) return;
@@ -4369,7 +4661,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             nl = Math.max(0, Math.min(nl, window.innerWidth - r.width));
             nt = Math.max(0, Math.min(nt, window.innerHeight - r.height));
             if (raf) cancelAnimationFrame(raf);
-            raf = requestAnimationFrame(function() { panel.style.left = nl + 'px'; panel.style.top = nt + 'px'; });
+            raf = requestAnimationFrame(function () { panel.style.left = nl + 'px'; panel.style.top = nt + 'px'; });
             if (e.cancelable) e.preventDefault();
         }
         function up() {
@@ -4391,20 +4683,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         document.addEventListener('touchend', up);
     };
 
-    Orchestrator.prototype._keepPanelInView = function() {
+    Orchestrator.prototype._keepPanelInView = function () {
         if (!this._safetyPanel) return;
         var r = this._safetyPanel.getBoundingClientRect();
         var nl = Math.max(0, Math.min(r.left, window.innerWidth - r.width));
         var nt = Math.max(0, Math.min(r.top, window.innerHeight - r.height));
         if (nl !== r.left || nt !== r.top) {
             this._safetyPanel.style.left = nl + 'px';
-            this._safetyPanel.style.top  = nt + 'px';
+            this._safetyPanel.style.top = nt + 'px';
         }
     };
 
-    Orchestrator.prototype._startStatusUpdates = function() {
+    Orchestrator.prototype._startStatusUpdates = function () {
         var self = this;
-        this._statusPanelTimer = setInterval(function() {
+        this._statusPanelTimer = setInterval(function () {
             var s = self.safety.getStatus();
             if (!self._safetyPanel) return;
             var dot = document.getElementById('bl-status-dot');
@@ -4452,7 +4744,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
             self._updateStopSoldUI();
 
-                        var warnEl = document.getElementById('bl-warning-text');
+            var warnEl = document.getElementById('bl-warning-text');
             if (warnEl) {
                 var shouldWarn = self._supabaseEnabled
                     && !self.supabase._filtersLoaded
@@ -4480,16 +4772,16 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // ============================================================
     // STRICT COUNTRY
     // ============================================================
-    Orchestrator.prototype._checkStrictCountry = function(lead) {
+    Orchestrator.prototype._checkStrictCountry = function (lead) {
         // When Supabase filters are active, country restrictions are dynamically enforced per filter
         // (allows leads from any country when no country filter is specified in that filter)
         if (this._supabaseEnabled) {
             return { allowed: true };
         }
         if (!this.config.strictCountryMode) return { allowed: true };
-        var allowed = (this.config.allowedCountries || []).map(function(c) {
+        var allowed = (this.config.allowedCountries || []).map(function (c) {
             return String(c).toUpperCase().trim();
-        }).filter(function(c) { return c.length > 0; });
+        }).filter(function (c) { return c.length > 0; });
 
         if (allowed.length === 0) {
             return { allowed: true };
@@ -4511,7 +4803,227 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // ============================================================
     // CARD PROCESSING — v6.2 pipeline
     // ============================================================
-    Orchestrator.prototype._onCardsDetected = function(cards) {
+    // ── Network-Intercept Lead Handler ─────────────────────────────────────
+    // Called by the window.postMessage listener with pseudo-cards built from
+    // raw IndiaMART API JSON. Normalises and feeds leads into _processLead
+    // BEFORE the DOM renders the cards (bot-speed path).
+    Orchestrator.prototype._onNetworkLeads = function (pseudoCards) {
+        var self = this;
+        if (!this._initialized || this._isPaused) return;
+        if (!pseudoCards || pseudoCards.length === 0) return;
+
+        for (var i = 0; i < pseudoCards.length; i++) {
+            try {
+                var pc = pseudoCards[i];
+                var raw = pc._rawApiLead;
+                if (!raw) continue;
+
+                var cardId = pc.id;
+
+                // Skip if already seen this cycle
+                if (this._currentCycleSeenLeads && this._currentCycleSeenLeads.has(cardId)) continue;
+                if (this._currentCycleSeenLeads) this._currentCycleSeenLeads.add(cardId);
+
+                // Skip if already acquired
+                if (this._acquiredLeadIds && this._acquiredLeadIds.has(String(raw.uniqueQueryId || raw.query_id || ''))) continue;
+
+                // Normalise raw API fields → lead object
+                var lead = {
+                    leadId: cardId,
+                    uniqueQueryId: String(raw.uniqueQueryId || raw.query_id || raw.queryId || cardId),
+                    productName: raw.queryProductName || raw.product_name || raw.productName || raw.subject || '',
+                    // Build a rich messageText from ALL available descriptive API fields
+                    // so that medicine/product names buried in requirements, category, or
+                    // "Buys" columns are captured and matched against filter keywords.
+                    messageText: [
+                        raw.queryMessage, raw.message, raw.requirement, raw.requirements,
+                        raw.queryMcatName, raw.mcat_name, raw.mcatName, raw.category,
+                        raw.buys, raw.buyerRequirement, raw.buyer_requirement,
+                        raw.notes, raw.description, raw.details
+                    ].filter(Boolean).join(' ') || '',
+                    city: raw.senderCity || raw.city || '',
+                    state: raw.senderState || raw.state || '',
+                    countryIso: raw.senderCountryIso || raw.country_iso || raw.countryIso || 'IN',
+                    senderMobile: raw.senderMobile || raw.mobile || raw.phone || '',
+                    senderEmail: raw.senderEmail || raw.email || '',
+                    queryTime: raw.queryTime || raw.created_at || '',
+                    queryType: raw.queryType || '',
+                    queryMcatName: raw.queryMcatName || '',
+                    _fromNetwork: true,
+                    _rawApiLead: raw
+                };
+                // DB-compatible aliases (used by _saveLeadToDb)
+                lead.queryProductName = lead.productName;
+                lead.queryMessage = lead.messageText;
+                lead.subject = lead.productName;
+
+                if (!lead.productName && !lead.messageText) continue;
+
+                // Dedup check
+                if (this.duplicateManager && this.duplicateManager.isDuplicate(lead.uniqueQueryId)) continue;
+
+                // Filter match
+                if (this._supabaseEnabled && this.supabase && !this.supabase._filtersLoaded) continue;
+                var kw = this._supabaseEnabled
+                    ? this.keywordManager.evaluateFilters(lead)
+                    : this.keywordManager.checkKeywords(lead.productName, lead.messageText);
+                if (!kw.passed) continue;
+
+                if (kw.filterId) {
+                    lead.filterId = kw.filterId;
+                    this.keywordManager.reserveSlot(kw.filterId, cardId);
+                }
+
+                // Safety check
+                var safetyCheck = this.safety.canAcquire();
+                if (!safetyCheck.allowed) {
+                    if (kw.filterId) this.keywordManager.releaseReservation(kw.filterId, cardId);
+                    continue;
+                }
+
+                this.duplicateManager.markSeen(lead.uniqueQueryId);
+                this.stats.queued++;
+                this.stats.validated++;
+
+                // ── PRE-APPROVED CLICK PATH ────────────────────────────────────────
+                // Store this lead in _preApprovedLeads so that when its DOM card
+                // appears, _onCardsDetected can click it INSTANTLY without re-parsing
+                // or re-evaluating filters. Keyed by every possible ID field so the
+                // lookup succeeds regardless of what the DOM card exposes.
+                if (!this._preApprovedLeads) this._preApprovedLeads = new Map();
+                var preApproveEntry = { lead: lead, kw: kw, ts: Date.now() };
+                var rawLead = pc._rawApiLead;
+                // Key by every ID variant the API returns
+                var idVariants = [
+                    lead.uniqueQueryId,
+                    rawLead.uniqueQueryId, rawLead.query_id, rawLead.queryId,
+                    rawLead.leadId, rawLead.lead_id, rawLead.buyer_id, rawLead.buyerId, rawLead.id
+                ];
+                for (var iv = 0; iv < idVariants.length; iv++) {
+                    if (idVariants[iv]) this._preApprovedLeads.set(String(idVariants[iv]), preApproveEntry);
+                }
+                // Pre-approved entries expire after 60s to avoid stale clicks
+                var self2pa = this;
+                var expireId = lead.uniqueQueryId;
+                setTimeout(function () {
+                    if (self2pa._preApprovedLeads) self2pa._preApprovedLeads.delete(expireId);
+                }, 60000);
+
+                if (this.showTopToast) {
+                    this.showTopToast('found', '\u26a1 Network Lead', (lead.productName || 'Lead') + ' \u2014 ' + (lead.city || lead.state || 'India'));
+                }
+
+                this.logger.info('\u26a1 Network-intercept pre-approved: ' + cardId + ' (' + (lead.productName || '').substring(0, 50) + ')');
+
+                var self3 = this;
+
+                // \u2500\u2500\u2500 OPTION 1: Direct API Acquire (bot-speed, no DOM needed) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                // If we have a captured template from a previous real click,
+                // replicate the contact API call directly. ~50ms latency.
+                if (this.acqApiCaller && this.acqApiCaller.hasTemplate()) {
+                    (function (directLead, orchRef) {
+                        orchRef.logger.info('\ud83d\ude80 Direct API acquire (Option 1): ' + (directLead.uniqueQueryId || directLead.leadId));
+                        orchRef.acqApiCaller.call(directLead).then(function (result) {
+                            if (result && result.success) {
+                                orchRef.stats.acquired++;
+                                if (orchRef._acquiredLeadIds) orchRef._acquiredLeadIds.add(String(directLead.uniqueQueryId));
+                                if (orchRef.duplicateManager) orchRef.duplicateManager.markSeen(directLead.uniqueQueryId);
+                                // Remove from pre-approved so DOM path doesn't double-click
+                                if (orchRef._preApprovedLeads) orchRef._preApprovedLeads.delete(String(directLead.uniqueQueryId));
+                                orchRef.logger.info('\u2705 Direct API acquire SUCCESS: ' + (directLead.uniqueQueryId || '') + ' code=' + result.code);
+                                if (orchRef._supabaseEnabled) orchRef._saveLeadToDb(directLead, true);
+                            } else {
+                                orchRef.logger.warn('\u26a0\ufe0f Direct API acquire failed (' + (result.reason || result.code || '') + ') \u2014 falling back to DOM path');
+                                // Fall back to queue so DOM click path can handle it
+                                if (!orchRef.duplicateManager.isDuplicate(directLead.uniqueQueryId)) {
+                                    orchRef.queue.enqueue(directLead);
+                                }
+                            }
+                        }).catch(function (e) {
+                            orchRef.logger.warn('Direct API acquire error: ' + (e && e.message));
+                            if (!orchRef.duplicateManager.isDuplicate(directLead.uniqueQueryId)) {
+                                orchRef.queue.enqueue(directLead);
+                            }
+                        });
+                    })(lead, this);
+                } else {
+                    // \u2500\u2500\u2500 OPTION 2: Targeted MutationObserver (zero-debounce) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                    // No template yet — watch for this specific card to appear in DOM
+                    // and click the instant it renders, with no batch debounce delay.
+                    (function (watchLead, orchRef) {
+                        var uqid   = String(watchLead.uniqueQueryId || watchLead.leadId || '');
+                        var fired  = false;
+                        var CARD_SELECTORS = '[class*="BuyLdC_cont"],[class*="BLbp_card"],.BLbp_card,[class*="BuyLdC_Card"],div[id*="id_BLCard"],[class*="BLCard"]';
+
+                        function tryClickCard(el) {
+                            if (fired) return;
+                            fired = true;
+                            obs.disconnect();
+                            watchLead.element = el;
+                            orchRef.logger.info('\ud83c\udfaf Targeted observer fired instantly for: ' + uqid);
+                            orchRef.actionAdapter.acquire(watchLead).then(function (r) {
+                                if (r && r.success) {
+                                    orchRef.stats.acquired++;
+                                    orchRef.logger.info('\u2705 Targeted observer acquire done: ' + uqid);
+                                } else {
+                                    // Queue as last resort
+                                    if (!orchRef.duplicateManager.isDuplicate(watchLead.uniqueQueryId)) {
+                                        orchRef.queue.enqueue(watchLead);
+                                    }
+                                }
+                            }).catch(function () {
+                                if (!orchRef.duplicateManager.isDuplicate(watchLead.uniqueQueryId)) {
+                                    orchRef.queue.enqueue(watchLead);
+                                }
+                            });
+                        }
+
+                        var obs = new MutationObserver(function (mutations) {
+                            if (fired || !orchRef._preApprovedLeads) { obs.disconnect(); return; }
+                            for (var m = 0; m < mutations.length; m++) {
+                                var added = mutations[m].addedNodes;
+                                for (var n = 0; n < added.length; n++) {
+                                    var node = added[n];
+                                    if (!node || node.nodeType !== 1) continue;
+                                    // Check node itself
+                                    var domId = node.getAttribute && (
+                                        node.getAttribute('data-lead-id') || node.getAttribute('data-query-id') ||
+                                        node.getAttribute('data-blid')    || node.getAttribute('data-uqid') || ''
+                                    );
+                                    if (domId && domId === uqid) { tryClickCard(node); return; }
+                                    // Check descendants
+                                    if (node.querySelectorAll) {
+                                        var kids = node.querySelectorAll(CARD_SELECTORS);
+                                        for (var ki = 0; ki < kids.length; ki++) {
+                                            var kDomId = kids[ki].getAttribute('data-lead-id') || kids[ki].getAttribute('data-query-id') ||
+                                                         kids[ki].getAttribute('data-blid')    || kids[ki].getAttribute('data-uqid') || '';
+                                            if (kDomId && kDomId === uqid) { tryClickCard(kids[ki]); return; }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+                        // Auto-disconnect after 60s
+                        setTimeout(function () { if (!fired) { obs.disconnect(); } }, 60000);
+
+                        // \u2500\u2500\u2500 QUEUE as final safety net (handles if observer or API path miss) \u2500\u2500\u2500
+                        self3.queue.enqueue(watchLead);
+
+                    })(lead, this);
+                }
+
+                if (this._supabaseEnabled && !this.acqApiCaller.hasTemplate()) this._saveLeadToDb(lead, true);
+
+
+            } catch (e) {
+                this.logger.warn('Network lead processing error: ' + (e && e.message));
+            }
+        }
+    };
+
+    Orchestrator.prototype._onCardsDetected = function (cards) {
         var self = this;
         var newCards = cards || [];
         if (!this._currentCycleSeenLeads) {
@@ -4534,6 +5046,89 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         for (var i = 0; i < newCards.length; i++) {
             try {
                 var card = newCards[i];
+
+                // ═══════════════════════════════════════════════════════════════
+                // PRE-APPROVED FAST-CLICK PATH (bot-speed)
+                // If this card was already filter-matched at the API/JSON stage
+                // by _onNetworkLeads, skip ALL parsing and evaluation — just
+                // click the Contact Buyer button immediately.
+                // ═══════════════════════════════════════════════════════════════
+                if (self._preApprovedLeads && self._preApprovedLeads.size > 0 && card.element) {
+                    // Extract the card's uniqueQueryId from the DOM element's data attributes
+                    var domUqid = card.element.getAttribute('data-lead-id')
+                        || card.element.getAttribute('data-query-id')
+                        || card.element.getAttribute('data-blid')
+                        || card.element.getAttribute('data-id')
+                        || card.element.getAttribute('data-uqid')
+                        || card.element.getAttribute('id') || '';
+                    // Also try to pull uqid from the card's inner link/href
+                    if (!domUqid) {
+                        var hrefEl = card.element.querySelector('[href*="uniqueQueryId"], [href*="uqid"], [data-lead-id], [data-query-id], [data-blid]');
+                        if (hrefEl) {
+                            domUqid = hrefEl.getAttribute('data-lead-id')
+                                || hrefEl.getAttribute('data-query-id')
+                                || hrefEl.getAttribute('data-blid')
+                                || (hrefEl.href && hrefEl.href.match(/[?&](?:uniqueQueryId|uqid|query_id)=([^&]+)/) || [])[1] || '';
+                        }
+                    }
+
+                    var preApproved = domUqid ? self._preApprovedLeads.get(String(domUqid)) : null;
+
+                    // Also scan by card.id (which may include the api_ prefix or hash)
+                    if (!preApproved) {
+                        var strippedId = card.id.replace(/^api_/, '');
+                        preApproved = self._preApprovedLeads.get(strippedId);
+                    }
+
+                    if (preApproved) {
+                        // Remove from pre-approved to prevent double-click
+                        self._preApprovedLeads.delete(String(domUqid));
+                        self._preApprovedLeads.delete(card.id.replace(/^api_/, ''));
+
+                        var paLead = preApproved.lead;
+                        paLead.element = card.element; // attach DOM element
+                        paLead._domId = card.id;
+
+                        self.logger.info('\u26a1\u26a1 PRE-APPROVED INSTANT CLICK: ' + card.id + ' | ' + (paLead.productName || ''));
+
+                        // Mark in all dedup structures first
+                        if (self._acquiredLeadIds) self._acquiredLeadIds.add(String(paLead.uniqueQueryId));
+                        if (!self._uniqueSeenIds.has(card.id)) {
+                            self._uniqueSeenIds.add(card.id);
+                            self.stats.discovered++;
+                            self.stats.unique = self._uniqueSeenIds.size;
+                        }
+                        if (self.metrics) self.metrics.recordMatch(card.id, Date.now());
+
+                        // Tag the card element immediately
+                        try {
+                            card.element.setAttribute('data-leadsync-preapproved', 'true');
+                        } catch (e) {}
+
+                        // Fire acquisition directly — no queue, no re-evaluation
+                        (function (paL, cardEl) {
+                            self.actionAdapter.acquire(paL).then(function (result) {
+                                if (result && result.success) {
+                                    self.stats.acquired++;
+                                    try { cardEl.setAttribute('data-leadsync-acquired', 'true'); } catch (e) {}
+                                    self.logger.info('\u2705 PRE-APPROVED acquisition done: ' + (paL.leadId || '') + ' | ' + JSON.stringify(result.action || ''));
+                                } else {
+                                    // Fall back to queue if direct click failed
+                                    self.logger.warn('\u26a0\ufe0f PRE-APPROVED click failed, re-enqueuing: ' + (paL.leadId || ''));
+                                    if (!self.duplicateManager.isDuplicate(paL.uniqueQueryId)) {
+                                        self.queue.enqueue(paL);
+                                    }
+                                }
+                            }).catch(function (e) {
+                                self.logger.warn('PRE-APPROVED acquire error: ' + (e && e.message));
+                            });
+                        })(paLead, card.element);
+
+                        continue; // skip normal pipeline for this card
+                    }
+                }
+                // ═══════════════════════════════════════════════════════════════
+
                 var raw = self.parser.parseCard(card.element, card.id);
                 if (!raw) { self.stats.failed++; continue; }
                 var lead = self.parser.normalize(raw);
@@ -4547,12 +5142,18 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (self.metrics) self.metrics.recordDetection(card.id, Date.now());
                 if (self.lifecycle) self.lifecycle.transition(card.id, 'DETECTED');
 
-                // === STEP 0: EXCLUDE ALREADY ACQUIRED LEADS (SELLER-DISTINCT DUPLICATE CHECK) ===
-                // Only leads that were PREVIOUSLY ACQUIRED with the SAME SELLER are treated as duplicates!
-                // Unacquired leads are NEVER marked as duplicates and remain eligible on rescans.
+                // === STEP 0: EXCLUDE ALREADY ACQUIRED LEADS ===
                 if (self._isLeadAcquired(lead, card)) {
                     self.stats.duplicate++;
-                    self.logger.debug('🔒 Acquired lead excluded (same seller duplicate): ' + card.id + ' | "' + (lead.productName || '') + '"');
+                    self.logger.debug('🔒 Acquired lead excluded: ' + card.id);
+                    continue;
+                }
+
+                // === STEP 0.01: DEDUP — already processed by network-intercept or prior DOM scan ===
+                // duplicateManager.markSeen is called when a lead is enqueued.
+                // If the network path already picked this lead up, isDuplicate returns true here.
+                if (self.duplicateManager && self.duplicateManager.isDuplicate(lead.uniqueQueryId)) {
+                    self.logger.debug('\ud83d\udd01 Skipped (already queued/processed): ' + card.id + ' uqid=' + lead.uniqueQueryId);
                     continue;
                 }
 
@@ -4608,7 +5209,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 }
 
                 // === STEP 3: SCORE ===
-                
+
                 // === STEP 3: SCORE — REMOVED ===
                 // Filter already verified product + location + contact.
                 // Scoring was penalizing foreign leads (-20 country, -10 state)
@@ -4643,7 +5244,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     };
 
-    Orchestrator.prototype._saveLeadToDb = function(lead, isMatched) {
+    Orchestrator.prototype._saveLeadToDb = function (lead, isMatched) {
         if (!this._supabaseEnabled) return Promise.resolve(null);
         var self = this;
         lead._savePromise = this.supabase.insertLead({
@@ -4660,23 +5261,23 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             senderMobile: lead.senderMobile,
             senderEmail: lead.senderEmail,
             isMatched: isMatched
-        }).then(function(dbLead) {
+        }).then(function (dbLead) {
             if (dbLead) {
                 self.stats.dbSynced++;
                 lead._dbId = dbLead.id || (dbLead.data && dbLead.data.id);
                 if (dbLead.conflict && dbLead.existingId) lead._dbId = dbLead.existingId;
             }
             return dbLead;
-        }).catch(function(err) {
+        }).catch(function (err) {
             self.logger.error('Failed to save lead: ' + (err && err.message));
             return null;
         });
         return lead._savePromise;
     };
 
-    Orchestrator.prototype._processLead = function(lead) {
+    Orchestrator.prototype._processLead = function (lead) {
         var self = this;
-        return new Promise(function(resolve) {
+        return new Promise(function (resolve) {
             self.stateMachine.setState(lead.leadId, 'PROCESSING');
 
             // Re-verify filter eligibility before acquiring
@@ -4686,6 +5287,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 self.stateMachine.setState(lead.leadId, 'FILTERED_OUT');
                 resolve();
                 return;
+            }
+
+            // Guard: if auto-paused (e.g. lead already acquired this cycle), discard and resolve cleanly.
+            if (self._isPaused) {
+                if (lead.filterId) self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
+                self.stateMachine.setState(lead.leadId, 'SKIPPED', { reason: 'paused' });
+                resolve(); return;
             }
 
             var safety = self.safety.canAcquire();
@@ -4712,7 +5320,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             if (self.showTopToast) {
                 self.showTopToast('acquiring', 'Acquiring Lead', 'Contacting buyer for: ' + (lead.productName || 'Lead'));
             }
-            self.actionAdapter.acquire(lead).then(function(result) {
+            self.actionAdapter.acquire(lead).then(function (result) {
                 var isSuccess = result && result.success === true;
                 if (isSuccess) {
                     self.stats.acquired++;
@@ -4723,6 +5331,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     if (result.popup && result.popup.success) self.stats.popupsHandled++;
                     self.logger.info('🎉 ACQUIRED', { leadId: lead.leadId });
                     self._recordLeadAcquired(lead);
+
+                    // ── Auto-pause reload loop while lead contact is in progress ──
+                    // Navigator (and thus window.location.reload) is halted here.
+                    // User presses the ▶ Resume button on the panel when done.
+                    self._pauseForLeadAcquired(lead);
 
                     if (self.lifecycle) self.lifecycle.transition(lead.leadId, 'CONTACT_PENDING');
 
@@ -4742,13 +5355,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         }
                         if (self._supabaseEnabled) {
                             var savePromise = lead._savePromise || self._saveLeadToDb(lead, true);
-                            Promise.resolve(savePromise).then(function() {
+                            Promise.resolve(savePromise).then(function () {
                                 return self.supabase.markLeadContacted(lead._dbId || lead.uniqueQueryId);
-                            }).then(function() {
+                            }).then(function () {
                                 if (lead._dbId) {
                                     return self.supabase.insertLeadHistory(lead._dbId, 'CONTACTED', { score: 'auto', mode: self.config.mode }, new Date().toISOString());
                                 }
-                            }).catch(function(err) {
+                            }).catch(function (err) {
                                 self.logger.warn('Failed to update lead contacted status', { error: err && err.message });
                             });
                         }
@@ -4796,18 +5409,18 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     if (speedEl && self.metrics) speedEl.textContent = self.metrics.getSpeedPerAcquisition().formatted;
                     if (accEl && self.metrics) accEl.textContent = self.metrics.getAcceptanceRate().formatted;
                     if (statsAcquired) statsAcquired.textContent = String(self.stats.acquired);
-                } catch (e) {}
+                } catch (e) { }
                 self._broadcastStatus();
                 resolve();
             });
         });
     };
 
-        Orchestrator.prototype._showApprovalUI = function(lead) {
+    Orchestrator.prototype._showApprovalUI = function (lead) {
         var existing = document.getElementById('bl_approval_' + lead.leadId);
         if (existing) existing.remove();
         var iconUrl = '';
-        try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) {}
+        try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) { }
 
         var card = document.createElement('div');
         card.id = 'bl_approval_' + lead.leadId;
@@ -4816,37 +5429,37 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var countryFlag = '';
         if (lead.countryIso && lead.countryIso.length === 2) {
             try {
-                var codePoints = lead.countryIso.toUpperCase().split('').map(function(c) { return 127397 + c.charCodeAt(0); });
+                var codePoints = lead.countryIso.toUpperCase().split('').map(function (c) { return 127397 + c.charCodeAt(0); });
                 countryFlag = String.fromCodePoint.apply(null, codePoints);
-            } catch (e) {}
+            } catch (e) { }
         }
 
         card.innerHTML =
             '<div class="bl-approval-header">' +
-                (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
-                '<span class="bl-approval-badge">' +
-                    '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
-                    'Lead Ready' +
-                '</span>' +
+            (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
+            '<span class="bl-approval-badge">' +
+            '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
+            'Lead Ready' +
+            '</span>' +
             '</div>' +
             '<div class="bl-approval-product">' + this._esc(lead.productName) + '</div>' +
             '<div class="bl-approval-country">' + (countryFlag ? countryFlag + ' ' : '') + this._esc(lead.countryIso || 'Unknown') + '</div>' +
             '<div class="bl-approval-actions">' +
-                '<button class="bl-btn bl-btn-acquire" type="button" data-a="acq">' +
-                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
-                    'Acquire' +
-                '</button>' +
-                '<button class="bl-btn bl-btn-skip" type="button" data-a="skip">' +
-                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>' +
-                    'Skip' +
-                '</button>' +
+            '<button class="bl-btn bl-btn-acquire" type="button" data-a="acq">' +
+            '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+            'Acquire' +
+            '</button>' +
+            '<button class="bl-btn bl-btn-skip" type="button" data-a="skip">' +
+            '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>' +
+            'Skip' +
+            '</button>' +
             '</div>';
 
         document.body.appendChild(card);
 
         var self = this;
-        card.querySelector('[data-a="acq"]').addEventListener('click', function() {
-            self.actionAdapter.acquire(lead).then(function(r) {
+        card.querySelector('[data-a="acq"]').addEventListener('click', function () {
+            self.actionAdapter.acquire(lead).then(function (r) {
                 if (r.success) {
                     self.stats.acquired++;
                     self.stateMachine.setState(lead.leadId, 'ACQUIRED');
@@ -4858,41 +5471,41 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             });
             card.remove();
         });
-        card.querySelector('[data-a="skip"]').addEventListener('click', function() {
+        card.querySelector('[data-a="skip"]').addEventListener('click', function () {
             self.stateMachine.setState(lead.leadId, 'SKIPPED');
             card.remove();
         });
     };
 
-    Orchestrator.prototype._esc = function(t) { if (!t) return ''; var d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
-        Orchestrator.prototype._broadcastStatus = function() {
+    Orchestrator.prototype._esc = function (t) { if (!t) return ''; var d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
+    Orchestrator.prototype._broadcastStatus = function () {
         try {
             var p = chrome.runtime.sendMessage({ action: 'UPDATE_STATUS', status: this.getStatus() });
-            if (p && typeof p.catch === 'function') p.catch(function() {});
-        } catch (e) {}
+            if (p && typeof p.catch === 'function') p.catch(function () { });
+        } catch (e) { }
     };
 
-    Orchestrator.prototype.updateFullConfig = function(newConfig) {
+    Orchestrator.prototype.updateFullConfig = function (newConfig) {
         var merged = Object.assign({}, DEFAULT_CONFIG, newConfig || {});
-        if (newConfig && newConfig.scoreWeights)   merged.scoreWeights   = Object.assign({}, DEFAULT_CONFIG.scoreWeights,   newConfig.scoreWeights);
+        if (newConfig && newConfig.scoreWeights) merged.scoreWeights = Object.assign({}, DEFAULT_CONFIG.scoreWeights, newConfig.scoreWeights);
         if (newConfig && newConfig.scorePenalties) merged.scorePenalties = Object.assign({}, DEFAULT_CONFIG.scorePenalties, newConfig.scorePenalties);
 
         merged.strictCountryMode = merged.strictCountryMode === true;
-        merged.allowedCountries = (merged.allowedCountries || ['IN']).map(function(x) {
+        merged.allowedCountries = (merged.allowedCountries || ['IN']).map(function (x) {
             return String(x).toUpperCase().trim();
-        }).filter(function(x) { return x; });
+        }).filter(function (x) { return x; });
         merged.strictCountryRejectUnknown = merged.strictCountryRejectUnknown !== false;
 
         this.config = merged;
         chrome.storage.local.set(merged);
 
         this.safety.setLimits({
-            perMinute:  merged.maxPerMinute,
-            perHour:    merged.maxPerHour,
-            perDay:     merged.maxPerDay,
+            perMinute: merged.maxPerMinute,
+            perHour: merged.maxPerHour,
+            perDay: merged.maxPerDay,
             perSession: merged.maxPerSession
         });
-               this.safety.setMode(merged.mode);
+        this.safety.setMode(merged.mode);
         this.actionAdapter.setDryRun(merged.mode === 'DRY_RUN');
         this.actionAdapter.setAutoMinimize(merged.autoMinimize);
         this.actionAdapter.setConfirmationAnswer(merged.confirmationAnswer);
@@ -4906,25 +5519,24 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         this.scorer.setPreferredCountries(merged.preferredCountries);
 
         this.navigator.applySettings(merged);
-        if (merged.autoScroll && !this.navigator._running) this.navigator.start();
-        else if (!merged.autoScroll && this.navigator._running) this.navigator.stop();
+        if (!this.navigator._running) this.navigator.start();
 
         this.logger.info('Config updated. Rate limits: ' + merged.maxPerMinute + '/min, ' + merged.maxPerHour + '/hr');
         this._broadcastStatus();
         return Promise.resolve(true);
     };
 
-    Orchestrator.prototype.setMode = function(m) {
+    Orchestrator.prototype.setMode = function (m) {
         this.config.mode = m;
         this.safety.setMode(m);
         this.actionAdapter.setDryRun(m === 'DRY_RUN');
         chrome.storage.local.set({ mode: m, userSetMode: true });
         return Promise.resolve(true);
     };
-        Orchestrator.prototype.setLimits = function(l) {
-        if (l.perMinute)  this.config.maxPerMinute  = l.perMinute;
-        if (l.perHour)    this.config.maxPerHour    = l.perHour;
-        if (l.perDay)     this.config.maxPerDay     = l.perDay;
+    Orchestrator.prototype.setLimits = function (l) {
+        if (l.perMinute) this.config.maxPerMinute = l.perMinute;
+        if (l.perHour) this.config.maxPerHour = l.perHour;
+        if (l.perDay) this.config.maxPerDay = l.perDay;
         if (l.perSession) this.config.maxPerSession = l.perSession;
         this.safety.setLimits({
             perMinute: this.config.maxPerMinute, perHour: this.config.maxPerHour,
@@ -4935,11 +5547,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             maxPerDay: this.config.maxPerDay, maxPerSession: this.config.maxPerSession
         });
     };
-    Orchestrator.prototype.setMinScore = function(s) { this.config.minScore = s; this.scorer.setMinimumScore(s); chrome.storage.local.set({ minScore: s }); };
-    Orchestrator.prototype.setAutoMinimize = function(v) { this.config.autoMinimize = v; this.actionAdapter.setAutoMinimize(v); chrome.storage.local.set({ autoMinimize: v }); };
-    Orchestrator.prototype.setConfirmationAnswer = function(a) { this.config.confirmationAnswer = a; this.actionAdapter.setConfirmationAnswer(a); chrome.storage.local.set({ confirmationAnswer: a }); };
-    Orchestrator.prototype.setPurchaseAction = function(a) { this.config.purchaseAction = a; this.actionAdapter.setPurchaseAction(a); chrome.storage.local.set({ purchaseAction: a }); };
-    Orchestrator.prototype.setStopSold = function(enabled) {
+    Orchestrator.prototype.setMinScore = function (s) { this.config.minScore = s; this.scorer.setMinimumScore(s); chrome.storage.local.set({ minScore: s }); };
+    Orchestrator.prototype.setAutoMinimize = function (v) { this.config.autoMinimize = v; this.actionAdapter.setAutoMinimize(v); chrome.storage.local.set({ autoMinimize: v }); };
+    Orchestrator.prototype.setConfirmationAnswer = function (a) { this.config.confirmationAnswer = a; this.actionAdapter.setConfirmationAnswer(a); chrome.storage.local.set({ confirmationAnswer: a }); };
+    Orchestrator.prototype.setPurchaseAction = function (a) { this.config.purchaseAction = a; this.actionAdapter.setPurchaseAction(a); chrome.storage.local.set({ purchaseAction: a }); };
+    Orchestrator.prototype.setStopSold = function (enabled) {
         var val = !!enabled;
         this.config.stopSold = val;
         this.config.skipSoldOut = val;
@@ -4949,7 +5561,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return Promise.resolve(val);
     };
 
-    Orchestrator.prototype._updateStopSoldUI = function() {
+    Orchestrator.prototype._updateStopSoldUI = function () {
         var btn = document.getElementById('bl-stop-sold-btn');
         var indicator = document.getElementById('bl-stop-sold-indicator');
         var label = document.getElementById('bl-stop-sold-label');
@@ -4972,7 +5584,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     };
 
-    Orchestrator.prototype._isLeadSoldOut = function(lead, card) {
+    Orchestrator.prototype._isLeadSoldOut = function (lead, card) {
         if (!card && (!lead || !lead.raw)) {
             if (lead && (lead.isSoldOut === true || lead.soldOut === true || lead.isSold === true)) return true;
             return false;
@@ -4997,7 +5609,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     return true;
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
 
         // 3. Check card buttons, badges, tags, and ribbons
         try {
@@ -5013,7 +5625,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
 
         return false;
     };
@@ -5021,7 +5633,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // ============================================================
     // TOP-CENTER LIVE TELEMETRY TOASTS
     // ============================================================
-    Orchestrator.prototype._ensureToastContainer = function() {
+    Orchestrator.prototype._ensureToastContainer = function () {
         var c = document.getElementById('bl-toast-container');
         if (!c) {
             c = document.createElement('div');
@@ -5031,7 +5643,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return c;
     };
 
-    Orchestrator.prototype.showTopToast = function(type, title, message, durationMs) {
+    Orchestrator.prototype.showTopToast = function (type, title, message, durationMs) {
         // Strictly show only lead acquisition and its direct status update toasts
         if (type !== 'found' && type !== 'acquiring' && type !== 'contacted' && type !== 'failed') {
             return;
@@ -5060,30 +5672,30 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             toast.innerHTML =
                 '<span class="bl-toast-icon">' + icon + '</span>' +
                 '<div class="bl-toast-content">' +
-                    '<div class="bl-toast-title">' + (title || 'Lead Update') + '</div>' +
-                    '<div class="bl-toast-message">' + (message || '') + '</div>' +
+                '<div class="bl-toast-title">' + (title || 'Lead Update') + '</div>' +
+                '<div class="bl-toast-message">' + (message || '') + '</div>' +
                 '</div>';
 
             container.appendChild(toast);
 
             var timeout = durationMs || 2000;
-            setTimeout(function() {
+            setTimeout(function () {
                 toast.classList.add('bl-toast-leave');
-                setTimeout(function() {
+                setTimeout(function () {
                     if (toast.parentNode) toast.parentNode.removeChild(toast);
                 }, 300);
             }, timeout);
-        } catch (e) {}
+        } catch (e) { }
     };
 
-    Orchestrator.prototype._recordLeadAcquired = function(lead) {
+    Orchestrator.prototype._recordLeadAcquired = function (lead) {
         if (!lead) return;
         var qid = lead.uniqueQueryId || lead.leadId;
         if (qid) this._acquiredLeadIds.add(String(qid));
         if (lead.leadId) this._acquiredLeadIds.add(String(lead.leadId));
 
         if (!this._acquiredRecords) this._acquiredRecords = [];
-        var norm = function(s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
+        var norm = function (s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
         var rec = {
             uniqueQueryId: String(qid || ''),
             leadId: String(lead.leadId || ''),
@@ -5106,11 +5718,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 acquiredLeadIds: arr,
                 acquiredRecords: this._acquiredRecords.slice(-500)
             });
-        } catch (e) {}
+        } catch (e) { }
         this.logger.info('🔒 Lead permanently marked ACQUIRED & ignored for future scans: ' + (qid || lead.productName) + ' [Seller: ' + (lead.senderName || 'unknown') + ']');
     };
 
-    Orchestrator.prototype._isLeadAcquired = function(lead, card) {
+    Orchestrator.prototype._isLeadAcquired = function (lead, card) {
         if (!this._acquiredLeadIds) return false;
 
         // 1. Check only explicit acquisition/contact evidence on the card.
@@ -5143,7 +5755,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             //   - If seller (or phone) matches previously acquired lead -> DUPLICATE (return true, DO NOT acquire again)
             //   - If seller is DIFFERENT -> NOT A DUPLICATE (allow acquisition!)
             if (this._acquiredRecords && this._acquiredRecords.length > 0) {
-                var norm = function(s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
+                var norm = function (s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
                 var curProd = norm(lead.productName);
                 var curSeller = norm(lead.senderName || lead.sellerName);
                 var curPhone = String(lead.senderMobile || '').replace(/[^\d]/g, '');
@@ -5168,14 +5780,14 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return false;
     };
 
-    Orchestrator.prototype._checkDynamicFilterChanges = function(forceRefresh) {
+    Orchestrator.prototype._checkDynamicFilterChanges = function (forceRefresh) {
         if (!this._supabaseEnabled || !this.supabase) return Promise.resolve(false);
         var self = this;
         var force = forceRefresh === true;
-        return this.supabase.loadFilters(force).then(function(success) {
+        return this.supabase.loadFilters(force).then(function (success) {
             if (!success) return false;
             var newFilters = self.supabase.getFilters() || [];
-            var newSignature = JSON.stringify(newFilters.map(function(f) {
+            var newSignature = JSON.stringify(newFilters.map(function (f) {
                 return {
                     id: f.id,
                     name: f.name || f.filter_name,
@@ -5207,7 +5819,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 if (self.duplicateManager) {
                     self.duplicateManager.clear();
                     if (self._acquiredLeadIds) {
-                        self._acquiredLeadIds.forEach(function(id) {
+                        self._acquiredLeadIds.forEach(function (id) {
                             self.duplicateManager.markSeen(id);
                         });
                     }
@@ -5221,7 +5833,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 return true;
             }
             return false;
-        }).catch(function() {
+        }).catch(function () {
             return false;
         });
     };
@@ -5229,7 +5841,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     // ============================================================
     // REFRESH SCAN WITHOUT WEBPAGE RELOAD
     // ============================================================
-    Orchestrator.prototype.restartScan = function() {
+    Orchestrator.prototype.restartScan = function () {
         this.logger.info('🔄 Restarting scan and refreshing portal leads...');
         this.navigator.stop();
 
@@ -5252,7 +5864,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             for (var r = 0; r < refreshSelectors.length; r++) {
                 var refEl = document.querySelector(refreshSelectors[r]);
                 if (refEl && refEl.id !== 'bl-refresh-btn' && (!refEl.id || refEl.id.indexOf('bl-') !== 0)) {
-                    try { refEl.click(); refreshedInPage = true; } catch(e) {}
+                    try { refEl.click(); refreshedInPage = true; } catch (e) { }
                     break;
                 }
             }
@@ -5274,11 +5886,11 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             for (var t = 0; t < tabSelectors.length; t++) {
                 var tab = document.querySelector(tabSelectors[t]);
                 if (tab) {
-                    try { tab.click(); refreshedInPage = true; } catch(e) {}
+                    try { tab.click(); refreshedInPage = true; } catch (e) { }
                     break;
                 }
             }
-        } catch(e) {}
+        } catch (e) { }
 
         // 2. Clear scanner emitted-cache and in-memory counters
         if (this.scanner) {
@@ -5291,7 +5903,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             this.duplicateManager._seen.clear();
             if (this._acquiredLeadIds) {
                 var selfDup = this.duplicateManager;
-                this._acquiredLeadIds.forEach(function(id) { selfDup.markSeen(id); });
+                this._acquiredLeadIds.forEach(function (id) { selfDup.markSeen(id); });
             }
         }
 
@@ -5305,10 +5917,13 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
             sessionStorage.removeItem('bl_reload_pending');
             sessionStorage.removeItem('bl_last_reload_time');
             sessionStorage.removeItem('bl_scanner_auto_resume');
+            // Bust filter cache so CRM filter changes take effect immediately
+            sessionStorage.removeItem('bl_cached_filters');
+            sessionStorage.removeItem('bl_cached_filters_ts');
             if (this.navigator && this.navigator.RELOAD_STORAGE_KEY) {
                 sessionStorage.removeItem(this.navigator.RELOAD_STORAGE_KEY);
             }
-        } catch (e) {}
+        } catch (e) { }
         this.stats.unique = 0;
         this.stats.discovered = 0;
         this.stats.duplicate = 0;
@@ -5324,11 +5939,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         var filtEl = document.getElementById('bl-stat-filtered');
         if (filtEl) filtEl.textContent = '0';
 
-        // 5. Jump to top instantly (instantaneous, no smooth-scroll delay)
-        try {
-            window.scrollTo(0, 0);
-            window.dispatchEvent(new Event('scroll'));
-        } catch (e) {}
+        // 5. (Automatic scroll-to-top removed — no scrolling in this version.)
 
         this._isPaused = false;
         this._broadcastStatus();
@@ -5345,7 +5956,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
 
         // 7. Restart continuous scanning pass cleanly
         var self = this;
-        setTimeout(function() {
+        setTimeout(function () {
             if (self.scanner) {
                 self.scanner._scan();
             }
@@ -5355,16 +5966,56 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }, 200);
     };
 
-    Orchestrator.prototype.setAutoScroll = function(e) {
+    // Emergency stop triggered when Scanner detects IndiaMART's rate-limit warning.
+    // Halts the navigator and queue, marks the extension PAUSED, and shows a status message.
+    Orchestrator.prototype._onRateLimitDetected = function () {
+        var self = this;
+        try {
+            this.logger.warn('\ud83d\udeab Rate-limit detected \u2014 pausing for 16 minutes then auto-resuming');
+            // Stop the navigator loop
+            if (this.navigator) this.navigator.stop();
+            // Pause the action queue
+            if (this.queue && typeof this.queue.pause === 'function') {
+                this.queue.pause();
+            } else if (this.queue) {
+                this.queue._paused = true;
+            }
+            this._isPaused = true;
+            this._broadcastStatus();
+            // Update UI
+            var statusEl = document.getElementById('bl-status-text');
+            if (statusEl) {
+                statusEl.textContent = '\ud83d\udeab RATE LIMITED \u2014 auto-resuming in 16 min';
+                statusEl.style.color = '#f5a623';
+            }
+            // Auto-resume after 16 minutes (IndiaMART lifts block after 15 min)
+            var RESUME_AFTER_MS = 16 * 60 * 1000;
+            if (this._rateLimitTimer) clearTimeout(this._rateLimitTimer);
+            this._rateLimitTimer = setTimeout(function () {
+                try {
+                    self.logger.info('\u23f0 Rate-limit window expired \u2014 resuming automatically');
+                    self._isPaused = false;
+                    if (self.queue && typeof self.queue.resume === 'function') self.queue.resume();
+                    else if (self.queue) self.queue._paused = false;
+                    if (self.navigator && typeof self.navigator.start === 'function') self.navigator.start();
+                    self._broadcastStatus();
+                    var stEl = document.getElementById('bl-status-text');
+                    if (stEl) { stEl.textContent = '\u25b6 RUNNING'; stEl.style.color = '#4caf50'; }
+                } catch (e) {}
+            }, RESUME_AFTER_MS);
+        } catch (e) { }
+    };
+
+    Orchestrator.prototype.setAutoScroll = function (e) {
         this.config.autoScroll = e;
         chrome.storage.local.set({ autoScroll: e });
         if (e) this.navigator.start(); else this.navigator.stop();
     };
 
-    Orchestrator.prototype.setStrictCountry = function(enabled, countries, rejectUnknown) {
+    Orchestrator.prototype.setStrictCountry = function (enabled, countries, rejectUnknown) {
         this.config.strictCountryMode = enabled === true;
         if (Array.isArray(countries)) {
-            this.config.allowedCountries = countries.map(function(c) { return String(c).toUpperCase().trim(); }).filter(function(c) { return c; });
+            this.config.allowedCountries = countries.map(function (c) { return String(c).toUpperCase().trim(); }).filter(function (c) { return c; });
         }
         if (rejectUnknown !== undefined) this.config.strictCountryRejectUnknown = rejectUnknown !== false;
         chrome.storage.local.set({
@@ -5377,20 +6028,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return Promise.resolve(true);
     };
 
-    Orchestrator.prototype.toggleSupabase = function(enabled) {
+    Orchestrator.prototype.toggleSupabase = function (enabled) {
         var self = this;
         this._supabaseEnabled = enabled;
         this.config.supabaseEnabled = enabled;
         this.keywordManager.setSupabaseEnabled(enabled);
         chrome.storage.local.set({ supabaseEnabled: enabled });
         if (enabled) {
-            return this.supabase.loadFilters(true).then(function() {
+            return this.supabase.loadFilters(true).then(function () {
                 var filtersArray = self.supabase.getFilters();
                 self.keywordManager.extractFromSupabaseFilters(filtersArray);
                 self.supabase.updateFilterStatus(true);
                 self._updateScannerLifecycleState('supabase_toggled_on');
                 return self.duplicateManager.loadFromDb();
-            }).then(function() { return true; });
+            }).then(function () { return true; });
         } else {
             this.supabase._filters = [];
             this.supabase._filtersLoaded = false;
@@ -5400,17 +6051,17 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         }
     };
 
-    Orchestrator.prototype.clearLocalDuplicateCache = function() {
+    Orchestrator.prototype.clearLocalDuplicateCache = function () {
         this.duplicateManager.clear();
         return Promise.resolve({ success: true, message: 'Duplicate cache cleared' });
     };
 
-    Orchestrator.prototype.clearAllLocalData = function() {
+    Orchestrator.prototype.clearAllLocalData = function () {
         var self = this;
-        return new Promise(function(resolve) {
-            chrome.storage.local.get(['keywords', 'mode', 'supabaseEnabled', 'scoreWeights', 'scorePenalties', 'preferredStates', 'preferredCountries', 'minScore', 'maxPerMinute', 'maxPerHour', 'maxPerDay', 'maxPerSession', 'cooldownMs', 'strictCountryMode', 'allowedCountries', 'strictCountryRejectUnknown'], function(keep) {
-                chrome.storage.local.clear(function() {
-                    chrome.storage.local.set(keep, function() {
+        return new Promise(function (resolve) {
+            chrome.storage.local.get(['keywords', 'mode', 'supabaseEnabled', 'scoreWeights', 'scorePenalties', 'preferredStates', 'preferredCountries', 'minScore', 'maxPerMinute', 'maxPerHour', 'maxPerDay', 'maxPerSession', 'cooldownMs', 'strictCountryMode', 'allowedCountries', 'strictCountryRejectUnknown'], function (keep) {
+                chrome.storage.local.clear(function () {
+                    chrome.storage.local.set(keep, function () {
                         self.duplicateManager.clear();
                         resolve({ success: true });
                     });
@@ -5419,7 +6070,40 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         });
     };
 
-    Orchestrator.prototype.emergencyStop = function() {
+    // Called immediately when a lead is acquired.
+    // Halts the hard-reload cycle so the page stays stable during contact.
+    // The existing ▶ Resume button on the panel restarts everything.
+    Orchestrator.prototype._pauseForLeadAcquired = function (lead) {
+        try {
+            // Mark that this scan cycle acquired something — _waitForQueueAndReload uses this
+            this._cycleAcquiredThisScan = true;
+
+            // Stop navigator — no more window.location.reload() until user resumes
+            if (this.navigator) this.navigator.stop();
+            // Stop scanner MutationObserver — prevents new DOM cards from triggering
+            // _onCardsDetected and queueing additional leads while paused.
+            if (this.scanner) this.scanner.stopWatching();
+            this._isPaused = true;
+            this._scannerState = SCANNER_STATES.PAUSED;
+
+            // Update panel status label
+            var statusEl = document.getElementById('bl-status-text');
+            if (statusEl) {
+                statusEl.textContent = '\u23f8 PAUSED \u2014 Lead acquired, press \u25b6 to continue';
+                statusEl.style.color = '#f5a623';
+            }
+            // Show Resume button, hide Stop button
+            var stopBtn = document.getElementById('bl-stop-btn');
+            var resumeBtn = document.getElementById('bl-resume-btn');
+            if (stopBtn) stopBtn.style.display = 'none';
+            if (resumeBtn) resumeBtn.style.display = '';
+
+            this.logger.info('\u23f8 Auto-paused after acquiring: ' + (lead && lead.productName || lead && lead.leadId || 'lead'));
+            this._broadcastStatus();
+        } catch (e) { }
+    };
+
+    Orchestrator.prototype.emergencyStop = function () {
         this._isPaused = true;
         this._scannerState = SCANNER_STATES.PAUSED;
         this.safety.emergencyStopFn ? this.safety.emergencyStopFn() : this.safety.emergencyStop();
@@ -5427,13 +6111,21 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         if (this.popupManager) this.popupManager.cancel();
         if (this.navigator) this.navigator.stop();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(false);
+        // Clear any pending-reload flags so a manual page refresh after pause
+        // does NOT auto-resume the extension unexpectedly.
+        try {
+            sessionStorage.setItem('bl_scanner_auto_resume', 'false');
+            sessionStorage.removeItem('bl_reload_pending');
+            sessionStorage.removeItem('bl_last_reload_flag');
+        } catch (e) { }
         this.logger.warn('🚨 EMERGENCY STOP ACTIVATED — Scanner & Navigator halted');
         this._broadcastStatus();
         return Promise.resolve(true);
     };
 
-    Orchestrator.prototype.resume = function() {
+    Orchestrator.prototype.resume = function () {
         this._isPaused = false;
+        this._cycleAcquiredThisScan = false; // allow reload loop to run next cycle
         this.safety.resume();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(true);
         this.logger.info('▶ RESUMED by user — evaluating eligible filters');
@@ -5442,7 +6134,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         return Promise.resolve(true);
     };
 
-    Orchestrator.prototype.getStatus = function() {
+    Orchestrator.prototype.getStatus = function () {
         var kws = this.keywordManager.getAllKeywords();
         return {
             mode: this.config.mode, stats: this.stats,
@@ -5471,7 +6163,7 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
         };
     };
 
-    Orchestrator.prototype.shutdown = function() {
+    Orchestrator.prototype.shutdown = function () {
         this.scanner.stopWatching();
         this.queue.pause();
         if (this.popupManager) this.popupManager.cancel();
@@ -5484,24 +6176,136 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
     };
 
     // ============================================================
-    // INIT
+    // INIT — multi-injection guard
     // ============================================================
-    if (window.__BUY_LEAD_ASSISTANT_V6__) {
-        console.warn('Already initialized');
+    // window.__X__ is NOT reliable in MV3 ISOLATED world: every content-script
+    // injection gets a fresh window proxy, so the flag is always undefined and
+    // multiple Orchestrator instances spawn concurrently → page OOM / crash.
+    // sessionStorage IS shared on the same page across all worlds for the same
+    // origin, so it's the correct guard here.
+    var _alreadyInit = false;
+    try { _alreadyInit = sessionStorage.getItem('__bl_v6_init__') === '1'; } catch (e) {}
+    if (_alreadyInit) {
+        console.warn('[LeadSync] Already initialized — skipping duplicate injection.');
     } else {
-        window.__BUY_LEAD_ASSISTANT_V6__ = true;
-        console.log('🚀 IndiaMART BuyLead Assistant v6.2.0');
+        try { sessionStorage.setItem('__bl_v6_init__', '1'); } catch (e) {}
+        console.log('🚀 IndiaMART BuyLead Assistant v6.4.1');
 
         var orchestrator = new Orchestrator();
         window.orchestrator = orchestrator;
 
-                // Storage-level instant synchronization across popup and portal tabs
-        chrome.storage.onChanged.addListener(function(changes, areaName) {
+        // ── Network-Intercept Fast Path v3 (Bot-Speed) ──────────────────────────
+        // Receives messages from network-interceptor.js v3 (MAIN world) via postMessage.
+        // Two message types:
+        //   { __leadsync_network__: true, leads:[...], payload:{...} }  → lead batch
+        //   { __leadsync_acq_confirm__: true, ok: bool, code: '...' }   → acq confirmed by API
+        window.addEventListener('message', function (evt) {
+            try {
+                if (!evt.data) return;
+
+                // ── Acquisition Template (Option 3 → enables Option 1) ────────────
+                // The network interceptor captured the first real contact-buyer API
+                // request. Store it so AcqApiCaller can replicate it directly.
+                if (evt.data.__leadsync_acq_template__) {
+                    if (orchestrator && orchestrator.acqApiCaller) {
+                        orchestrator.acqApiCaller.storeTemplate(evt.data);
+                        orchestrator.logger && orchestrator.logger.info(
+                            '\ud83d\udce1 ACQ template captured: ' + (evt.data.method || '') + ' ' + (evt.data.url || '')
+                        );
+                    }
+                    return;
+                }
+
+                if (evt.data.__leadsync_acq_confirm__) {
+                    if (!orchestrator || !orchestrator._inFlightLead) return;
+                    var acqOk = evt.data.ok;
+                    var inFlight = orchestrator._inFlightLead;
+                    orchestrator.logger && orchestrator.logger.info(
+                        (acqOk ? '\u2705' : '\u26a0\ufe0f') + ' Network ACQ confirm ' +
+                        (inFlight.leadId || '') + ' code=' + (evt.data.code || '')
+                    );
+                    if (acqOk) {
+                        if (orchestrator._acquiredLeadIds)
+                            orchestrator._acquiredLeadIds.add(String(inFlight.uniqueQueryId || inFlight.leadId));
+                        if (orchestrator.duplicateManager)
+                            orchestrator.duplicateManager.markSeen(inFlight.uniqueQueryId || inFlight.leadId);
+                        if (typeof orchestrator._resolveInFlight === 'function') {
+                            orchestrator._resolveInFlight({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'api_confirmed', popup: { success: true } });
+                            orchestrator._resolveInFlight = null;
+                            orchestrator._inFlightLead = null;
+                        }
+                    }
+                    return;
+                }
+
+                // ── Lead Batch ────────────────────────────────────────────────
+                if (!evt.data.__leadsync_network__) return;
+                if (!orchestrator || !orchestrator._initialized) return;
+                if (orchestrator._isPaused) return;
+
+                // v3 interceptor pre-extracts leads; v2 sends raw payload
+                var leads = evt.data.leads;
+                if (!leads || !leads.length) {
+                    leads = _netExtractLeads(evt.data.payload);
+                }
+                if (!leads || !leads.length) return;
+
+                // Build pseudo-cards for ALL leads in batch (v2 capped at 5 — removed)
+                var pseudoCards = [];
+                for (var li = 0; li < leads.length; li++) {
+                    var raw = leads[li];
+                    if (!raw) continue;
+                    var apiId = raw.uniqueQueryId || raw.query_id || raw.queryId
+                        || raw.leadId || raw.lead_id || raw.buyer_id
+                        || raw.buyerId || raw.id || null;
+                    if (!apiId) continue;
+                    pseudoCards.push({ id: 'api_' + String(apiId), element: null, _rawApiLead: raw });
+                }
+
+                if (pseudoCards.length > 0) {
+                    orchestrator.logger && orchestrator.logger.info(
+                        '\u26a1 Network-intercept v3: ' + pseudoCards.length + ' leads (' + (evt.data.sourceUrl || '') + ')'
+                    );
+                    orchestrator._onNetworkLeads(pseudoCards);
+                }
+            } catch (e) { }
+        });
+
+        // Inline helper: extract lead array from any known IndiaMART API response shape
+        function _netExtractLeads(payload) {
+            if (!payload) return null;
+            if (Array.isArray(payload)) return payload.length ? payload : null;
+            if (payload.CODE === '200' || payload.CODE === 200) {
+                var d2 = payload.DATA || payload.data;
+                if (Array.isArray(d2)) return d2.length ? d2 : null;
+                if (d2) {
+                    var flds = ['leads','buyLeadList','buyerList','enquiryList','result'];
+                    for (var fi = 0; fi < flds.length; fi++) { if (d2[flds[fi]] && Array.isArray(d2[flds[fi]])) return d2[flds[fi]]; }
+                }
+            }
+            var wrp = ['data','leads','result','response','buyerList','enquiryList','buyLeadList','DATA','LEADS'];
+            for (var wi = 0; wi < wrp.length; wi++) {
+                var v = payload[wrp[wi]];
+                if (v && Array.isArray(v) && v.length) return v;
+                if (v && typeof v === 'object') {
+                    var n2 = ['leads','buyLeadList','buyerList','enquiryList','result'];
+                    for (var ni = 0; ni < n2.length; ni++) { if (v[n2[ni]] && Array.isArray(v[n2[ni]]) && v[n2[ni]].length) return v[n2[ni]]; }
+                }
+            }
+            return null;
+        }
+
+        // Signal the MAIN-world interceptor that we're ready to receive.
+        // Any API responses buffered between document_start → now are replayed instantly.
+        window.postMessage({ __leadsync_ready__: true }, '*');
+
+
+        chrome.storage.onChanged.addListener(function (changes, areaName) {
             if (areaName !== 'local') return;
             // Instant real-time microsecond filter update
             if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters || changes.cached_filters_v1) {
                 var cachedObj = (changes.cached_filters_v1 && changes.cached_filters_v1.newValue) ||
-                                (changes.supabase_filters_cache && changes.supabase_filters_cache.newValue);
+                    (changes.supabase_filters_cache && changes.supabase_filters_cache.newValue);
                 var newFilterList = cachedObj && Array.isArray(cachedObj.filters) ? cachedObj.filters : (Array.isArray(cachedObj) ? cachedObj : null);
                 if (newFilterList && orchestrator && orchestrator.keywordManager) {
                     orchestrator.keywordManager.extractFromSupabaseFilters(newFilterList);
@@ -5526,27 +6330,27 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                 }
             }
         });
-        chrome.runtime.onMessage.addListener(function(req, sender, sendResponse) {
+        chrome.runtime.onMessage.addListener(function (req, sender, sendResponse) {
             switch (req.action) {
-                case 'GET_STATUS':              sendResponse(Object.assign({ success: true }, orchestrator.getStatus())); return true;
-                case 'GET_CONFIG':              sendResponse({ success: true, config: orchestrator.config }); return true;
-                case 'UPDATE_FULL_CONFIG':      orchestrator.updateFullConfig(req.config).then(function() { sendResponse({ success: true }); }); return true;
-                case 'SET_MODE':                orchestrator.setMode(req.mode).then(function() { sendResponse({ success: true, mode: req.mode }); }); return true;
-                case 'SET_STOP_SOLD':           orchestrator.setStopSold(req.enabled); sendResponse({ success: true }); break;
-                case 'SET_LIMITS':              orchestrator.setLimits(req.limits); sendResponse({ success: true }); break;
-                case 'SET_MIN_SCORE':           orchestrator.setMinScore(req.score); sendResponse({ success: true }); break;
-                case 'SET_AUTO_MINIMIZE':       orchestrator.setAutoMinimize(req.enabled); sendResponse({ success: true }); break;
+                case 'GET_STATUS': sendResponse(Object.assign({ success: true }, orchestrator.getStatus())); return true;
+                case 'GET_CONFIG': sendResponse({ success: true, config: orchestrator.config }); return true;
+                case 'UPDATE_FULL_CONFIG': orchestrator.updateFullConfig(req.config).then(function () { sendResponse({ success: true }); }); return true;
+                case 'SET_MODE': orchestrator.setMode(req.mode).then(function () { sendResponse({ success: true, mode: req.mode }); }); return true;
+                case 'SET_STOP_SOLD': orchestrator.setStopSold(req.enabled); sendResponse({ success: true }); break;
+                case 'SET_LIMITS': orchestrator.setLimits(req.limits); sendResponse({ success: true }); break;
+                case 'SET_MIN_SCORE': orchestrator.setMinScore(req.score); sendResponse({ success: true }); break;
+                case 'SET_AUTO_MINIMIZE': orchestrator.setAutoMinimize(req.enabled); sendResponse({ success: true }); break;
                 case 'SET_CONFIRMATION_ANSWER': orchestrator.setConfirmationAnswer(req.answer); sendResponse({ success: true }); break;
-                case 'SET_PURCHASE_ACTION':     orchestrator.setPurchaseAction(req.purchaseAction); sendResponse({ success: true }); break;
-                case 'SET_AUTO_SCROLL':         orchestrator.setAutoScroll(req.enabled); sendResponse({ success: true }); break;
-                case 'SET_STRICT_COUNTRY':      orchestrator.setStrictCountry(req.enabled, req.countries, req.rejectUnknown).then(function() { sendResponse({ success: true }); }); return true;
-                case 'TOGGLE_SUPABASE':         orchestrator.toggleSupabase(req.enabled).then(function() { sendResponse({ success: true }); }); return true;
-                case 'EMERGENCY_STOP':          orchestrator.emergencyStop().then(function() { sendResponse({ success: true }); }); return true;
-                case 'RESUME':                  orchestrator.resume().then(function() { sendResponse({ success: true }); }); return true;
-                case 'UPDATE_KEYWORDS':         orchestrator.keywordManager.updateKeywords(req.keywords).then(function() { sendResponse({ success: true }); }); return true;
-                                case 'REFRESH_FILTERS':
+                case 'SET_PURCHASE_ACTION': orchestrator.setPurchaseAction(req.purchaseAction); sendResponse({ success: true }); break;
+                case 'SET_AUTO_SCROLL': orchestrator.setAutoScroll(req.enabled); sendResponse({ success: true }); break;
+                case 'SET_STRICT_COUNTRY': orchestrator.setStrictCountry(req.enabled, req.countries, req.rejectUnknown).then(function () { sendResponse({ success: true }); }); return true;
+                case 'TOGGLE_SUPABASE': orchestrator.toggleSupabase(req.enabled).then(function () { sendResponse({ success: true }); }); return true;
+                case 'EMERGENCY_STOP': orchestrator.emergencyStop().then(function () { sendResponse({ success: true }); }); return true;
+                case 'RESUME': orchestrator.resume().then(function () { sendResponse({ success: true }); }); return true;
+                case 'UPDATE_KEYWORDS': orchestrator.keywordManager.updateKeywords(req.keywords).then(function () { sendResponse({ success: true }); }); return true;
+                case 'REFRESH_FILTERS':
                     if (orchestrator._supabaseEnabled) {
-                        orchestrator.supabase.loadFilters(true).then(function() {
+                        orchestrator.supabase.loadFilters(true).then(function () {
                             var filtersArray = orchestrator.supabase.getFilters();
                             orchestrator.keywordManager.extractFromSupabaseFilters(filtersArray);
                             orchestrator.duplicateManager.clear();
@@ -5556,9 +6360,9 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                         });
                     } else sendResponse({ success: false });
                     return true;
-                case 'RESET_DUPLICATES':        orchestrator.duplicateManager.clear(); sendResponse({ success: true }); break;
-                case 'CLEAR_DUPLICATE_CACHE':   orchestrator.clearLocalDuplicateCache().then(function(r) { sendResponse(r); }); return true;
-                case 'CLEAR_ALL_LOCAL_DATA':    orchestrator.clearAllLocalData().then(function(r) { sendResponse(r); }); return true;
+                case 'RESET_DUPLICATES': orchestrator.duplicateManager.clear(); sendResponse({ success: true }); break;
+                case 'CLEAR_DUPLICATE_CACHE': orchestrator.clearLocalDuplicateCache().then(function (r) { sendResponse(r); }); return true;
+                case 'CLEAR_ALL_LOCAL_DATA': orchestrator.clearAllLocalData().then(function (r) { sendResponse(r); }); return true;
                 case 'GET_KEYWORDS_DEBUG':
                     sendResponse({
                         success: true,
@@ -5573,14 +6377,20 @@ var mcatName = mcatEl ? mcatEl.textContent.trim() : '';
                     if (btn) { btn.click(); sendResponse({ success: true }); }
                     else sendResponse({ success: false, error: 'No button' });
                     return true;
-                case 'GET_LOGS':                chrome.storage.local.get('logs', function(result) { sendResponse(result.logs || []); }); return true;
-                case 'CLEAR_LOGS':              chrome.storage.local.set({ logs: [] }, function() { sendResponse({ success: true }); }); return true;
-                default:                        sendResponse({ success: false });
+                case 'GET_LOGS': chrome.storage.local.get('logs', function (result) { sendResponse(result.logs || []); }); return true;
+                case 'CLEAR_LOGS': chrome.storage.local.set({ logs: [] }, function () { sendResponse({ success: true }); }); return true;
+                default: sendResponse({ success: false });
             }
             return true;
         });
 
-        console.log('✅ Ready — v6.2.0');
+        // Clear init guard on unload so the next page load (after reload) re-initializes correctly.
+        // The guard only needs to prevent duplicate injection WITHIN the same page lifecycle.
+        window.addEventListener('beforeunload', function () {
+            try { sessionStorage.removeItem('__bl_v6_init__'); } catch (e) {}
+        });
+
+        console.log('✅ Ready — v6.4.1');
     }
 
 })();

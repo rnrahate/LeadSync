@@ -115,7 +115,8 @@ global.window = {
     scrollY: 0,
     location: {
         reload: () => { reloadCountCalls++; }
-    }
+    },
+    postMessage: () => {}
 };
 
 global.MutationObserver = class {
@@ -168,9 +169,9 @@ async function runTests() {
     assert.ok(orch, 'Orchestrator must be initialized');
     orch.keywordManager.getActiveFilterCount = () => 1;
 
-    await it('1. PageNavigator defaults to autoReloadOnComplete: true and autoReloadDelayMs: 100', () => {
+    await it('1. PageNavigator defaults to autoReloadOnComplete: true and autoReloadDelayMs: 2500', () => {
         assert.strictEqual(orch.navigator._settings.autoReloadOnComplete, true);
-        assert.strictEqual(orch.navigator._settings.autoReloadDelayMs, 100);
+        assert.strictEqual(orch.navigator._settings.autoReloadDelayMs, 2500);
     });
 
     await it('2. Defer reload when acquisition/contact queue is active or busy', async () => {
@@ -195,11 +196,19 @@ async function runTests() {
         }
     });
 
-    await it('3. Completed scan cycle triggers hard reload with ~100ms delay when idle', async () => {
+    await it('3. Completed scan cycle triggers hard reload with configured delay when idle', async () => {
         reloadCountCalls = 0;
+        // stop() now correctly resets _lastReloadTime (bug fixed in bundle.js),
+        // so a clean stop() is all that's needed before re-enabling for this test.
+        orch.navigator.stop();
         orch.navigator._running = true;
         orch.navigator._reloadInProgress = false;
-        orch.navigator._settings.autoReloadDelayMs = 100;
+        // Clear persisted storm guard from sessionStorage mock
+        delete mockSessionStorage._data['bl_last_reload_time'];
+        delete mockSessionStorage._data['bl_last_reload_flag'];
+        // Use a small delay for test speed — just validate flags + state, not timer firing
+        orch.navigator._settings.autoReloadDelayMs = 50;
+        orch.navigator._settings.reloadJitterMs    = 0;
 
         // State to be persisted
         orch.stats.acquired = 3;
@@ -213,7 +222,12 @@ async function runTests() {
 
         orch.navigator._waitForQueueAndReload();
 
+        // Reload must NOT fire synchronously (settle timer is 50ms, reload timer is 50ms)
         assert.strictEqual(reloadCountCalls, 0, 'Reload should not happen synchronously before delay');
+
+        // Wait for the 50ms settle timer to fire and call _autoReloadPage(), which sets _reloadInProgress
+        await new Promise(r => setTimeout(r, 80));
+
         assert.strictEqual(orch.navigator._reloadInProgress, true, 'Reload in progress flag must be set');
 
         // Check persisted state in sessionStorage
@@ -232,9 +246,13 @@ async function runTests() {
         const savedMetrics = JSON.parse(mockSessionStorage.getItem('bl_session_metrics'));
         assert.ok(savedMetrics && savedMetrics.acquisitions.length > 0);
 
-        // Wait for reload delay (100ms)
-        await new Promise(r => setTimeout(r, 130));
+        // Wait for the 50ms reload timer to fire (total elapsed ~130ms at this point)
+        await new Promise(r => setTimeout(r, 80));
         assert.strictEqual(reloadCountCalls, 1, 'window.location.reload() must be called exactly once');
+
+        // Restore default for subsequent tests
+        orch.navigator._settings.autoReloadDelayMs = 2500;
+        orch.navigator._settings.reloadJitterMs    = 400;
     });
 
     await it('4. Reload storms prevented (cooldown and in-progress guards)', async () => {

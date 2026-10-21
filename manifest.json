@@ -3,7 +3,7 @@
   "name": "IndiaMART BuyLead Assistant (Fast)",
   "version": "4.2.0",
   "description": "Fast BuyLead automation with product-name gating, strict-country filter and full Supabase integration.",
-  "homepage_url": "https://keynlabs.vercel.app/",
+  "homepage_url": "https://leadsync-tau.vercel.app/",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -25,11 +25,22 @@
         "https://app.indiamart.com/buyleads*",
         "https://app.indiamart.com/buyleads"
       ],
+      "js": ["src/network-interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://seller.indiamart.com/bltxn/*",
+        "https://seller.indiamart.com/bltxn",
+        "https://app.indiamart.com/buyleads*",
+        "https://app.indiamart.com/buyleads"
+      ],
       "js": [
         "src/supabase-service.js",
         "src/bundle.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
   "background": {
@@ -59,7 +70,8 @@
         "config/config.js",
         "config/style.css",
         "debug/index.html",
-        "debug/debug.js"
+        "debug/debug.js",
+        "src/network-interceptor.js"
       ],
       "matches": [
         "https://seller.indiamart.com/*",

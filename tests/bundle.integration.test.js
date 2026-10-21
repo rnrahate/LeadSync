@@ -167,7 +167,8 @@ global.window = {
     innerWidth: 1024,
     innerHeight: 768,
     scrollY: 0,
-    open: (url) => { global.window._lastOpenedUrl = url; }
+    open: (url) => { global.window._lastOpenedUrl = url; },
+    postMessage: () => {}
 };
 global.document = new MockElement('document');
 global.document.body = new MockElement('body');
@@ -436,8 +437,8 @@ setTimeout(() => {
         // 11. Test Filters Button Navigation
         global.window._lastOpenedUrl = null;
         filtersBtn.dispatchEvent({ type: 'click', stopPropagation: () => {} });
-        assert.strictEqual(global.window._lastOpenedUrl, 'https://ind-prtx-test.vercel.app/filters', 'Filters button must navigate to CRM/Filters URL');
-        console.log('  ✅ PASS: Filters button navigates to https://ind-prtx-test.vercel.app/filters');
+        assert.strictEqual(global.window._lastOpenedUrl, 'https://leadsync-tau.vercel.app/', 'Filters button must navigate to CRM/Filters URL');
+        console.log('  ✅ PASS: Filters button navigates to https://leadsync-tau.vercel.app/');
 
         // 12. Test Phase 6 & Phase 11: Two Distinct Buyers per Filter Quota & Deduplication
         // Release card-sold-test-2 queued earlier in the test to start with clean in-flight state

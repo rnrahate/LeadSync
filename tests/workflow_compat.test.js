@@ -129,6 +129,7 @@ class MockElement {
 global.window = global;
 global.window.addEventListener = () => {};
 global.window.removeEventListener = () => {};
+global.window.postMessage = () => {};
 global.document = {
     readyState: 'complete',
     addEventListener: () => {},

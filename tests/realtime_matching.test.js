@@ -88,6 +88,7 @@ console.log('\n=== RUNNING REAL-TIME FILTER MATCHING TESTS ===\n');
     global.window.removeEventListener = () => {};
     global.window.scrollTo = () => {};
     global.window.dispatchEvent = () => true;
+    global.window.postMessage = () => {};
     global.window.location = { reload: () => {} };
 
     global.document = {
