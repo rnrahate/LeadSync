@@ -1,27 +1,32 @@
 /**
- * LeadSync Network Interceptor v3 — Bot-Speed Edition
+ * LeadSync Network Interceptor v5 — Passive Observation Edition
  * Runs in MAIN world at document_start.
  *
- * Patches XHR & fetch BEFORE any page JS runs so IndiaMART's BuyLead
- * API responses are captured and forwarded to the content-script the
- * instant they arrive over the wire — before the React/Angular layer
- * even begins diffing the virtual DOM.
+ * Transparently monitors read-only lead feed responses (XHR & fetch)
+ * for IndiaMART BuyLead data as it arrives over the wire.
  *
- * Also intercepts the "contact buyer" API call to give us instant
- * confirmation that an acquisition succeeded without relying on
- * slow DOM mutation polling.
+ * Adheres strictly to security & reliability invariants:
+ * - Read-only: Never modifies requests, never records cookies/auth tokens.
+ * - No undocumented replay: Request body and template harvesting removed.
+ * - Bounded buffer: Prevents memory growth with dropped-record accounting.
+ * - Per-lead deduplication: Never starves a batch if only the first ID repeats.
+ * - Safe type support: Supports string, URL, Request objects, and XHR responseType.
  */
 (function () {
     'use strict';
 
-    // ── State ──────────────────────────────────────────────────────────
+    // ── State & Bounded Cache ──────────────────────────────────────────
     var _contentScriptReady = false;
-    var _buffer = [];           // messages queued before content script is ready
-    var _seenLeadUrls = {};     // dedup: dedupKey → ts of first send
-    var _seenAcqUrls  = {};     // dedup for acquisition confirmations
-    var _acqTemplateSent = false; // only send the template once
+    var _buffer = []; // Max 50 items before content script signals ready
+    var MAX_BUFFER_SIZE = 50;
+    var _droppedBufferCount = 0;
 
-    // ── URL pattern sets ────────────────────────────────────────────────
+    // Per-lead dedup cache: leadId -> timestamp (bounded to 1000 items, 10 min TTL)
+    var _seenLeadIds = new Map();
+    var DEDUP_TTL_MS = 10 * 60 * 1000;
+    var MAX_DEDUP_SIZE = 1000;
+
+    // ── URL pattern sets for passive lead observation ───────────────────
     var LEAD_URL_PATTERNS = [
         /bltxn/i,
         /buylead/i,
@@ -39,77 +44,84 @@
         /BLTxnList/i
     ];
 
-    // Patterns that indicate an "acquire / contact buyer" API call
-    var ACQ_URL_PATTERNS = [
-        /contactbuyer/i,
-        /contact_buyer/i,
-        /acquirelead/i,
-        /acquire_lead/i,
-        /sendEnquiry/i,
-        /send_enquiry/i,
-        /blacquire/i,
-        /buyerlead.*contact/i,
-        /contact.*buylead/i,
-        /connectBuyer/i,
-        /bltxnapi.*(?:contact|acquire|buy|consume|reply|enquiry)/i,
-        /bltxn.*(?:contact|acquire|buy|consume|reply|enquiry)/i,
-        /saveBuyerLead/i,
-        /consumeLead/i,
-        /consumeBuyLead/i,
-        /leadConsume/i,
-        /buyLeadConsume/i,
-        /free.*lead/i,
-        /free.*contact/i,
-        /free.*enquiry/i,
-        /view.*contact/i,
-        /view.*buyer/i,
-        /get.*contact/i,
-        /unmask/i,
-        /display.*contact/i,
-        /contact.*details/i,
-        /buyer.*details/i,
-        /bltxnapi.*(?:free|view|lead|detail)/i,
-        /bltxn.*(?:free|view|lead|detail)/i,
-        /enquiry.*(?:submit|send|save|post)/i
-    ];
-
-    function testPatterns(patterns, url) {
-        if (!url) return false;
-        for (var i = 0; i < patterns.length; i++) {
-            if (patterns[i].test(url)) return true;
+    function isLeadFeedUrl(url) {
+        if (!url || typeof url !== 'string') return false;
+        for (var i = 0; i < LEAD_URL_PATTERNS.length; i++) {
+            if (LEAD_URL_PATTERNS[i].test(url)) return true;
         }
         return false;
     }
 
-    // ── Extract a stable dedup key from url + first-lead id ────────────
-    function dedupKey(url, firstId) {
-        // Strip query string params that change per-poll (timestamp, page)
-        var base = (url || '').replace(/[?&](ts|_t|page|pg|offset|rand|_)=[^&]*/gi, '');
-        return base + '|' + (firstId || '');
+    function sanitizeUrl(rawUrl) {
+        if (!rawUrl) return '';
+        try {
+            var parsed = new URL(rawUrl, window.location.href);
+            // Retain path and non-sensitive query params
+            return parsed.pathname + parsed.search;
+        } catch (e) {
+            return String(rawUrl).substring(0, 150);
+        }
     }
 
-    // ── Extract lead array from any known IndiaMART API shape ───────────
+    function generateTraceId(leadId) {
+        if (leadId) {
+            var str = String(leadId).trim();
+            var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+            for (var i = 0; i < str.length; i++) {
+                var ch = str.charCodeAt(i);
+                h1 = Math.imul(h1 ^ ch, 2654435761);
+                h2 = Math.imul(h2 ^ ch, 1597334677);
+            }
+            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+            var hex = ('00000000' + (h1 >>> 0).toString(16)).slice(-8) + ('00000000' + (h2 >>> 0).toString(16)).slice(-8);
+            return 'tr_' + hex;
+        }
+        return 'tr_' + Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    }
+
+    function emitLog(level, event, reasonCode, context, metrics, error) {
+        try {
+            var logMsg = {
+                __leadsync_log__: true,
+                schemaVersion: '1.0.0',
+                timestamp: new Date().toISOString(),
+                level: level || 'INFO',
+                event: event,
+                component: 'NetworkInterceptor',
+                reasonCode: reasonCode || null,
+                context: context || {},
+                metrics: metrics || null,
+                error: error ? { message: error.message || String(error) } : null
+            };
+            if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
+                window.postMessage(logMsg, '*');
+            }
+        } catch (e) { }
+    }
+
+    // ── Extract lead array from IndiaMART API shapes ────────────────────
     function extractLeads(data) {
         if (!data) return null;
-        // Direct array
         if (Array.isArray(data)) return data.length ? data : null;
-        // Nested CODE/DATA wrapper (most common IndiaMART pattern)
+
+        // Nested CODE/DATA wrapper
         if (data.CODE === '200' || data.CODE === 200) {
             var d = data.DATA || data.data;
             if (Array.isArray(d)) return d.length ? d : null;
-            if (d) {
+            if (d && typeof d === 'object') {
                 var candidates = ['leads', 'buyLeadList', 'buyerList', 'enquiryList', 'result', 'list'];
                 for (var c = 0; c < candidates.length; c++) {
                     if (d[candidates[c]] && Array.isArray(d[candidates[c]])) return d[candidates[c]];
                 }
             }
         }
+
         // Standard REST wrappers
         var wrappers = ['data', 'leads', 'result', 'response', 'buyerList', 'enquiryList', 'buyLeadList', 'DATA', 'LEADS'];
         for (var w = 0; w < wrappers.length; w++) {
             var val = data[wrappers[w]];
             if (val && Array.isArray(val) && val.length) return val;
-            // One level deeper
             if (val && typeof val === 'object') {
                 var inner = ['leads', 'buyLeadList', 'buyerList', 'enquiryList', 'result'];
                 for (var ii = 0; ii < inner.length; ii++) {
@@ -120,97 +132,115 @@
         return null;
     }
 
-    // ── Build and send/buffer a LEADS message ───────────────────────────
-    function handleLeadResponse(rawText, sourceUrl) {
-        try {
-            var data = JSON.parse(rawText);
-            var leads = extractLeads(data);
-            if (!leads || !leads.length) return;
+    // ── Clean & Deduplicate Individual Leads ───────────────────────────
+    function cleanAndDedupLeads(rawLeads) {
+        var now = Date.now();
+        // Prune stale dedup entries periodically
+        if (_seenLeadIds.size > MAX_DEDUP_SIZE) {
+            _seenLeadIds.forEach(function (ts, id) {
+                if (now - ts > DEDUP_TTL_MS) _seenLeadIds.delete(id);
+            });
+        }
 
-            // Stable dedup: use first lead's uniqueQueryId so a re-poll
-            // of the same batch doesn't create duplicates
-            var firstId = leads[0] && (leads[0].uniqueQueryId || leads[0].query_id || leads[0].queryId || leads[0].id || '');
-            var key = dedupKey(sourceUrl, firstId);
-            var now = Date.now();
-            if (_seenLeadUrls[key] && (now - _seenLeadUrls[key]) < 4000) return; // same batch within 4s
-            _seenLeadUrls[key] = now;
+        var result = [];
+        for (var i = 0; i < rawLeads.length; i++) {
+            var item = rawLeads[i];
+            if (!item || typeof item !== 'object') continue;
+
+            var id = String(item.uniqueQueryId || item.query_id || item.queryId || item.id || item.leadId || '').trim();
+            if (id) {
+                var lastSeen = _seenLeadIds.get(id);
+                if (lastSeen && (now - lastSeen < DEDUP_TTL_MS)) {
+                    continue; // Skip seen lead
+                }
+                _seenLeadIds.set(id, now);
+            }
+
+            // Create sanitized canonical representation for passive observation
+            result.push({
+                uniqueQueryId: id || null,
+                traceId: generateTraceId(id),
+                queryProductName: item.queryProductName || item.productName || item.subject || item.title || '',
+                queryMessage: item.queryMessage || item.message || item.desc || '',
+                senderCity: item.senderCity || item.city || '',
+                senderState: item.senderState || item.state || '',
+                senderCountryIso: item.senderCountryIso || item.countryIso || item.country || null,
+                source: 'NETWORK_PASSIVE',
+                observedAt: now
+            });
+        }
+        return result;
+    }
+
+    // ── Build and send/buffer a PASSIVE LEADS message ───────────────────
+    function handleLeadResponse(parsedOrText, sourceUrl) {
+        var t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        var sanitizedUrl = sanitizeUrl(sourceUrl);
+        emitLog('DEBUG', 'network.response.observed', null, { url: sanitizedUrl });
+
+        try {
+            var data = null;
+            if (typeof parsedOrText === 'string') {
+                if (!parsedOrText.trim()) return;
+                try {
+                    data = JSON.parse(parsedOrText);
+                } catch (pe) {
+                    emitLog('DEBUG', 'network.payload.rejected', 'INVALID_JSON', { url: sanitizedUrl });
+                    return;
+                }
+            } else if (parsedOrText && typeof parsedOrText === 'object') {
+                data = parsedOrText;
+            } else {
+                emitLog('DEBUG', 'network.payload.rejected', 'UNSUPPORTED_TYPE', { url: sanitizedUrl });
+                return;
+            }
+
+            var rawLeads = extractLeads(data);
+            if (!rawLeads || !rawLeads.length) {
+                emitLog('TRACE', 'network.payload.rejected', 'NO_LEADS_FOUND', { url: sanitizedUrl });
+                return;
+            }
+
+            var validLeads = cleanAndDedupLeads(rawLeads);
+            if (!validLeads.length) return;
+
+            var duration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+            emitLog('INFO', 'network.payload.parsed', 'SUCCESS', { url: sanitizedUrl, leadCount: validLeads.length }, { leadCount: validLeads.length, durationMs: duration });
 
             var msg = {
                 __leadsync_network__: true,
-                leads: leads,          // pre-extracted — saves content script work
-                payload: data,         // full payload for fallback
-                sourceUrl: sourceUrl,
-                ts: now
+                __leadsync_passive_lead__: true,
+                leads: validLeads,
+                sourceUrl: sanitizedUrl,
+                ts: Date.now(),
+                droppedCount: _droppedBufferCount
             };
 
             if (_contentScriptReady) {
                 window.postMessage(msg, '*');
             } else {
+                if (_buffer.length >= MAX_BUFFER_SIZE) {
+                    _buffer.shift(); // Evict oldest
+                    _droppedBufferCount++;
+                }
                 _buffer.push(msg);
             }
-        } catch (e) {}
+        } catch (e) {
+            emitLog('ERROR', 'network.capture.failed', 'EXCEPTION', { url: sanitizedUrl }, null, e);
+        }
     }
-
-    // ── Build and send/buffer an ACQUISITION CONFIRMATION message ───────
-    function handleAcqResponse(rawText, sourceUrl) {
-        try {
-            var data = JSON.parse(rawText);
-            // IndiaMART returns CODE:"200" on success, "500"/other on failure
-            var ok = data.CODE === '200' || data.CODE === 200
-                  || data.code === 200 || data.status === 'success'
-                  || data.success === true || data.STATUS === 'SUCCESS';
-            var key = sourceUrl + '_acq';
-            if (_seenAcqUrls[key]) return;
-            _seenAcqUrls[key] = true;
-            // Auto-clear after 500ms so the same URL can confirm again next lead
-            setTimeout(function () { delete _seenAcqUrls[key]; }, 500);
-
-            var msg = {
-                __leadsync_acq_confirm__: true,
-                ok: ok,
-                code: data.CODE || data.code || '',
-                message: data.MESSAGE || data.message || data.msg || '',
-                sourceUrl: sourceUrl,
-                ts: Date.now()
-            };
-
-            if (_contentScriptReady) {
-                window.postMessage(msg, '*');
-            } else {
-                _buffer.push(msg);
-            }
-        } catch (e) {}
-    }
-
-    // ── Build and send/buffer an ACQUISITION TEMPLATE message ──────────
-    // Captures the first real acquisition request (body + URL + method) so the
-    // content script can replicate it directly for future leads — no DOM click needed.
-    function handleAcqTemplate(method, url, body, contentType) {
-        if (_acqTemplateSent) return; // only capture once
-        _acqTemplateSent = true;
-        var msg = {
-            __leadsync_acq_template__: true,
-            method: method || 'POST',
-            url: url,
-            body: body || '',
-            contentType: contentType || 'application/x-www-form-urlencoded',
-            ts: Date.now()
-        };
-        if (_contentScriptReady) window.postMessage(msg, '*');
-        else _buffer.push(msg);
-    }
-
 
     function flushBuffer() {
-        for (var i = 0; i < _buffer.length; i++) {
-            window.postMessage(_buffer[i], '*');
+        while (_buffer.length > 0) {
+            var msg = _buffer.shift();
+            msg.droppedCount = _droppedBufferCount;
+            window.postMessage(msg, '*');
         }
-        _buffer = [];
     }
 
     // ── Listen for content script ready signal ──────────────────────────
     window.addEventListener('message', function (evt) {
-        if (!evt.data) return;
+        if (!evt || !evt.data || evt.source !== window) return;
         if (evt.data.__leadsync_ready__) {
             _contentScriptReady = true;
             flushBuffer();
@@ -218,131 +248,100 @@
     });
 
     // ── Patch XMLHttpRequest ────────────────────────────────────────────
-    var OrigXHR = window.XMLHttpRequest;
+    var OrigXHR = typeof window !== 'undefined' ? window.XMLHttpRequest : null;
+    if (OrigXHR && OrigXHR.prototype) {
+        function PatchedXHR() {
+            var xhr = new OrigXHR();
+            var _url = '';
+            var _isLead = false;
 
-    function PatchedXHR() {
-        var xhr = new OrigXHR();
-        var _url  = '';
-        var _isLead = false;
-        var _isAcq  = false;
+            var origOpen = xhr.open.bind(xhr);
+            xhr.open = function (method, url) {
+                _url = typeof url === 'string' ? url : (url && url.toString ? url.toString() : '');
+                _isLead = isLeadFeedUrl(_url);
+                return origOpen.apply(xhr, arguments);
+            };
 
-        var _method  = 'GET';
-        var _body    = null;
-        var _contentType = '';
-
-        var origOpen = xhr.open.bind(xhr);
-        xhr.open = function (method, url) {
-            _url    = url || '';
-            _method = (method || 'GET').toUpperCase();
-            _isLead = testPatterns(LEAD_URL_PATTERNS, _url);
-            _isAcq  = testPatterns(ACQ_URL_PATTERNS, _url);
-            return origOpen.apply(xhr, arguments);
-        };
-
-        var origSetHeader = xhr.setRequestHeader.bind(xhr);
-        xhr.setRequestHeader = function(name, value) {
-            if (name && name.toLowerCase() === 'content-type') _contentType = value || '';
-            return origSetHeader.apply(xhr, arguments);
-        };
-
-        var origSend = xhr.send.bind(xhr);
-        xhr.send = function (body) {
-            if (_isLead || _isAcq) {
-                if (_isAcq && body != null) _body = body;
-                var capturedUrl  = _url;
-                var capturedLead = _isLead;
-                var capturedAcq  = _isAcq;
-                var capturedBody = _body;
-                var capturedMethod = _method;
-                var capturedContentType = _contentType;
-                xhr.addEventListener('load', function () {
-                    try {
-                        if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
-                            if (capturedLead) handleLeadResponse(xhr.responseText, capturedUrl);
-                            if (capturedAcq) {
-                                handleAcqResponse(xhr.responseText, capturedUrl);
-                                // Capture template from first successful ACQ request
-                                try {
-                                    var d = JSON.parse(xhr.responseText);
-                                    var ok = d.CODE === '200' || d.CODE === 200 || d.code === 200 || d.code === '200'
-                                          || d.status === 'success' || d.success === true || d.STATUS === 'SUCCESS';
-                                    if (ok) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedContentType);
-                                } catch (e) {
-                                    if (xhr.status === 200) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedContentType);
+            var origSend = xhr.send.bind(xhr);
+            xhr.send = function () {
+                if (_isLead) {
+                    var capturedUrl = _url;
+                    xhr.addEventListener('load', function () {
+                        try {
+                            if (xhr.status >= 200 && xhr.status < 300) {
+                                if (xhr.responseType === '' || xhr.responseType === 'text') {
+                                    if (xhr.responseText) handleLeadResponse(xhr.responseText, capturedUrl);
+                                } else if (xhr.responseType === 'json' && xhr.response) {
+                                    handleLeadResponse(xhr.response, capturedUrl);
                                 }
                             }
-                        }
-                    } catch (e) {}
-                }, { once: true });
-            }
-            return origSend.apply(xhr, arguments);
-        };
+                        } catch (e) {}
+                    }, { once: true });
+                }
+                return origSend.apply(xhr, arguments);
+            };
 
-        return xhr;
+            return xhr;
+        }
+
+        PatchedXHR.prototype = OrigXHR.prototype;
+        try {
+            PatchedXHR.UNSENT = 0;
+            PatchedXHR.OPENED = 1;
+            PatchedXHR.HEADERS_RECEIVED = 2;
+            PatchedXHR.LOADING = 3;
+            PatchedXHR.DONE = 4;
+        } catch (e) {}
+        window.XMLHttpRequest = PatchedXHR;
     }
 
-    PatchedXHR.prototype = OrigXHR.prototype;
-    try {
-        PatchedXHR.UNSENT           = 0;
-        PatchedXHR.OPENED           = 1;
-        PatchedXHR.HEADERS_RECEIVED = 2;
-        PatchedXHR.LOADING          = 3;
-        PatchedXHR.DONE             = 4;
-    } catch (e) {}
-    window.XMLHttpRequest = PatchedXHR;
-
     // ── Patch fetch ─────────────────────────────────────────────────────
-    var origFetch = window.fetch;
-    window.fetch = function (input, init) {
-        var url = typeof input === 'string' ? input
-                : (input && input.url) ? input.url : '';
+    var origFetch = typeof window !== 'undefined' ? window.fetch : null;
+    if (origFetch) {
+        window.fetch = function (input) {
+            var url = typeof input === 'string'
+                ? input
+                : (input && input.url)
+                    ? input.url
+                    : (input && typeof input.toString === 'function')
+                        ? input.toString()
+                        : '';
 
-        var isLead = testPatterns(LEAD_URL_PATTERNS, url);
-        var isAcq  = testPatterns(ACQ_URL_PATTERNS, url);
+            var isLead = isLeadFeedUrl(url);
+            var p = origFetch.apply(this, arguments);
 
-        // Capture ACQ request details before fetch consumes them
-        var acqBody        = init && init.body        ? init.body        : null;
-        var acqMethod      = init && init.method      ? init.method.toUpperCase() : 'POST';
-        var acqContentType = '';
-        if (init && init.headers) {
-            try {
-                var hdrs = init.headers;
-                acqContentType = (hdrs instanceof Headers ? hdrs.get('content-type') : hdrs['content-type']) || '';
-            } catch (e) {}
-        }
-
-        var p = origFetch.apply(this, arguments);
-
-        if (isLead || isAcq) {
-            var capturedUrl   = url;
-            var capturedLead  = isLead;
-            var capturedAcq   = isAcq;
-            var capturedBody  = acqBody;
-            var capturedMethod = acqMethod;
-            var capturedCT    = acqContentType;
-            p = p.then(function (response) {
-                var cloned = response.clone();
-                cloned.text().then(function (text) {
-                    if (!text) return;
-                    if (capturedLead) handleLeadResponse(text, capturedUrl);
-                    if (capturedAcq) {
-                        handleAcqResponse(text, capturedUrl);
-                        // Capture template from first successful ACQ fetch
-                        try {
-                            var d = JSON.parse(text);
-                            var ok = d.CODE === '200' || d.CODE === 200 || d.code === 200 || d.code === '200'
-                                  || d.status === 'success' || d.success === true || d.STATUS === 'SUCCESS';
-                            if (ok) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedCT);
-                        } catch (e) {
-                            if (response && response.status === 200) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedCT);
-                        }
+            if (isLead) {
+                var capturedUrl = url;
+                p = p.then(function (response) {
+                    if (response && response.status >= 200 && response.status < 300) {
+                        var cloned = response.clone();
+                        cloned.text().then(function (text) {
+                            if (text) handleLeadResponse(text, capturedUrl);
+                        }).catch(function () {});
                     }
-                }).catch(function () {});
-                return response;
-            });
-        }
+                    return response;
+                });
+            }
+            return p;
+        };
+    }
 
-        return p;
-    };
+    emitLog('INFO', 'network.interceptor.initialized', 'SUCCESS');
+
+    if (typeof window !== 'undefined') {
+        window.__leadsync_interceptor__ = {
+            extractLeads: extractLeads,
+            cleanAndDedupLeads: cleanAndDedupLeads,
+            isLeadFeedUrl: isLeadFeedUrl
+        };
+    }
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = {
+            extractLeads: extractLeads,
+            cleanAndDedupLeads: cleanAndDedupLeads,
+            isLeadFeedUrl: isLeadFeedUrl
+        };
+    }
 
 })();
+

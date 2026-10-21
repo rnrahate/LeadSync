@@ -1,13 +1,13 @@
 
 // src/bundle.js
-// IndiaMART BuyLead Assistant - v6.3.0
+// IndiaMART BuyLead Assistant - v5.0.0
 // ============================================================================
-// CHANGELOG v6.3.0
+// CHANGELOG v5.0.0 - Production Reliability & Review Workflow Refactor
 // ============================================================================
 // Developed by Keyn Labs
 // ============================================================================
 
-console.log('🎯 IndiaMART BuyLead Assistant v6.4.0 (bot-speed network-intercept + ACQ confirmation)');
+console.log('🎯 IndiaMART BuyLead Assistant v5.0.0 (Reliable Lead-Monitoring & Review Assistant)');
 console.log('📦 Developed by Keyn Labs');
 console.log('🔗 https://keynlabs.vercel.app/');
 
@@ -15,16 +15,16 @@ console.log('🔗 https://keynlabs.vercel.app/');
     'use strict';
 
     // ============================================================
-    // SCAN LIMIT — max distinct lead cards processed per scan cycle.
-    // Scanning stops after this many, regardless of page length.
-    // No automatic scrolling is performed to reveal more cards.
+    // SCAN LIMIT — maximum DOM lead cards processed per scan cycle.
+    // Fair bounded scanning without starvation.
     // ============================================================
     var MAX_LEADS_PER_CYCLE = 5;
+    var MAX_DOM_SCAN_LIMIT = 5;
 
     // ============================================================
     // RATE-LIMIT DETECTION — phrases from IndiaMART's account-restriction banner.
     // When any of these substrings appear in the visible page body the extension
-    // must stop all automated activity immediately.
+    // halts all activity immediately via the persistent CircuitBreaker.
     // ============================================================
     var RATE_LIMIT_PHRASES = [
         'unusually high activity',
@@ -35,13 +35,130 @@ console.log('🔗 https://keynlabs.vercel.app/');
     ];
 
     // ============================================================
+    // CIRCUIT BREAKER STATES
+    // ============================================================
+    var CIRCUIT_BREAKER_STATES = {
+        NORMAL: 'NORMAL',
+        PAUSED_RESTRICTION: 'PAUSED_RESTRICTION',
+        REQUIRES_USER_REVIEW: 'REQUIRES_USER_REVIEW'
+    };
+
+    function CircuitBreaker() {
+        this._state = CIRCUIT_BREAKER_STATES.NORMAL;
+        this._reason = '';
+        this._trippedAt = 0;
+        this._listeners = [];
+        this._loadState();
+    }
+
+    CircuitBreaker.prototype._loadState = function () {
+        var self = this;
+        try {
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(['bl_circuit_breaker_state', 'bl_circuit_breaker_reason', 'bl_circuit_breaker_tripped_at', 'bl_circuit_breaker'], function (res) {
+                    if (res && res.bl_circuit_breaker && res.bl_circuit_breaker.state) {
+                        self._state = res.bl_circuit_breaker.state;
+                        self._reason = res.bl_circuit_breaker.reason || '';
+                        self._trippedAt = res.bl_circuit_breaker.trippedAt || 0;
+                        self._notify();
+                    } else if (res && res.bl_circuit_breaker_state) {
+                        self._state = res.bl_circuit_breaker_state;
+                        self._reason = res.bl_circuit_breaker_reason || '';
+                        self._trippedAt = res.bl_circuit_breaker_tripped_at || 0;
+                        self._notify();
+                    }
+                });
+            } else if (typeof sessionStorage !== 'undefined') {
+                var st = sessionStorage.getItem('bl_circuit_breaker_state');
+                if (st) {
+                    self._state = st;
+                    self._reason = sessionStorage.getItem('bl_circuit_breaker_reason') || '';
+                    self._trippedAt = parseInt(sessionStorage.getItem('bl_circuit_breaker_tripped_at') || '0', 10);
+                }
+            }
+        } catch (e) { }
+    };
+
+    CircuitBreaker.prototype._saveState = function () {
+        try {
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set({
+                    bl_circuit_breaker_state: this._state,
+                    bl_circuit_breaker_reason: this._reason,
+                    bl_circuit_breaker_tripped_at: this._trippedAt,
+                    bl_circuit_breaker: {
+                        state: this._state,
+                        reason: this._reason,
+                        trippedAt: this._trippedAt
+                    }
+                });
+            }
+            if (typeof sessionStorage !== 'undefined') {
+                sessionStorage.setItem('bl_circuit_breaker_state', this._state);
+                sessionStorage.setItem('bl_circuit_breaker_reason', this._reason);
+                sessionStorage.setItem('bl_circuit_breaker_tripped_at', String(this._trippedAt));
+            }
+        } catch (e) { }
+    };
+
+    Object.defineProperty(CircuitBreaker.prototype, 'state', {
+        get: function () { return this._state; }
+    });
+    CircuitBreaker.prototype.getState = function () { return this._state; };
+    CircuitBreaker.prototype.getReason = function () { return this._reason; };
+    CircuitBreaker.prototype.isNormal = function () { return this._state === CIRCUIT_BREAKER_STATES.NORMAL; };
+    CircuitBreaker.prototype.canExecute = function () { return this._state === CIRCUIT_BREAKER_STATES.NORMAL; };
+    CircuitBreaker.prototype.canProceed = function () { return this._state === CIRCUIT_BREAKER_STATES.NORMAL; };
+
+    CircuitBreaker.prototype.trip = function (reason, details) {
+        this._state = CIRCUIT_BREAKER_STATES.PAUSED_RESTRICTION;
+        this._reason = reason || 'Rate limit or restriction detected';
+        this._trippedAt = Date.now();
+        this._saveState();
+        this._notify();
+    };
+
+    CircuitBreaker.prototype.requireUserReview = function (reason, details) {
+        this._state = CIRCUIT_BREAKER_STATES.REQUIRES_USER_REVIEW;
+        this._reason = reason || 'Requires explicit user review';
+        this._trippedAt = Date.now();
+        this._saveState();
+        this._notify();
+    };
+
+    CircuitBreaker.prototype.reset = function (invokedBy) {
+        // Only explicit user action can reset the circuit breaker
+        if (invokedBy !== 'user_action' && invokedBy !== 'manual_resume') {
+            console.warn('[CircuitBreaker] Ignored non-user reset attempt:', invokedBy);
+            return false;
+        }
+        this._state = CIRCUIT_BREAKER_STATES.NORMAL;
+        this._reason = '';
+        this._trippedAt = 0;
+        this._saveState();
+        this._notify();
+        return true;
+    };
+
+    CircuitBreaker.prototype.addListener = function (fn) {
+        if (typeof fn === 'function') this._listeners.push(fn);
+    };
+
+    CircuitBreaker.prototype._notify = function () {
+        for (var i = 0; i < this._listeners.length; i++) {
+            try { this._listeners[i](this._state, this._reason); } catch (e) { }
+        }
+    };
+
+    // ============================================================
     // DEFAULT CONFIG
     // ============================================================
     var DEFAULT_CONFIG = {
-        mode: 'AUTOMATIC',
+        // Workflow: Default to REVIEW mode for safety and explicit user confirmation
+        mode: 'REVIEW',
         minScore: 60,
 
-        // ---- SPEED TUNING (v6.2) ----
+        // ---- SAFETY LIMITS ----
         maxPerMinute: 60,
         maxPerHour: 400,
         maxPerDay: 2000,
@@ -64,14 +181,13 @@ console.log('🔗 https://keynlabs.vercel.app/');
         preferredCountries: ['IN'],
 
         // ---- NAVIGATOR ----
-        // autoScroll intentionally removed — the extension no longer scrolls.
         loopIntervalMs: 100,
         loadMoreWaitMs: 900,
         maxStuckLoops: 3,
-        maxReloadsPerSession: 999999,
-        autoReloadOnComplete: typeof process !== 'undefined',
-        autoReloadDelayMs: 2500,    // 2.5 second reload interval
-        reloadJitterMs:    400,     // ±400ms jitter
+        maxReloadsPerSession: 0,
+        autoReloadOnComplete: false,
+        autoReloadDelayMs: 2500,
+        reloadJitterMs:    400,
 
         // ---- POPUP ----
         autoMinimize: true,
@@ -87,64 +203,380 @@ console.log('🔗 https://keynlabs.vercel.app/');
     };
 
     // ============================================================
-    // LOGGER (batched storage writes, unchanged)
+    // PRIVACY-SAFE LOG SANITIZER
     // ============================================================
-    var LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4, FATAL: 5 };
-    var LEVEL_NAMES = { 0: 'TRACE', 1: 'DEBUG', 2: 'INFO', 3: 'WARN', 4: 'ERROR', 5: 'FATAL' };
+    function _sanitizeLogValue(val, depth) {
+        if (depth > 4) return '[MAX_DEPTH]';
+        if (typeof val === 'string') {
+            var s = val.replace(/\b(?:\+?91[\s-]?)?[6-9]\d{9}\b/g, '[REDACTED_PHONE]');
+            s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]');
+            return s;
+        }
+        if (val && typeof val === 'object') {
+            if (Array.isArray(val)) {
+                return val.map(function (item) { return _sanitizeLogValue(item, depth + 1); });
+            }
+            var cleaned = {};
+            for (var k in val) {
+                if (!val.hasOwnProperty(k)) continue;
+                var lk = k.toLowerCase();
+                if (lk.indexOf('token') !== -1 || lk.indexOf('auth') !== -1 || lk.indexOf('cookie') !== -1 ||
+                    lk.indexOf('key') !== -1 || lk.indexOf('secret') !== -1 || lk.indexOf('password') !== -1) {
+                    cleaned[k] = '[REDACTED_SECRET]';
+                } else if (lk.indexOf('mobile') !== -1 || lk.indexOf('phone') !== -1) {
+                    cleaned[k] = '[REDACTED_PHONE]';
+                } else if (lk.indexOf('email') !== -1) {
+                    cleaned[k] = '[REDACTED_EMAIL]';
+                } else {
+                    cleaned[k] = _sanitizeLogValue(val[k], depth + 1);
+                }
+            }
+            return cleaned;
+        }
+        return val;
+    }
+
+    // ============================================================
+    // ============================================================
+    // STRUCTURED LOGGER & OBSERVABILITY ENGINE (Schema v1.0.0)
+    // ============================================================
+    var LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
+    var LEVEL_NAMES = { 0: 'TRACE', 1: 'DEBUG', 2: 'INFO', 3: 'WARN', 4: 'ERROR' };
     var _logQueue = [];
     var _logFlushTimer = null;
-    // Per-page-load instance id + init reason (filled in by the init block at the bottom).
+    var _isFlushing = false;
+    var _pendingFlush = false;
+    var _droppedLogsCount = 0;
+    var _persistenceErrorsCount = 0;
+    var MAX_QUEUE_SIZE = 500;
+    var MAX_LOGS_RETENTION = 1000;
+    var UNCHANGED_AGGREGATION_WINDOW_MS = 5000;
+    var _lastEmittedSignatures = new Map();
     var _initInfo = { instanceId: 'bl_pre_init', reason: 'unknown' };
-    function _flushLogsNow() {
+
+    function generateTraceId(leadId) {
+        if (leadId) {
+            var str = String(leadId).trim();
+            var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+            for (var i = 0; i < str.length; i++) {
+                var ch = str.charCodeAt(i);
+                h1 = Math.imul(h1 ^ ch, 2654435761);
+                h2 = Math.imul(h2 ^ ch, 1597334677);
+            }
+            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+            var hex = ('00000000' + (h1 >>> 0).toString(16)).slice(-8) + ('00000000' + (h2 >>> 0).toString(16)).slice(-8);
+            return 'tr_' + hex;
+        }
+        return 'tr_' + Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    }
+
+    function generateOperationId(prefix) {
+        var p = prefix ? (prefix + '_') : 'op_';
+        return p + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+    }
+
+    var _activeFlushPromise = null;
+
+    function _shouldSuppress(event, component, reasonCode, contextSummary) {
+        if (event !== 'filters.config.unchanged' && event !== 'scanner.card.duplicate' && reasonCode !== 'CONFIG_UNCHANGED' && reasonCode !== 'DUPLICATE_OBSERVATION') {
+            return false;
+        }
+        var key = event + '|' + component + '|' + (reasonCode || '') + '|' + (contextSummary || '');
+        var now = Date.now();
+        var last = _lastEmittedSignatures.get(key);
+        if (last && (now - last.timestamp < UNCHANGED_AGGREGATION_WINDOW_MS)) {
+            last.count = (last.count || 1) + 1;
+            return true;
+        }
+        _lastEmittedSignatures.set(key, { timestamp: now, count: 1 });
+        if (_lastEmittedSignatures.size > 200) {
+            _lastEmittedSignatures.clear();
+        }
+        return false;
+    }
+
+    function _flushLogsNow(callback) {
         if (_logFlushTimer) { clearTimeout(_logFlushTimer); _logFlushTimer = null; }
-        var batch = _logQueue.splice(0, _logQueue.length);
-        if (batch.length === 0) return;
-        try {
-            chrome.storage.local.get('logs', function (result) {
-                var logs = ((result && result.logs) || []).concat(batch);
-                if (logs.length > 500) logs = logs.slice(-500);
-                chrome.storage.local.set({ logs: logs });
+        if (_activeFlushPromise) {
+            return _activeFlushPromise.then(function () {
+                if (_logQueue.length > 0) {
+                    return _flushLogsNow(callback);
+                }
+                if (typeof callback === 'function') {
+                    try { callback(); } catch (e) { }
+                }
             });
-        } catch (e) { }
+        }
+
+        if (_logQueue.length === 0) {
+            if (typeof callback === 'function') {
+                try { callback(); } catch (e) { }
+            }
+            return Promise.resolve();
+        }
+
+        _activeFlushPromise = new Promise(function (resolve) {
+            function finish() {
+                if (typeof callback === 'function') {
+                    try { callback(); } catch (e) { }
+                }
+                resolve();
+            }
+
+            var batch = _logQueue.splice(0, _logQueue.length);
+
+            if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+                finish();
+                return;
+            }
+
+            try {
+                chrome.storage.local.get('logs', function (result) {
+                    if ((chrome.runtime && chrome.runtime.lastError) || (result instanceof Error)) {
+                        _persistenceErrorsCount++;
+                        _logQueue = batch.concat(_logQueue).slice(-MAX_QUEUE_SIZE);
+                        finish();
+                        return;
+                    }
+
+                    var existing = (result && Array.isArray(result.logs)) ? result.logs : [];
+                    var seenKeys = new Set();
+                    var merged = [];
+
+                    for (var i = 0; i < existing.length; i++) {
+                        var it = existing[i];
+                        var key = it.id || (it.timestamp + ':' + (it.component || it.module) + ':' + it.event + ':' + (it.traceId || it.operationId || ''));
+                        if (!seenKeys.has(key)) {
+                            seenKeys.add(key);
+                            merged.push(it);
+                        }
+                    }
+
+                    for (var j = 0; j < batch.length; j++) {
+                        var bit = batch[j];
+                        var bkey = bit.id || (bit.timestamp + ':' + (bit.component || bit.module) + ':' + bit.event + ':' + (bit.traceId || bit.operationId || ''));
+                        if (!seenKeys.has(bkey)) {
+                            seenKeys.add(bkey);
+                            merged.push(bit);
+                        }
+                    }
+
+                    merged.sort(function (a, b) {
+                        return (a.timestamp || '').localeCompare(b.timestamp || '');
+                    });
+
+                    if (merged.length > MAX_LOGS_RETENTION) {
+                        merged = merged.slice(-MAX_LOGS_RETENTION);
+                    }
+
+                    chrome.storage.local.set({ logs: merged }, function (err) {
+                        if ((chrome.runtime && chrome.runtime.lastError) || err) {
+                            _persistenceErrorsCount++;
+                        }
+                        finish();
+                    });
+                });
+            } catch (e) {
+                _persistenceErrorsCount++;
+                finish();
+            }
+        }).then(function () {
+            _activeFlushPromise = null;
+            if (_logQueue.length > 0) {
+                return _flushLogsNow();
+            }
+        }, function () {
+            _activeFlushPromise = null;
+        });
+
+        return _activeFlushPromise;
+    }
+
+    function _enqueueLog(entry) {
+        _logQueue.push(entry);
+        var maxQ = (Logger && Logger._maxQueueSize) || MAX_QUEUE_SIZE;
+        if (_logQueue.length > maxQ) {
+            var excess = _logQueue.length - maxQ;
+            _logQueue.splice(0, excess);
+            _droppedLogsCount += excess;
+        }
+        if (!_logFlushTimer) {
+            _logFlushTimer = setTimeout(_flushLogsNow, 1200);
+        }
     }
 
     function Logger(module) {
-        this.module = module;
-        this.minLevel = LEVELS.DEBUG;
+        this.module = module || 'App';
+        this.minLevel = LEVELS.TRACE;
         this._correlationId = null;
+        this._traceId = null;
+        this._operationId = null;
     }
-    Logger.prototype.getCorrelationId = function () {
-        return this._correlationId || 'op_' + Date.now().toString(36);
-    };
-    Logger.prototype._log = function (level, message, data) {
-        data = data || {};
-        var entry = {
-            timestamp: new Date().toISOString(),
-            level: LEVEL_NAMES[level],
-            module: this.module,
-            correlationId: this.getCorrelationId(),
-            instanceId: _initInfo.instanceId,
-            message: message,
-            data: data
-        };
-        var prefix = '[' + entry.timestamp + '] [' + entry.level + '] [' + this.module + ']';
-        if (level >= LEVELS.ERROR) console.error(prefix, message, data);
-        else if (level >= LEVELS.WARN) console.warn(prefix, message, data);
-        else if (level >= LEVELS.INFO) console.info(prefix, message, data);
-        else console.log(prefix, message, data);
 
-        _logQueue.push(entry);
-        if (_logQueue.length > 300) _logQueue = _logQueue.slice(-200);
-        if (!_logFlushTimer) {
-            _logFlushTimer = setTimeout(_flushLogsNow, 3000);
-        }
+    Logger.prototype.getCorrelationId = function () {
+        return this._correlationId || this._operationId || 'op_' + Date.now().toString(36);
     };
-    Logger.prototype.trace = function (m, d) { this._log(LEVELS.TRACE, m, d); };
-    Logger.prototype.debug = function (m, d) { this._log(LEVELS.DEBUG, m, d); };
-    Logger.prototype.info = function (m, d) { this._log(LEVELS.INFO, m, d); };
-    Logger.prototype.warn = function (m, d) { this._log(LEVELS.WARN, m, d); };
-    Logger.prototype.error = function (m, d) { this._log(LEVELS.ERROR, m, d); };
-    Logger.prototype.fatal = function (m, d) { this._log(LEVELS.FATAL, m, d); };
+
+    Logger.prototype.setTraceId = function (traceId) {
+        this._traceId = traceId;
+    };
+
+    Logger.prototype.setOperationId = function (opId) {
+        this._operationId = opId;
+    };
+
+    Logger.prototype._deriveEventName = function (message, level) {
+        if (!message || typeof message !== 'string') return this.module.toLowerCase() + '.' + (LEVEL_NAMES[level] || 'info').toLowerCase();
+        var m = message.toLowerCase();
+        if (m.indexOf('started') !== -1 && m.indexOf('scanner') !== -1) return 'scanner.started';
+        if (m.indexOf('stopped') !== -1) return 'app.lifecycle.stopped';
+        if (m.indexOf('scan error') !== -1) return 'scanner.error';
+        if (m.indexOf('rate-limit') !== -1) return 'platform.restriction.detected';
+        if (m.indexOf('card skipped') !== -1) return 'scanner.card.skipped';
+        if (m.indexOf('reconciliation') !== -1) return 'scanner.reconciliation.completed';
+        if (m.indexOf('duplicate') !== -1 || m.indexOf('already') !== -1) return 'scanner.card.duplicate';
+        if (m.indexOf('filter') !== -1 && m.indexOf('cache') !== -1) return 'filters.cache.hit';
+        if (m.indexOf('syncing') !== -1 || m.indexOf('loaded') !== -1) return 'filters.sync.completed';
+        return this.module.toLowerCase() + '.' + (LEVEL_NAMES[level] || 'info').toLowerCase();
+    };
+
+    Logger.prototype.logEvent = function (levelOrOpts, event, component, data) {
+        if (!levelOrOpts) return;
+        var opts = {};
+        if (typeof levelOrOpts === 'object' && levelOrOpts !== null) {
+            opts = levelOrOpts;
+        } else {
+            opts = Object.assign({}, data || {});
+            opts.level = levelOrOpts;
+            opts.event = event;
+            if (component) opts.component = component;
+        }
+
+        var levelName = (opts.level || 'INFO').toUpperCase();
+        var lvl = LEVELS[levelName] != null ? LEVELS[levelName] : LEVELS.INFO;
+        if (lvl < this.minLevel) return;
+
+        var comp = opts.component || this.module;
+        var nowIso = new Date().toISOString();
+        var evtName = opts.event || this._deriveEventName(opts.message, lvl);
+        var reasonCode = opts.reasonCode || null;
+        var contextData = opts.context || opts.data || {};
+        var contextSanitized = _sanitizeLogValue(contextData, 0);
+
+        var contextSummary = '';
+        try { contextSummary = JSON.stringify(contextSanitized); } catch (e) { }
+
+        if (_shouldSuppress(evtName, comp, reasonCode, contextSummary)) {
+            return;
+        }
+
+        var recordId = 'rec_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+        var entry = {
+            schemaVersion: '1.0.0',
+            id: recordId,
+            timestamp: nowIso,
+            level: levelName,
+            event: evtName,
+            component: comp,
+            instanceId: _initInfo.instanceId,
+            traceId: opts.traceId || this._traceId || null,
+            operationId: opts.operationId || this._operationId || this.getCorrelationId(),
+            context: contextSanitized,
+            // Compatibility aliases for existing UI and tests
+            module: comp,
+            message: opts.message || evtName,
+            data: contextSanitized,
+            correlationId: opts.traceId || opts.operationId || this.getCorrelationId()
+        };
+
+        if (opts.durationMs != null && !isNaN(opts.durationMs)) {
+            entry.durationMs = Math.round(Number(opts.durationMs));
+        }
+        if (opts.result != null) {
+            entry.result = String(opts.result);
+        }
+        if (reasonCode != null) {
+            entry.reasonCode = String(reasonCode);
+        }
+        if (opts.metrics && typeof opts.metrics === 'object') {
+            entry.metrics = opts.metrics;
+        }
+        if (opts.error) {
+            entry.error = typeof opts.error === 'string' ? opts.error : {
+                message: _sanitizeLogValue(opts.error.message || String(opts.error), 0),
+                name: opts.error.name || 'Error',
+                stack: opts.error.stack ? _sanitizeLogValue(opts.error.stack.split('\n').slice(0, 4).join('\n'), 0) : undefined
+            };
+        } else {
+            entry.error = null;
+        }
+
+        var prefix = '[' + entry.timestamp + '] [' + entry.level + '] [' + comp + ']';
+        if (typeof this.writer === 'function') {
+            this.writer(prefix, levelName, entry.message, entry.context);
+        } else {
+            var msgPart = (entry.message && entry.message !== entry.event) ? (': ' + entry.message) : '';
+            var summary = '[' + entry.event + ']' + (entry.reasonCode ? ' (' + entry.reasonCode + ')' : '') + (entry.durationMs != null ? ' ' + entry.durationMs + 'ms' : '') + msgPart;
+            if (lvl >= LEVELS.ERROR) console.error(prefix, summary, entry.context);
+            else if (lvl >= LEVELS.WARN) console.warn(prefix, summary, entry.context);
+            else if (lvl >= LEVELS.INFO) console.info(prefix, summary, entry.context);
+            else console.log(prefix, summary, entry.context);
+        }
+
+        _enqueueLog(entry);
+        return entry;
+    };
+
+    Logger.prototype.generateTraceId = generateTraceId;
+    Logger.prototype.generateOperationId = generateOperationId;
+    Logger.prototype.getDroppedLogsCount = function () { return _droppedLogsCount; };
+    Logger.prototype.getPersistenceErrorsCount = function () { return _persistenceErrorsCount; };
+    Logger.prototype.flushLogsNow = _flushLogsNow;
+    Logger.prototype._flushLogsNow = _flushLogsNow;
+    Object.defineProperty(Logger.prototype, '_memoryBuffer', {
+        get: function () { return _logQueue; },
+        configurable: true
+    });
+
+    Logger.prototype.logTransition = function (fromState, toState, reasonCode, operationId, traceId, context) {
+        return this.logEvent({
+            level: 'INFO',
+            event: 'lead.state.changed',
+            reasonCode: reasonCode || 'STATE_TRANSITION',
+            operationId: operationId || this._operationId || this.getCorrelationId(),
+            traceId: traceId || this._traceId || null,
+            result: toState,
+            context: Object.assign({ from: fromState, to: toState }, context || {}),
+            message: 'State changed: ' + fromState + ' -> ' + toState
+        });
+    };
+
+    Logger.prototype._log = function (level, messageOrEvent, dataOrOpts) {
+        var isEvent = typeof messageOrEvent === 'string' && (messageOrEvent.indexOf('.') !== -1 || (dataOrOpts && dataOrOpts.event));
+        var eventName = isEvent ? (dataOrOpts && dataOrOpts.event ? dataOrOpts.event : messageOrEvent) : null;
+        var message = typeof messageOrEvent === 'string' ? messageOrEvent : (messageOrEvent && messageOrEvent.message) || '';
+
+        var opts = {};
+        if (dataOrOpts && typeof dataOrOpts === 'object' && (dataOrOpts.event || dataOrOpts.traceId || dataOrOpts.operationId || dataOrOpts.reasonCode || dataOrOpts.durationMs != null || dataOrOpts.context || dataOrOpts.result || dataOrOpts.metrics || dataOrOpts.error)) {
+            opts = Object.assign({}, dataOrOpts);
+        } else {
+            opts.context = dataOrOpts || {};
+        }
+
+        opts.level = LEVEL_NAMES[level] || 'INFO';
+        opts.message = message || eventName;
+        if (eventName) opts.event = eventName;
+
+        return this.logEvent(opts);
+    };
+
+    Logger.prototype.trace = function (m, d) { return this._log(LEVELS.TRACE, m, d); };
+    Logger.prototype.debug = function (m, d) { return this._log(LEVELS.DEBUG, m, d); };
+    Logger.prototype.info = function (m, d) { return this._log(LEVELS.INFO, m, d); };
+    Logger.prototype.warn = function (m, d) { return this._log(LEVELS.WARN, m, d); };
+    Logger.prototype.error = function (m, d) { return this._log(LEVELS.ERROR, m, d); };
+    Logger.prototype.fatal = function (m, d) { return this._log(LEVELS.ERROR, m, d); };
 
     // ============================================================
     // LEAD ID GENERATOR
@@ -221,15 +653,15 @@ console.log('🔗 https://keynlabs.vercel.app/');
         var qtyEl = element.querySelector('.BLbp_qty, [class*="quantity"], [class*="qty"]');
         var qtyText = qtyEl ? qtyEl.textContent.trim() : '';
 
-        var combined = productText + '|' + locationText + '|' + sellerText + '|' + qtyText + '|' + descText.substring(0, 60);
+        var cleanProd = productText.toLowerCase().replace(/[^\w]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').substring(0, 40);
+        var cleanLoc = locationText ? locationText.toLowerCase().replace(/[^\w]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').substring(0, 20) : '';
+        var cleanSeller = sellerText ? sellerText.toLowerCase().replace(/[^\w]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').substring(0, 20) : '';
 
-        var hash = 0;
-        for (var j = 0; j < combined.length; j++) {
-            var chr = combined.charCodeAt(j);
-            hash = ((hash << 5) - hash) + chr;
-            hash = hash & hash;
-        }
-        return 'hash_' + Math.abs(hash).toString(36);
+        var idName = cleanProd || 'lead';
+        if (cleanLoc) idName += '_' + cleanLoc;
+        if (cleanSeller) idName += '_' + cleanSeller;
+
+        return 'lead_' + idName;
     };
 
     // ============================================================
@@ -1827,7 +2259,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
             var locNames = collectFields([cfg, f], [
                 'countries', 'country', 'states', 'state', 'cities', 'city', 'locations', 'location',
                 'sender_locations', 'senderLocations', 'location_keywords', 'regions', 'region',
-                'city_name', 'state_name', 'country_name'
+                'city_name', 'state_name', 'country_name', 'allowed_countries', 'allowedCountries'
             ]);
             var restCountries = collectFields([cfg, f], ['restricted_countries', 'restrictedCountries']);
 
@@ -1853,6 +2285,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 requiredKeywords: uniqNorm(reqNames),
                 locations: uniqNorm(locNames),
                 restrictedCountries: uniqNorm(restCountries),
+                rejectUnknownCountry: cfg.reject_unknown_country === true || f.reject_unknown_country === true || cfg.rejectUnknownCountry === true || f.rejectUnknownCountry === true,
                 requireMobile: cfg.require_mobile === true || f.require_mobile === true,
                 requireWhatsapp: cfg.require_whatsapp === true || f.require_whatsapp === true,
                 requireEmail: cfg.require_email === true || f.require_email === true,
@@ -1957,6 +2390,9 @@ console.log('🔗 https://keynlabs.vercel.app/');
         function locationMatches(rule) {
             var rawLocs = rule.locations || (rule.filter_config && (rule.filter_config.locations || rule.filter_config.countries || rule.filter_config.sender_locations)) || rule.sender_locations || [];
             if (!rawLocs || rawLocs.length === 0) return true;
+            if (rule.rejectUnknownCountry && (!leadCountryIso || leadCountryIso === 'UNKNOWN')) {
+                return false;
+            }
             for (var i = 0; i < rawLocs.length; i++) {
                 var entry = String(rawLocs[i]).toLowerCase().trim();
                 if (entry === 'india' || entry === 'in' || entry === 'pan india' || entry === 'all india') {
@@ -2161,20 +2597,78 @@ console.log('🔗 https://keynlabs.vercel.app/');
     // ============================================================
     // SAFETY CONTROLLER
     // ============================================================
-    function SafetyController() {
-        this.mode = 'AUTOMATIC';
+    function SafetyController(circuitBreaker) {
+        this.mode = 'REVIEW';
+        this.circuitBreaker = circuitBreaker || null;
         this._emergencyStop = false;
         this.counters = { minute: 0, hour: 0, day: 0, session: 0 };
+        this.pendingReservations = 0;
         this.limits = { perMinute: 60, perHour: 400, perDay: 2000, perSession: 1000 };
         this._lastMin = Date.now();
         this._lastHour = Date.now();
         this._lastDay = Date.now();
+        this._reservationTokens = {};
+        this._loadCounters();
     }
+    SafetyController.prototype._loadCounters = function () {
+        var self = this;
+        try {
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(['bl_safety_counters', 'bl_safety_timestamps'], function (res) {
+                    if (res && res.bl_safety_counters) {
+                        var c = res.bl_safety_counters;
+                        var t = res.bl_safety_timestamps || {};
+                        self.counters.minute = c.minute || 0;
+                        self.counters.hour = c.hour || 0;
+                        self.counters.day = c.day || 0;
+                        self.counters.session = c.session || 0;
+                        self._lastMin = t.lastMin || Date.now();
+                        self._lastHour = t.lastHour || Date.now();
+                        self._lastDay = t.lastDay || Date.now();
+                        self._reset();
+                    }
+                });
+            } else if (typeof sessionStorage !== 'undefined') {
+                var raw = sessionStorage.getItem('bl_safety_counters');
+                if (raw) {
+                    var c = JSON.parse(raw);
+                    self.counters.minute = c.minute || 0;
+                    self.counters.hour = c.hour || 0;
+                    self.counters.day = c.day || 0;
+                    self.counters.session = c.session || 0;
+                    self._reset();
+                }
+            }
+        } catch (e) { }
+    };
+    SafetyController.prototype._saveCounters = function () {
+        try {
+            var c = {
+                minute: this.counters.minute,
+                hour: this.counters.hour,
+                day: this.counters.day,
+                session: this.counters.session
+            };
+            var t = {
+                lastMin: this._lastMin,
+                lastHour: this._lastHour,
+                lastDay: this._lastDay
+            };
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set({ bl_safety_counters: c, bl_safety_timestamps: t });
+            }
+            if (typeof sessionStorage !== 'undefined') {
+                sessionStorage.setItem('bl_safety_counters', JSON.stringify(c));
+            }
+        } catch (e) { }
+    };
     SafetyController.prototype._reset = function () {
         var now = Date.now();
-        if (now - this._lastMin > 60000) { this.counters.minute = 0; this._lastMin = now; }
-        if (now - this._lastHour > 3600000) { this.counters.hour = 0; this._lastHour = now; }
-        if (now - this._lastDay > 86400000) { this.counters.day = 0; this._lastDay = now; }
+        var changed = false;
+        if (now - this._lastMin > 60000) { this.counters.minute = 0; this._lastMin = now; changed = true; }
+        if (now - this._lastHour > 3600000) { this.counters.hour = 0; this._lastHour = now; changed = true; }
+        if (now - this._lastDay > 86400000) { this.counters.day = 0; this._lastDay = now; changed = true; }
+        if (changed) this._saveCounters();
     };
     SafetyController.prototype.setMode = function (m) { this.mode = m; };
     SafetyController.prototype.setLimits = function (l) {
@@ -2182,22 +2676,70 @@ console.log('🔗 https://keynlabs.vercel.app/');
     };
     SafetyController.prototype.canAcquire = function () {
         this._reset();
+        if (this.circuitBreaker && !this.circuitBreaker.canExecute()) {
+            return { allowed: false, reason: 'CIRCUIT_BREAKER_RESTRICTION', state: this.circuitBreaker.getState() };
+        }
         if (this._emergencyStop) return { allowed: false, reason: 'EMERGENCY_STOP' };
         if (this.mode === 'MONITOR') return { allowed: false, reason: 'MONITOR_MODE' };
         if (this.mode === 'DRY_RUN') return { allowed: false, reason: 'DRY_RUN', dryRun: true };
-        if (this.counters.minute >= this.limits.perMinute) return { allowed: false, reason: 'MINUTE_LIMIT', details: { used: this.counters.minute, limit: this.limits.perMinute } };
-        if (this.counters.hour >= this.limits.perHour) return { allowed: false, reason: 'HOUR_LIMIT', details: { used: this.counters.hour, limit: this.limits.perHour } };
-        if (this.counters.day >= this.limits.perDay) return { allowed: false, reason: 'DAY_LIMIT', details: { used: this.counters.day, limit: this.limits.perDay } };
-        if (this.counters.session >= this.limits.perSession) return { allowed: false, reason: 'SESSION_LIMIT', details: { used: this.counters.session, limit: this.limits.perSession } };
+        
+        var effectiveMin = this.counters.minute + this.pendingReservations;
+        if (effectiveMin >= this.limits.perMinute) {
+            return { allowed: false, reason: 'MINUTE_LIMIT', details: { used: effectiveMin, limit: this.limits.perMinute } };
+        }
+        if ((this.counters.hour + this.pendingReservations) >= this.limits.perHour) {
+            return { allowed: false, reason: 'HOUR_LIMIT', details: { used: this.counters.hour, limit: this.limits.perHour } };
+        }
+        if ((this.counters.day + this.pendingReservations) >= this.limits.perDay) {
+            return { allowed: false, reason: 'DAY_LIMIT', details: { used: this.counters.day, limit: this.limits.perDay } };
+        }
+        if ((this.counters.session + this.pendingReservations) >= this.limits.perSession) {
+            return { allowed: false, reason: 'SESSION_LIMIT', details: { used: this.counters.session, limit: this.limits.perSession } };
+        }
         return { allowed: true };
     };
+    SafetyController.prototype.reserveCapacity = function (leadId) {
+        var check = this.canAcquire();
+        if (!check.allowed) return { allowed: false, reason: check.reason, details: check.details };
+        var token = 'res_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
+        this.pendingReservations++;
+        this._reservationTokens[token] = { leadId: leadId, timestamp: Date.now() };
+        return { allowed: true, token: token };
+    };
+    SafetyController.prototype.releaseReservation = function (token) {
+        if (token && this._reservationTokens[token]) {
+            delete this._reservationTokens[token];
+            this.pendingReservations = Math.max(0, this.pendingReservations - 1);
+        }
+    };
+    SafetyController.prototype.commitReservation = function (token) {
+        if (token && this._reservationTokens[token]) {
+            delete this._reservationTokens[token];
+            this.pendingReservations = Math.max(0, this.pendingReservations - 1);
+        }
+        this.recordAcquisition();
+    };
     SafetyController.prototype.recordAcquisition = function () {
-        this.counters.minute++; this.counters.hour++; this.counters.day++; this.counters.session++;
+        this._reset();
+        this.counters.minute++;
+        this.counters.hour++;
+        this.counters.day++;
+        this.counters.session++;
+        this._saveCounters();
     };
     SafetyController.prototype.emergencyStopFn = function () { this._emergencyStop = true; };
     SafetyController.prototype.resume = function () { this._emergencyStop = false; };
     SafetyController.prototype.getStatus = function () {
-        return { mode: this.mode, emergencyStop: this._emergencyStop, counters: this.counters, limits: this.limits, cooldown: false, cooldownMs: 0 };
+        return {
+            mode: this.mode,
+            emergencyStop: this._emergencyStop,
+            circuitBreaker: this.circuitBreaker ? this.circuitBreaker.getState() : 'NORMAL',
+            counters: this.counters,
+            pendingReservations: this.pendingReservations,
+            limits: this.limits,
+            cooldown: false,
+            cooldownMs: 0
+        };
     };
 
     // ============================================================
@@ -2223,7 +2765,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
             self._loadedFromDb = true;
             console.log('[Dup] Loaded ' + loaded + ' contacted leads from DB');
             return loaded;
-        }).catch(function () { return 0; });
+        }).catch(function () {
+            self._loadedFromDb = true;
+            return 0;
+        });
     };
     DuplicateManager.prototype.isDuplicate = function (leadId) { return this._seen.has(leadId); };
     DuplicateManager.prototype.markSeen = function (leadId) { this._seen.add(leadId); };
@@ -2398,6 +2943,14 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this._running = true;
         var self2 = this;
 
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('INFO', 'scanner.started', 'Scanner', {
+                operationId: this.logger.generateOperationId ? this.logger.generateOperationId('scan') : undefined,
+                reasonCode: 'USER_STARTED',
+                result: 'RUNNING'
+            });
+        }
+
         this._setupObserver();
 
         // Secondary reconciliation fallback: 500ms (sub-second pickup for newly arriving leads)
@@ -2425,6 +2978,12 @@ console.log('🔗 https://keynlabs.vercel.app/');
             clearInterval(this._scanTimer);
             this._scanTimer = null;
         }
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('INFO', 'scanner.paused', 'Scanner', {
+                reasonCode: 'USER_PAUSED',
+                result: 'STOPPED'
+            });
+        }
     };
     Scanner.prototype._scan = function () {
         if (this._scanning || !this._running) return false;
@@ -2435,6 +2994,15 @@ console.log('🔗 https://keynlabs.vercel.app/');
         if (this._checkRateLimitWarning()) return false;
 
         this._scanning = true;
+        var scanOpId = this.logger && this.logger.generateOperationId ? this.logger.generateOperationId('scan_cyc') : ('sc_' + Date.now());
+        var scanStart = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('DEBUG', 'scanner.cycle.started', 'Scanner', {
+                operationId: scanOpId,
+                reasonCode: 'TIMER_OR_OBSERVER_TRIGGER',
+                result: 'STARTED'
+            });
+        }
         try {
             // Auto-detect and click any "New Leads Available" banner to bring dynamic leads into portal DOM
             this._checkNewLeadsBanner();
@@ -2444,16 +3012,15 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 'div[id*="id_BLCard"], [class*="BLCard"], [class*="bl_card"], div[id*="BLCard"], ' +
                 'div[id*="BLbp"], [class*="bl-card"], [class*="listing_card"]'
             );
-            // Limit to MAX_LEADS_PER_CYCLE hydrated cards — no scrolling to reveal more.
-            // (Empty/skeleton nodes no longer consume slots of the limit.)
+            // Bounded fair processing across visible DOM cards without starvation (up to 50 cards)
             var cards = Array.prototype.slice.call(allCards);
             var currentIds = {};
             var newCards = [];
             var idGen = this._idGen;
             var known = this._knownLeads;
             if (!this._elementIds) this._elementIds = (typeof WeakMap !== 'undefined') ? new WeakMap() : null;
-            var validSeen = 0;
-            for (var i = 0; i < cards.length && validSeen < MAX_LEADS_PER_CYCLE; i++) {
+            var scanLimit = Math.min(cards.length, (typeof MAX_DOM_SCAN_LIMIT !== 'undefined' ? MAX_DOM_SCAN_LIMIT : 5));
+            for (var i = 0; i < scanLimit; i++) {
                 var el = cards[i];
                 var id = idGen.generateFromElement(el);
                 if (!id) {
@@ -2469,7 +3036,6 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     }
                     continue;
                 }
-                validSeen++;
                 currentIds[id] = 1;
                 if (!known[id]) {
                     known[id] = Date.now();
@@ -2487,8 +3053,28 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 var age = now - known[key];
                 if (age > 1800000) delete known[key];
             }
+            var scanDuration = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - scanStart);
+            if (this.logger && typeof this.logger.logEvent === 'function') {
+                this.logger.logEvent('DEBUG', 'scanner.cycle.completed', 'Scanner', {
+                    operationId: scanOpId,
+                    durationMs: scanDuration,
+                    reasonCode: 'CYCLE_FINISHED',
+                    result: 'COMPLETED',
+                    metrics: { totalCards: cards.length, newCards: newCards.length }
+                });
+            }
             if (newCards.length > 0) this._callback(newCards);
         } catch (e) {
+            var scanDurationErr = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - scanStart);
+            if (this.logger && typeof this.logger.logEvent === 'function') {
+                this.logger.logEvent('ERROR', 'scanner.error', 'Scanner', {
+                    operationId: scanOpId,
+                    durationMs: scanDurationErr,
+                    reasonCode: 'SCAN_EXCEPTION',
+                    result: 'FAILED',
+                    error: e && e.message
+                });
+            }
             this.logger.error('Scan error: ' + (e && e.message));
         }
         this._scanning = false;
@@ -2736,10 +3322,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
             }
 
             if (!countryIso && !isForeignLead) {
-                countryIso = 'IN';
+                countryIso = 'UNKNOWN';
             }
 
-            if (countryIso && countryIso !== 'IN') {
+            if (countryIso && countryIso !== 'IN' && countryIso !== 'UNKNOWN') {
                 isForeignLead = true;
             }
 
@@ -2835,7 +3421,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
             // Build unique lead ID distinguishing seller, product, location, quantity & requirement
             // Ensures multiple leads for the exact same product from different sellers are NOT treated as duplicates
-            var queryIdPart = (leadId && leadId.indexOf('hash_') === -1) ? leadId : '';
+            var queryIdPart = (leadId && leadId.indexOf('hash_') === -1 && leadId.indexOf('lead_') === -1) ? leadId : '';
             var sellerPart = (senderName || senderMobile || senderEmail || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
             var prodPart = (productName || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 40);
             var locPart = (location || '').toLowerCase().replace(/[^\w]/g, '_').substring(0, 30);
@@ -2871,6 +3457,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 queryTime: new Date().toISOString(),
 
                 productName: productName,
+                leadName: productName,
                 queryProductName: productName,
 
                 senderName: senderName || null,
@@ -3014,20 +3601,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     }
                     if (Date.now() - pollStart > MAX_POLL_MS) {
                         clearInterval(pollInterval);
-                        // Last resort: click the first visible unacquired contact button on the page
-                        var fallbackBtns = document.querySelectorAll('button.BuyLdC_Cta, [class*="BuyLdC_Cta"], [class*="SLC_FillCTA"], [class*="interested" i], [class*="Interest" i], [class*="contact" i]');
-                        for (var fb = 0; fb < fallbackBtns.length; fb++) {
-                            var fbt = (fallbackBtns[fb].textContent || '').trim().toLowerCase();
-                            if ((fbt.indexOf('contact') !== -1 || fbt.indexOf('interest') !== -1 || fbt.indexOf('enquiry') !== -1) && !fallbackBtns[fb].disabled) {
-                                var parentCard = fallbackBtns[fb].closest(CARD_SELECTORS);
-                                if (parentCard && !parentCard.hasAttribute('data-leadsync-acquired')) {
-                                    log.info('⚡ Fallback: using first unacquired card');
-                                    doAcquire(parentCard);
-                                    return;
-                                }
-                            }
-                        }
-                        resolve({ success: false, message: 'DOM card never appeared for network lead' });
+                        log.warn('DOM card never appeared for lead: ' + uqid);
+                        resolve({ success: false, message: 'DOM card not found for lead' });
                     }
                 }, 15);
             }
@@ -3371,8 +3946,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
     function LeadScorer() {
         this.minimumScore = 60;
         this.weights = {
-            base: 50,
-            perProductKeyword: 10, maxProductBonus: 30,
+            base: 50, perProductKeyword: 10, maxProductBonus: 30,
             preferredState: 15, countryMatch: 15,
             hasMobile: 10, hasEmail: 8, hasPhone: 5,
             detailedRequirement: 5, requirementLengthThreshold: 100
@@ -3395,79 +3969,6 @@ console.log('🔗 https://keynlabs.vercel.app/');
     LeadScorer.prototype.setPreferredCountries = function (countries) {
         if (Array.isArray(countries)) this.preferredCountries = countries.map(function (c) { return String(c).toUpperCase().trim(); });
     };
-
-    LeadScorer.prototype.scoreLead = function (lead, matchRes) {
-        var score = this.weights.base;
-        var reasons = [];
-
-        // Product keywords — capped at 3 to prevent score inflation
-        var mp = (matchRes && matchRes.matchedProducts) || [];
-        if (mp.length > 0) {
-            var mpCount = Math.min(mp.length, 3);
-            var bonus = Math.min(this.weights.maxProductBonus, mpCount * this.weights.perProductKeyword);
-            score += bonus;
-            reasons.push('product+' + bonus);
-        }
-
-        // Message keyword bonus (soft signal, +2 each, cap +6)
-        var msgBonus = 0;
-        if (lead.messageText && this._lastProductKeywords) {
-            for (var i = 0; i < this._lastProductKeywords.length; i++) {
-                if (lead.messageText.toLowerCase().indexOf(this._lastProductKeywords[i]) !== -1) {
-                    msgBonus += 2;
-                    if (msgBonus >= 6) break;
-                }
-            }
-        }
-        score += msgBonus;
-
-        var country = (lead.countryIso || '').toUpperCase();
-        if (country && this.preferredCountries.length > 0) {
-            if (this.preferredCountries.indexOf(country) !== -1) {
-                score += this.weights.countryMatch;
-                reasons.push('country+' + this.weights.countryMatch);
-            } else {
-                score += this.penalties.wrongCountry;
-                reasons.push('country' + this.penalties.wrongCountry);
-            }
-        }
-
-        var state = (lead.state || '').toLowerCase();
-        if (state && this.preferredStates.length > 0) {
-            var stateMatch = false;
-            for (var s = 0; s < this.preferredStates.length; s++) {
-                if (state.indexOf(this.preferredStates[s]) !== -1) { stateMatch = true; break; }
-            }
-            if (stateMatch) {
-                score += this.weights.preferredState;
-                reasons.push('state+' + this.weights.preferredState);
-            } else {
-                score += this.penalties.wrongState;
-                reasons.push('state' + this.penalties.wrongState);
-            }
-        }
-
-        var hasContact = false;
-        if (lead.contact) {
-            if (lead.contact.mobile) { score += this.weights.hasMobile; hasContact = true; reasons.push('mobile+' + this.weights.hasMobile); }
-            if (lead.contact.email) { score += this.weights.hasEmail; hasContact = true; reasons.push('email+' + this.weights.hasEmail); }
-            if (lead.contact.phone && !lead.contact.mobile) { score += this.weights.hasPhone; hasContact = true; reasons.push('phone+' + this.weights.hasPhone); }
-        }
-        if (!hasContact) {
-            score += this.penalties.noContact;
-            reasons.push('noContact' + this.penalties.noContact);
-        }
-
-        if (lead.messageText && lead.messageText.length > this.weights.requirementLengthThreshold) {
-            score += this.weights.detailedRequirement;
-            reasons.push('detail+' + this.weights.detailedRequirement);
-        }
-
-        score = Math.max(0, Math.min(100, score));
-        return { score: score, eligible: score >= this.minimumScore, reasons: reasons };
-    };
-
-    LeadScorer.prototype.isEligible = function (r) { return r.eligible; };
     LeadScorer.prototype.setMinimumScore = function (s) { this.minimumScore = s; };
 
     // ============================================================
@@ -3797,171 +4298,6 @@ console.log('🔗 https://keynlabs.vercel.app/');
     // Stores the URL/body template captured from the first real acquisition
     // and replicates it directly via fetch() for subsequent pre-approved leads.
     // Uses real session cookies (credentials:'include') — indistinguishable from
-    // IndiaMART's own page JS on the wire.
-    function AcqApiCaller() {
-        this._template = null;
-        this._STORAGE_KEY = 'leadsync_acq_template_v1';
-        // Auto-load persisted template from previous session
-        this._loadFromStorage();
-    }
-
-    // Load persisted template from sessionStorage / localStorage (instant synchronous 0ms) + chrome.storage.local
-    AcqApiCaller.prototype._loadFromStorage = function () {
-        var self = this;
-        try {
-            var syncStored = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(this._STORAGE_KEY)) ||
-                             (typeof localStorage !== 'undefined' && localStorage.getItem(this._STORAGE_KEY));
-            if (syncStored) {
-                var parsed = JSON.parse(syncStored);
-                if (parsed && parsed.url && (parsed.url.indexOf('indiamart.com') !== -1 || parsed.url.indexOf('seller.') !== -1)) {
-                    this._template = parsed;
-                    console.log('[LeadSync] AcqApiCaller: template restored synchronously:', parsed.url);
-                }
-            }
-        } catch (e) {}
-        try {
-            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                chrome.storage.local.get([this._STORAGE_KEY], function (res) {
-                    var stored = res && res[self._STORAGE_KEY];
-                    if (stored && stored.url && !self._template) {
-                        if (stored.url.indexOf('indiamart.com') !== -1 || stored.url.indexOf('seller.') !== -1) {
-                            self._template = stored;
-                            try {
-                                if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(self._STORAGE_KEY, JSON.stringify(stored));
-                            } catch (e) {}
-                            console.log('[LeadSync] AcqApiCaller: template restored from storage:', stored.url);
-                        }
-                    }
-                });
-            }
-        } catch (e) {}
-    };
-
-    // Persist template to sessionStorage + localStorage + chrome.storage.local after first capture
-    AcqApiCaller.prototype._saveToStorage = function () {
-        if (!this._template) return;
-        try {
-            var str = JSON.stringify(this._template);
-            if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(this._STORAGE_KEY, str);
-            if (typeof localStorage !== 'undefined') localStorage.setItem(this._STORAGE_KEY, str);
-        } catch (e) {}
-        try {
-            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                var payload = {};
-                payload[this._STORAGE_KEY] = this._template;
-                chrome.storage.local.set(payload);
-            }
-        } catch (e) {}
-    };
-
-    AcqApiCaller.prototype.hasTemplate = function () {
-        return !!this._template;
-    };
-
-    AcqApiCaller.prototype.storeTemplate = function (msg) {
-        if (this._template) return; // keep first capture only
-        if (!msg.url) return;
-        this._template = {
-            url:         msg.url,
-            method:      (msg.method || 'POST').toUpperCase(),
-            body:        msg.body  || '',
-            contentType: msg.contentType || 'application/x-www-form-urlencoded',
-            capturedAt:  Date.now()
-        };
-        console.log('[LeadSync] AcqApiCaller: template captured + persisted:', msg.url);
-        // Persist so every future session uses direct API from lead #1
-        this._saveToStorage();
-    };
-
-    // Clear stored template (call if API starts failing — forces re-capture on next real click)
-    AcqApiCaller.prototype.clearTemplate = function () {
-        this._template = null;
-        try {
-            if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(this._STORAGE_KEY);
-            if (typeof localStorage !== 'undefined') localStorage.removeItem(this._STORAGE_KEY);
-        } catch (e) {}
-        try {
-            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                chrome.storage.local.remove(this._STORAGE_KEY);
-            }
-        } catch (e) {}
-        console.log('[LeadSync] AcqApiCaller: template cleared — will re-capture on next acquisition');
-    };
-
-    // Directly call IndiaMART's contact-buyer API with this lead's IDs.
-    // Uses credentials:'include' so real session cookies are sent automatically.
-    // Wire-level identical to IndiaMART's own page JS making the same call.
-    AcqApiCaller.prototype.call = function (lead) {
-        if (!this._template) return Promise.resolve({ success: false, reason: 'no_template' });
-
-        var tpl  = this._template;
-        var url  = tpl.url;
-        var body = tpl.body;
-
-        // All known IndiaMART lead ID field names
-        var replacements = [
-            ['uniqueQueryId', lead.uniqueQueryId || ''],
-            ['query_id',      lead.uniqueQueryId || ''],
-            ['queryId',       lead.uniqueQueryId || lead.queryId || ''],
-            ['buyerId',       lead.buyerId || lead.buyer_id || ''],
-            ['buyer_id',      lead.buyerId || lead.buyer_id || ''],
-            ['glid',          lead.glid    || lead.leadId   || ''],
-            ['glusr_id',      lead.glid    || lead.leadId   || ''],
-            ['leadId',        lead.leadId  || '']
-        ];
-
-        for (var ri = 0; ri < replacements.length; ri++) {
-            var key = replacements[ri][0];
-            var val = replacements[ri][1];
-            if (!val) continue;
-            url  = url.replace(new RegExp('([?&]' + key + '=)[^&]*', 'gi'),  '$1' + encodeURIComponent(val));
-            body = body.replace(new RegExp('([?&]?' + key + '=)[^&]*', 'gi'), '$1' + encodeURIComponent(val));
-            // JSON string / integer replacements
-            body = body.replace(new RegExp('("' + key + '"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"', 'gi'), '$1"' + String(val).replace(/"/g, '\\"') + '"');
-            body = body.replace(new RegExp('("' + key + '"\\s*:\\s*)\\d+', 'gi'), '$1"' + String(val) + '"');
-        }
-
-        var self = this;
-        var fetchOpts = {
-            method:      tpl.method,
-            credentials: 'include',  // real IndiaMART session cookies, auto-attached
-            headers: {
-                'Content-Type':     tpl.contentType || 'application/x-www-form-urlencoded',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept':           'application/json, text/plain, */*'
-            }
-        };
-        if (tpl.method !== 'GET' && body) fetchOpts.body = body;
-
-        return fetch(url, fetchOpts)
-            .then(function (r) {
-                return r.text().then(function (text) {
-                    var data = {};
-                    try { data = JSON.parse(text); } catch (e) {
-                        if (r.ok && text && (text.indexOf('success') !== -1 || text.indexOf('200') !== -1)) {
-                            return { success: true, action: 'direct_api', code: '200', msg: text.substring(0, 100) };
-                        }
-                    }
-                    var ok = (data.CODE === '200' || data.CODE === 200
-                          || data.code === 200   || data.code === '200'
-                          || data.status === 'success' || data.status === 'SUCCESS'
-                          || data.success === true || data.STATUS === 'SUCCESS')
-                          || (r.ok && !data.error && !data.ERROR && !data.error_message);
-                    if (!ok && (data.CODE === '401' || data.CODE === '403' ||
-                                data.code === 401  || data.code === 403)) {
-                        self.clearTemplate();
-                    }
-                    return { success: ok, action: 'direct_api',
-                             code: data.CODE || data.code || (ok ? '200' : 'FAILED'),
-                             msg:  data.MESSAGE || data.message || data.msg || (ok ? 'OK' : 'API returned non-success') };
-                });
-            })
-            .catch(function (e) {
-                return { success: false, reason: e && e.message, action: 'direct_api_error' };
-            });
-    };
-
-
     // ============================================================
     // ORCHESTRATOR
     // ============================================================
@@ -3969,15 +4305,16 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this.logger = new Logger('Orchestrator');
         var manifestVersion = null;
         try { manifestVersion = chrome.runtime.getManifest().version; } catch (e) { }
-        this.logger.info('🚀 Initializing v6.4.1 (Bot-Speed Direct API)', {
+        this.logger.info('🚀 Initializing v5.0.0 (Lead-Monitoring & Review Assistant)', {
             instanceId: _initInfo.instanceId, reason: _initInfo.reason,
-            bundleVersion: '6.4.1', manifestVersion: manifestVersion
+            bundleVersion: '5.0.0', manifestVersion: manifestVersion
         });
 
+        this.circuitBreaker = new CircuitBreaker();
         this.supabase = new window.SupabaseService();
         this.supabase.setLogger(this.logger);
 
-        this.safety = new SafetyController();
+        this.safety = new SafetyController(this.circuitBreaker);
         this.stateMachine = new LeadStateMachine();
         this.queue = new LeadQueue();
         this.duplicateManager = new DuplicateManager(this.supabase);
@@ -3988,11 +4325,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         this.parser = new Parser();
         this.popupManager = new PopupManager();
         this.actionAdapter = new ActionAdapter(this.popupManager);
-        this.actionAdapter.orchestrator = this;  // bot-speed ACQ confirmation wiring
-        this.acqApiCaller = new AcqApiCaller();  // Option 1: direct API acquire
-        this._inFlightLead = null;               // set by ActionAdapter.acquire after button click
-        this._resolveInFlight = null;            // resolved by network ACQ confirm message
-        this._preApprovedLeads = new Map();      // leads matched at API level, awaiting DOM card
+        this.actionAdapter.orchestrator = this;
+        this._reviewLeads = new Map();
         this.scorer = new LeadScorer();
         this.navigator = new PageNavigator(this);
         this.metrics = new PerformanceMetrics();
@@ -4744,17 +5078,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
             }
         }, 8000);
 
-        // ── Mandatory 20-Second Hard Refresh Loop ──
-        // Standalone timer completely decoupled from navigator loops.
-        // Executes a full page hard reload every 20 seconds while preserving state.
-        this._nextMandatoryReloadAt = Date.now() + 20000;
-        this._mandatory30SecTimer = setInterval(function () {
-            if (!self._isPaused) {
-                self.triggerHardRefresh('mandatory_20s_loop');
-            } else {
-                self._nextMandatoryReloadAt = Date.now() + 20000;
-            }
-        }, 20000);
+        // Note: Autonomous mandatory reload loop removed per Phase 2.1
+        // Manual refresh remains available via UI button and triggerHardRefresh
     };
 
     Orchestrator.prototype._setupUI = function () {
@@ -4805,8 +5130,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
             '<div class="bl-row bl-ctrl-row">' +
             '<button id="bl-stop-btn" class="bl-ctrl-btn bl-ctrl-stop" type="button">⏸ Pause</button>' +
             '<button id="bl-resume-btn" class="bl-ctrl-btn bl-ctrl-resume" type="button" style="display:none">▶ Resume</button>' +
-            '<button id="bl-hard-refresh-btn" class="bl-ctrl-btn bl-ctrl-refresh" type="button" title="Mandatory 20s Hard Refresh (Click to reload now)">' +
-            '<span id="bl-hard-refresh-label">🔄 20s</span>' +
+            '<button id="bl-hard-refresh-btn" class="bl-ctrl-btn bl-ctrl-refresh" type="button" title="Manual Page Refresh (Click to reload)">' +
+            '<span id="bl-hard-refresh-label">🔄 Refresh</span>' +
             '</button>' +
             '<button id="bl-filters-btn" class="bl-ctrl-btn bl-ctrl-filters" type="button" title="Open CRM Filters">' +
             '<span>⚡ Filters</span>' +
@@ -5049,12 +5374,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
             var reloadBtnLabel = document.getElementById('bl-hard-refresh-label');
             if (reloadBtnLabel) {
-                if (self._isPaused) {
-                    reloadBtnLabel.textContent = '🔄 Paused';
-                } else {
-                    var remainingSec = Math.max(0, Math.ceil(((self._nextMandatoryReloadAt || (Date.now() + 20000)) - Date.now()) / 1000));
-                    reloadBtnLabel.textContent = '🔄 ' + remainingSec + 's';
-                }
+                reloadBtnLabel.textContent = '🔄 Refresh';
             }
 
             self._broadcastStatus();
@@ -5062,7 +5382,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
     };
 
     // ============================================================
-    // MANDATORY 20-SECOND HARD REFRESH CONTROLLER
+    // MANUAL PAGE REFRESH CONTROLLER
     // ============================================================
     Orchestrator.prototype.triggerHardRefresh = function (reason) {
         var self = this;
@@ -5070,16 +5390,16 @@ console.log('🔗 https://keynlabs.vercel.app/');
         var isQueueBusy = q && (q.processing > 0 || (q.queue && q.queue.length > 0));
         var isLifecycleBusy = this.lifecycle && this.lifecycle._inFlight && this.lifecycle._inFlight.size > 0;
 
-        // If an acquisition is currently in progress, wait 1s for it to finish so we never interrupt an in-flight lead
+        // If an operation is currently in progress, wait 1s for it to finish so we never interrupt an in-flight lead
         if (isQueueBusy || isLifecycleBusy) {
-            this.logger.info('⏳ Hard refresh deferred: lead acquisition in progress (' + reason + ')');
+            this.logger.info('⏳ Refresh deferred: lead operation in progress (' + reason + ')');
             setTimeout(function () {
                 self.triggerHardRefresh(reason + '_deferred');
             }, 1000);
             return;
         }
 
-        this.logger.info('🔄 Executing 20s hard refresh (' + reason + ')...');
+        this.logger.info('🔄 Executing manual refresh (' + reason + ')...');
         try {
             sessionStorage.setItem('bl_scanner_auto_resume', this._isPaused ? 'false' : 'true');
             if (this.supabase && this.supabase._filters) {
@@ -5209,11 +5529,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
         self._broadcastStatus();
     };
 
-    // ── Targeted fast DOM observer for network-intercepted leads (fallback when no API template) ──
-    Orchestrator.prototype._fastDomAcquire = function (watchLead) {
+    // ── Targeted passive DOM card binder for network-intercepted leads ──
+    Orchestrator.prototype._bindDomCardToLead = function (watchLead) {
         var orchRef = this;
         var uqid = String(watchLead.uniqueQueryId || watchLead.leadId || '');
-        var fired = false;
         var CARD_SELECTORS = '[class*="BuyLdC_cont"],[class*="BLbp_card"],.BLbp_card,[class*="BuyLdC_Card"],div[id*="id_BLCard"],[class*="BLCard"]';
 
         function findDomCardForLead(id) {
@@ -5234,36 +5553,13 @@ console.log('🔗 https://keynlabs.vercel.app/');
             return null;
         }
 
-        function tryClickCard(el) {
-            if (fired) return;
-            fired = true;
-            if (obs) obs.disconnect();
-            watchLead.element = el;
-            orchRef.logger.info('🎯 Fast DOM targeted click for: ' + uqid);
-            orchRef.actionAdapter.acquire(watchLead).then(function (r) {
-                if (r && r.success) {
-                    orchRef._handleAcquisitionSuccess(watchLead, r);
-                } else {
-                    if (!orchRef.duplicateManager.isDuplicate(watchLead.uniqueQueryId)) {
-                        orchRef.queue.enqueue(watchLead);
-                    }
-                }
-            }).catch(function () {
-                if (!orchRef.duplicateManager.isDuplicate(watchLead.uniqueQueryId)) {
-                    orchRef.queue.enqueue(watchLead);
-                }
-            });
-        }
-
-        // Instant 0ms check if card is already rendered
         var immediate = findDomCardForLead(uqid);
         if (immediate) {
-            tryClickCard(immediate);
+            watchLead.element = immediate;
             return;
         }
 
         var obs = new MutationObserver(function (mutations) {
-            if (fired || !orchRef._preApprovedLeads) { if (obs) obs.disconnect(); return; }
             for (var m = 0; m < mutations.length; m++) {
                 var added = mutations[m].addedNodes;
                 for (var n = 0; n < added.length; n++) {
@@ -5273,13 +5569,13 @@ console.log('🔗 https://keynlabs.vercel.app/');
                         node.getAttribute('data-lead-id') || node.getAttribute('data-query-id') ||
                         node.getAttribute('data-blid')    || node.getAttribute('data-uqid') || node.id || ''
                     );
-                    if (domId && domId.indexOf(uqid) !== -1) { tryClickCard(node); return; }
+                    if (domId && domId.indexOf(uqid) !== -1) { watchLead.element = node; obs.disconnect(); return; }
                     if (node.querySelectorAll) {
                         var kids = node.querySelectorAll(CARD_SELECTORS);
                         for (var ki = 0; ki < kids.length; ki++) {
                             var kDomId = kids[ki].getAttribute('data-lead-id') || kids[ki].getAttribute('data-query-id') ||
                                          kids[ki].getAttribute('data-blid')    || kids[ki].getAttribute('data-uqid') || kids[ki].id || '';
-                            if (kDomId && kDomId.indexOf(uqid) !== -1) { tryClickCard(kids[ki]); return; }
+                            if (kDomId && kDomId.indexOf(uqid) !== -1) { watchLead.element = kids[ki]; obs.disconnect(); return; }
                         }
                     }
                 }
@@ -5287,23 +5583,16 @@ console.log('🔗 https://keynlabs.vercel.app/');
         });
 
         obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
-        setTimeout(function () { if (!fired && obs) { obs.disconnect(); } }, 15000);
-
-        // Safety fallback to queue only if not fired
-        setTimeout(function () {
-            if (!fired && !orchRef.duplicateManager.isDuplicate(watchLead.uniqueQueryId)) {
-                orchRef.queue.enqueue(watchLead);
-            }
-        }, 600);
+        setTimeout(function () { if (obs) { obs.disconnect(); } }, 15000);
     };
 
     // ============================================================
-    // CARD PROCESSING — v6.2 pipeline
+    // CARD PROCESSING — Passive Lead-Review Engine (v5.0.0)
     // ============================================================
     // ── Network-Intercept Lead Handler ─────────────────────────────────────
     // Called by the window.postMessage listener with pseudo-cards built from
     // raw IndiaMART API JSON. Normalises, evaluates filters in real time, and
-    // acquires matching leads immediately at the API level (bot-speed path).
+    // presents matching leads for explicit user review.
     Orchestrator.prototype._onNetworkLeads = function (pseudoCards) {
         var self = this;
         if (!this._initialized || this._isPaused) return;
@@ -5324,7 +5613,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 // Skip if already acquired
                 if (this._acquiredLeadIds && this._acquiredLeadIds.has(String(raw.uniqueQueryId || raw.query_id || ''))) continue;
 
-                // Normalise raw API fields → lead object
+                // Normalise raw API fields → lead object with UNKNOWN location preservation
                 var lead = {
                     leadId: cardId,
                     uniqueQueryId: String(raw.uniqueQueryId || raw.query_id || raw.queryId || cardId),
@@ -5332,9 +5621,6 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     glid: String(raw.glid || raw.glusr_id || ''),
                     queryId: String(raw.queryId || raw.query_id || raw.uniqueQueryId || ''),
                     productName: raw.queryProductName || raw.product_name || raw.productName || raw.subject || '',
-                    // Build a rich messageText from ALL available descriptive API fields
-                    // so that medicine/product names buried in requirements, category, or
-                    // "Buys" columns are captured and matched against filter keywords.
                     messageText: [
                         raw.queryMessage, raw.message, raw.requirement, raw.requirements,
                         raw.queryMcatName, raw.mcat_name, raw.mcatName, raw.category,
@@ -5343,7 +5629,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     ].filter(Boolean).join(' ') || '',
                     city: raw.senderCity || raw.city || '',
                     state: raw.senderState || raw.state || '',
-                    countryIso: raw.senderCountryIso || raw.country_iso || raw.countryIso || 'IN',
+                    countryIso: raw.senderCountryIso || raw.country_iso || raw.countryIso || 'UNKNOWN',
                     senderMobile: raw.senderMobile || raw.mobile || raw.phone || '',
                     senderEmail: raw.senderEmail || raw.email || '',
                     queryTime: raw.queryTime || raw.created_at || '',
@@ -5356,17 +5642,59 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 lead.queryProductName = lead.productName;
                 lead.queryMessage = lead.messageText;
                 lead.subject = lead.productName;
+                lead.traceId = (pc._rawApiLead && pc._rawApiLead.traceId) || generateTraceId(lead.uniqueQueryId || lead.leadId);
 
                 if (!lead.productName && !lead.messageText) continue;
 
+                this.logger.logEvent({
+                    level: 'INFO',
+                    event: 'lead.observed',
+                    traceId: lead.traceId,
+                    context: { leadId: cardId, productName: lead.productName, source: 'NETWORK_PASSIVE' }
+                });
+
                 // Dedup check
-                if (this.duplicateManager && this.duplicateManager.isDuplicate(lead.uniqueQueryId)) continue;
+                if (this.duplicateManager && this.duplicateManager.isDuplicate(lead.uniqueQueryId)) {
+                    this.logger.logEvent({
+                        level: 'INFO',
+                        event: 'scanner.card.duplicate',
+                        traceId: lead.traceId,
+                        reasonCode: 'DUPLICATE_OBSERVATION',
+                        context: {
+                            leadName: lead.productName,
+                            product: lead.productName,
+                            leadId: cardId
+                        },
+                        message: 'Duplicate lead skipped (already observed): ' + (lead.productName || cardId)
+                    });
+                    continue;
+                }
 
                 // Filter match
                 if (this._supabaseEnabled && this.supabase && !this.supabase._filtersLoaded) continue;
+                var tEval0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 var kw = this._supabaseEnabled
                     ? this.keywordManager.evaluateFilters(lead)
                     : this.keywordManager.checkKeywords(lead.productName, lead.messageText);
+                var evalDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tEval0;
+
+                this.logger.logEvent({
+                    level: kw.passed ? 'INFO' : 'DEBUG',
+                    event: 'lead.filter.evaluated',
+                    traceId: lead.traceId,
+                    durationMs: evalDuration,
+                    result: kw.passed ? 'PASSED' : 'REJECTED',
+                    reasonCode: kw.passed ? 'FILTER_MATCH' : (kw.reason || 'KEYWORD_MISMATCH'),
+                    context: {
+                        leadName: lead.productName,
+                        product: lead.productName,
+                        filterId: kw.filterId,
+                        filterName: kw.filterName,
+                        leadId: cardId
+                    },
+                    message: (kw.passed ? 'Filter matched: ' : 'Filter rejected: ') + (lead.productName || cardId) + ' (' + (kw.filterName || 'No filter') + ')'
+                });
+
                 if (!kw.passed) continue;
 
                 if (kw.filterId) {
@@ -5376,6 +5704,15 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
                 // Safety check
                 var safetyCheck = this.safety.canAcquire();
+                this.logger.logEvent({
+                    level: safetyCheck.allowed ? 'DEBUG' : 'WARN',
+                    event: safetyCheck.allowed ? 'safety.limit.checked' : 'safety.limit.reached',
+                    traceId: lead.traceId,
+                    result: safetyCheck.allowed ? 'SUCCESS' : 'REJECTED',
+                    reasonCode: safetyCheck.allowed ? 'WITHIN_LIMITS' : safetyCheck.reason,
+                    context: { leadId: cardId }
+                });
+
                 if (!safetyCheck.allowed) {
                     if (kw.filterId) this.keywordManager.releaseReservation(kw.filterId, cardId);
                     continue;
@@ -5396,11 +5733,9 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 this.stats.validated++;
                 this.stats.filtered = (this.stats.filtered || 0) + 1;
 
-                // ── PRE-APPROVED CLICK PATH ────────────────────────────────────────
-                // Store this lead in _preApprovedLeads so that if DOM card appears before
-                // API acquire completes, _onCardsDetected clicks it immediately without re-evaluating.
+                // Register in _preApprovedLeads as READY_FOR_REVIEW so DOM scanner binds element without auto-click
                 if (!this._preApprovedLeads) this._preApprovedLeads = new Map();
-                var preApproveEntry = { lead: lead, kw: kw, ts: Date.now() };
+                var preApproveEntry = { lead: lead, kw: kw, ts: Date.now(), state: 'READY_FOR_REVIEW' };
                 var rawLead = pc._rawApiLead;
                 var idVariants = [
                     lead.uniqueQueryId, lead.leadId,
@@ -5410,58 +5745,45 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 for (var iv = 0; iv < idVariants.length; iv++) {
                     if (idVariants[iv]) this._preApprovedLeads.set(String(idVariants[iv]), preApproveEntry);
                 }
-                // Pre-approved entries expire after 60s to avoid stale clicks
-                var self2pa = this;
-                var expireId = lead.uniqueQueryId;
-                setTimeout(function () {
-                    if (self2pa._preApprovedLeads) self2pa._preApprovedLeads.delete(expireId);
-                }, 60000);
 
                 if (this.showTopToast) {
-                    this.showTopToast('found', '⚡ Network Lead Found', (lead.productName || 'Lead') + ' — ' + (lead.city || lead.state || 'India'));
+                    this.showTopToast('found', '⚡ Lead Found (Review Ready)', (lead.productName || 'Lead') + ' — ' + (lead.city || lead.state || 'UNKNOWN'));
                 }
 
-                this.logger.info('⚡ Network-intercept pre-approved: ' + cardId + ' (' + (lead.productName || '').substring(0, 50) + ')');
+                this.logger.logEvent({
+                    level: 'INFO',
+                    event: 'lead.review.ready',
+                    traceId: lead.traceId,
+                    result: 'READY_FOR_REVIEW',
+                    context: { leadId: cardId, productName: (lead.productName || '').substring(0, 50) }
+                });
 
-                var self3 = this;
+                // Bind DOM card if it appears later
+                this._bindDomCardToLead(lead);
 
-                // Live Toast: show acquiring immediately as acquisition starts
-                if (this.showTopToast) {
-                    this.showTopToast('acquiring', 'Acquiring Lead', 'Contacting buyer for: ' + (lead.productName || 'Lead'));
-                }
-                if (this.lifecycle) this.lifecycle.transition(lead.leadId, 'ACQUISITION_PENDING');
-                if (this.metrics) this.metrics.recordAcquisitionAttempt(lead.leadId);
+                // Transition to review workflow - explicit user confirmation required
+                this.stateMachine.setState(cardId, 'READY_FOR_REVIEW');
+                if (this.lifecycle) this.lifecycle.transition(lead.leadId, 'READY_FOR_REVIEW');
+                this._showReviewUI(lead);
 
-                // ─── OPTION 1: Direct API Acquire (bot-speed, no DOM needed) ─────────────
-                // If we have a captured template from a previous real click,
-                // replicate the contact API call directly. ~50ms latency.
-                if (this.acqApiCaller && this.acqApiCaller.hasTemplate()) {
-                    (function (directLead, orchRef) {
-                        orchRef.logger.info('🚀 Direct API acquire (Option 1): ' + (directLead.uniqueQueryId || directLead.leadId));
-                        orchRef.acqApiCaller.call(directLead).then(function (result) {
-                            if (result && result.success) {
-                                orchRef.logger.info('✅ Direct API acquire SUCCESS: ' + (directLead.uniqueQueryId || '') + ' code=' + result.code);
-                                orchRef._handleAcquisitionSuccess(directLead, result);
-                            } else {
-                                orchRef.logger.warn('⚠️ Direct API acquire failed (' + (result.reason || result.code || '') + ') — falling back to fast DOM path');
-                                self3._fastDomAcquire(directLead);
-                            }
-                        }).catch(function (e) {
-                            orchRef.logger.warn('Direct API acquire error: ' + (e && e.message));
-                            self3._fastDomAcquire(directLead);
-                        });
-                    })(lead, this);
-                } else {
-                    // ─── OPTION 2: Targeted DOM Observer (zero-debounce) ────────────
-                    this._fastDomAcquire(lead);
-                }
-
-                if (this._supabaseEnabled && !this.acqApiCaller.hasTemplate()) this._saveLeadToDb(lead, true);
+                if (this._supabaseEnabled) this._saveLeadToDb(lead, true);
 
             } catch (e) {
                 this.logger.warn('Network lead processing error: ' + (e && e.message));
             }
         }
+    };
+
+    Orchestrator.prototype._onPassiveNetworkLead = function (rawLead, sourceUrl) {
+        if (!rawLead) return;
+        var leadId = String(rawLead.uniqueQueryId || rawLead.query_id || rawLead.queryId || rawLead.leadId || rawLead.id || ('net_' + Math.random().toString(36).substring(2, 9)));
+        var pseudoCard = {
+            id: leadId,
+            element: null,
+            _rawApiLead: rawLead,
+            _sourceUrl: sourceUrl
+        };
+        this._onNetworkLeads([pseudoCard]);
     };
 
     Orchestrator.prototype._onCardsDetected = function (cards) {
@@ -5490,20 +5812,18 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 var card = newCards[i];
 
                 // ═══════════════════════════════════════════════════════════════
-                // PRE-APPROVED FAST-CLICK PATH (bot-speed)
-                // If this card was already filter-matched at the API/JSON stage
-                // by _onNetworkLeads, skip ALL parsing and evaluation — just
-                // click the Contact Buyer button immediately.
+                // PASSIVE NETWORK MATCH RECONCILIATION
+                // If this card was already filter-matched from passive network
+                // JSON observation, link the DOM element to the review lead.
+                // Never auto-click without explicit user confirmation.
                 // ═══════════════════════════════════════════════════════════════
                 if (self._preApprovedLeads && self._preApprovedLeads.size > 0 && card.element) {
-                    // Extract the card's uniqueQueryId from the DOM element's data attributes
                     var domUqid = card.element.getAttribute('data-lead-id')
                         || card.element.getAttribute('data-query-id')
                         || card.element.getAttribute('data-blid')
                         || card.element.getAttribute('data-id')
                         || card.element.getAttribute('data-uqid')
                         || card.element.getAttribute('id') || '';
-                    // Also try to pull uqid from the card's inner link/href
                     if (!domUqid) {
                         var hrefEl = card.element.querySelector('[href*="uniqueQueryId"], [href*="uqid"], [data-lead-id], [data-query-id], [data-blid]');
                         if (hrefEl) {
@@ -5516,59 +5836,24 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
                     var preApproved = domUqid ? self._preApprovedLeads.get(String(domUqid)) : null;
 
-                    // Also scan by card.id (which may include the api_ prefix or hash)
                     if (!preApproved) {
                         var strippedId = card.id.replace(/^api_/, '');
                         preApproved = self._preApprovedLeads.get(strippedId);
                     }
 
                     if (preApproved) {
-                        // Remove from pre-approved to prevent double-click
-                        self._preApprovedLeads.delete(String(domUqid));
-                        self._preApprovedLeads.delete(card.id.replace(/^api_/, ''));
-
                         var paLead = preApproved.lead;
                         paLead.element = card.element; // attach DOM element
                         paLead._domId = card.id;
 
-                        self.logger.info('\u26a1\u26a1 PRE-APPROVED INSTANT CLICK: ' + card.id + ' | ' + (paLead.productName || ''));
+                        self.logger.info('🔗 Linked passive network lead to DOM element: ' + card.id + ' | ' + (paLead.productName || ''));
 
-                        // Mark in all dedup structures first
-                        if (self._acquiredLeadIds) self._acquiredLeadIds.add(String(paLead.uniqueQueryId));
-                        if (!self._uniqueSeenIds.has(card.id)) {
-                            self._uniqueSeenIds.add(card.id);
-                            self.stats.discovered++;
-                            self.stats.unique = self._uniqueSeenIds.size;
-                        }
-                        if (self.metrics) self.metrics.recordMatch(card.id, Date.now());
-
-                        // Tag the card element immediately
                         try {
-                            card.element.setAttribute('data-leadsync-preapproved', 'true');
+                            card.element.setAttribute('data-leadsync-matched', 'true');
                         } catch (e) {}
 
-                        // Fire acquisition directly — no queue, no re-evaluation
-                        (function (paL, cardEl) {
-                            if (self.showTopToast) {
-                                self.showTopToast('acquiring', 'Acquiring Lead', 'Contacting buyer for: ' + (paL.productName || 'Lead'));
-                            }
-                            self.actionAdapter.acquire(paL).then(function (result) {
-                                if (result && result.success) {
-                                    try { cardEl.setAttribute('data-leadsync-acquired', 'true'); } catch (e) {}
-                                    self._handleAcquisitionSuccess(paL, result);
-                                } else {
-                                    // Fall back to queue if direct click failed
-                                    self.logger.warn('⚠️ PRE-APPROVED click failed, re-enqueuing: ' + (paL.leadId || ''));
-                                    if (!self.duplicateManager.isDuplicate(paL.uniqueQueryId)) {
-                                        self.queue.enqueue(paL);
-                                    }
-                                }
-                            }).catch(function (e) {
-                                self.logger.warn('PRE-APPROVED acquire error: ' + (e && e.message));
-                            });
-                        })(paLead, card.element);
-
-                        continue; // skip normal pipeline for this card
+                        // Lead is already in READY_FOR_REVIEW. Explicit user confirmation is required.
+                        continue;
                     }
                 }
                 // ═══════════════════════════════════════════════════════════════
@@ -5578,13 +5863,41 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     self.logger.debug('⏭ Card already in flight under previous id ' + card.replacesId + ': ' + card.id);
                     continue;
                 }
+                var tParse0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 var raw = self.parser.parseCard(card.element, card.id);
                 if (!raw) {
                     self.stats.failed++;
+                    self.logger.logEvent({
+                        level: 'DEBUG',
+                        event: 'scanner.card.skipped',
+                        reasonCode: 'UNPARSEABLE_CARD',
+                        context: { cardId: card.id },
+                        durationMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tParse0
+                    });
                     continue;
                 }
                 var lead = self.parser.normalize(raw);
-                if (!lead) { self.stats.failed++; continue; }
+                if (!lead) {
+                    self.stats.failed++;
+                    self.logger.logEvent({
+                        level: 'DEBUG',
+                        event: 'lead.normalization.rejected',
+                        reasonCode: 'NORMALIZATION_FAILED',
+                        context: { cardId: card.id },
+                        durationMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tParse0
+                    });
+                    continue;
+                }
+
+                lead.traceId = generateTraceId(lead.uniqueQueryId || lead.leadId || card.id);
+                var parseDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tParse0;
+                self.logger.logEvent({
+                    level: 'INFO',
+                    event: 'lead.observed',
+                    traceId: lead.traceId,
+                    durationMs: parseDuration,
+                    context: { leadId: card.id, productName: lead.productName, city: lead.city, countryIso: lead.countryIso, source: 'DOM_SCAN' }
+                });
 
                 if (!self._uniqueSeenIds.has(card.id)) {
                     self._uniqueSeenIds.add(card.id);
@@ -5597,38 +5910,81 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 // === STEP 0: EXCLUDE ALREADY ACQUIRED LEADS ===
                 if (self._isLeadAcquired(lead, card)) {
                     self.stats.duplicate++;
-                    self.logger.debug('🔒 Acquired lead excluded: ' + card.id);
+                    self.logger.logEvent({
+                        level: 'INFO',
+                        event: 'scanner.card.duplicate',
+                        traceId: lead.traceId,
+                        reasonCode: 'ALREADY_ACQUIRED',
+                        context: {
+                            leadName: lead.productName,
+                            product: lead.productName,
+                            seller: lead.senderName || lead.sellerName || null,
+                            location: lead.location || null,
+                            leadId: card.id
+                        },
+                        message: 'Duplicate lead skipped (already acquired): ' + lead.productName
+                    });
                     continue;
                 }
 
                 // === STEP 0.01: DEDUP — already processed by network-intercept or prior DOM scan ===
-                // duplicateManager.markSeen is called when a lead is enqueued.
-                // If the network path already picked this lead up, isDuplicate returns true here.
                 if (self.duplicateManager && self.duplicateManager.isDuplicate(lead.uniqueQueryId)) {
-                    self.logger.debug('\ud83d\udd01 Skipped (already queued/processed): ' + card.id + ' uqid=' + lead.uniqueQueryId);
+                    self.stats.duplicate++;
+                    self.logger.logEvent({
+                        level: 'INFO',
+                        event: 'scanner.card.duplicate',
+                        traceId: lead.traceId,
+                        reasonCode: 'DUPLICATE_OBSERVATION',
+                        context: {
+                            leadName: lead.productName,
+                            product: lead.productName,
+                            seller: lead.senderName || lead.sellerName || null,
+                            location: lead.location || null,
+                            leadId: card.id,
+                            uqid: lead.uniqueQueryId
+                        },
+                        message: 'Duplicate lead skipped (already observed): ' + lead.productName
+                    });
                     continue;
                 }
 
                 // === STEP 0.1: STOP SOLD CHECK ===
-                // When Stop Sold is enabled (default: true), stop or exclude sold-out leads.
-                // When disabled, this restriction is not applied and eligible leads continue.
                 if (self.config.stopSold !== false && self._isLeadSoldOut(lead, card)) {
                     self.stats.rejected++;
                     if (self.lifecycle) self.lifecycle.transition(card.id, 'SKIPPED', { reason: 'sold_out' });
-                    self.logger.info('🛑 Sold-out lead skipped (Stop Sold enabled): ' + card.id + ' | "' + (lead.productName || '') + '"');
+                    self.logger.logEvent({
+                        level: 'INFO',
+                        event: 'scanner.card.skipped',
+                        traceId: lead.traceId,
+                        reasonCode: 'SOLD_OUT',
+                        context: { leadName: lead.productName, leadId: card.id, product: lead.productName },
+                        message: 'Lead skipped (sold out): ' + lead.productName
+                    });
                     continue;
                 }
 
-                // === STEP 0.5: STRICT COUNTRY CHECK (Only when strict country mode is explicitly enabled) ===
+                // === STEP 0.5: STRICT COUNTRY CHECK ===
                 var countryCheck = self._checkStrictCountry(lead);
                 if (!countryCheck.allowed) {
                     self.stats.countryBlocked++;
-                    self.logger.info('🌍 COUNTRY BLOCK [' + countryCheck.reason + ']: ' + card.id + ' | got=' + (lead.countryIso || 'unknown'));
+                    self.logger.logEvent({
+                        level: 'INFO',
+                        event: 'lead.filter.evaluated',
+                        traceId: lead.traceId,
+                        result: 'REJECTED',
+                        reasonCode: countryCheck.reason || 'LOCATION_MISMATCH',
+                        context: {
+                            leadName: lead.productName,
+                            product: lead.productName,
+                            leadId: card.id,
+                            got: lead.countryIso || 'unknown'
+                        },
+                        message: 'Lead skipped (country mismatch): ' + lead.productName
+                    });
                     continue;
                 }
 
                 // === STEP 2: FILTER MATCH ===
-                // If Supabase is enabled but filters not yet loaded, skip this card (retry immediately once loaded)
                 if (self._supabaseEnabled && !self.supabase._filtersLoaded) {
                     self.logger.debug('⏳ Filters not loaded yet, skipping: ' + card.id);
                     if (self.scanner && self.scanner._knownLeads) {
@@ -5636,13 +5992,31 @@ console.log('🔗 https://keynlabs.vercel.app/');
                     }
                     continue;
                 }
+                var tEval0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 var kw = self._supabaseEnabled
                     ? self.keywordManager.evaluateFilters(lead)
                     : self.keywordManager.checkKeywords(lead.productName, lead.messageText);
+                var evalDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tEval0;
+
+                self.logger.logEvent({
+                    level: kw.passed ? 'INFO' : 'DEBUG',
+                    event: 'lead.filter.evaluated',
+                    traceId: lead.traceId,
+                    durationMs: evalDuration,
+                    result: kw.passed ? 'PASSED' : 'REJECTED',
+                    reasonCode: kw.passed ? 'FILTER_MATCH' : (kw.reason || 'KEYWORD_MISMATCH'),
+                    context: {
+                        leadName: lead.productName,
+                        product: lead.productName,
+                        filterId: kw.filterId,
+                        filterName: kw.filterName,
+                        leadId: card.id
+                    },
+                    message: (kw.passed ? 'Filter matched: ' : 'Filter rejected: ') + lead.productName + ' (' + (kw.filterName || 'No filter') + ')'
+                });
+
                 if (!kw.passed) {
                     self.stats.rejected++;
-                    self.logger.debug('❌ Filter [' + kw.reason + ']: ' + card.id + ' | "' + (lead.productName || '').substring(0, 60) + '"', kw.diagnostics || {});
-                    // NOTE: Do NOT markSeen() in duplicateManager — unacquired leads must remain available for rescan!
                     continue;
                 }
 
@@ -5759,10 +6133,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 if (lead.filterId) self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
                 self.stateMachine.setState(lead.leadId, 'MONITORED'); resolve(); return;
             }
-            if (self.config.mode === 'ASSISTED') {
-                self.stateMachine.setState(lead.leadId, 'AWAITING_APPROVAL');
+            if (self.config.mode === 'ASSISTED' || self.config.mode === 'REVIEW') {
+                self.stateMachine.setState(lead.leadId, 'READY_FOR_REVIEW');
                 if (lead.filterId) self.keywordManager.releaseReservation(lead.filterId, lead.leadId);
-                self._showApprovalUI(lead);
+                self._showReviewUI(lead);
                 resolve();
                 return;
             }
@@ -5817,65 +6191,227 @@ console.log('🔗 https://keynlabs.vercel.app/');
         });
     };
 
-    Orchestrator.prototype._showApprovalUI = function (lead) {
+    Orchestrator.prototype._confirmAndContactLead = function (lead) {
+        var self = this;
+        var traceId = lead.traceId || (this.logger && this.logger.generateTraceId ? this.logger.generateTraceId(lead.leadId) : lead.leadId);
+        var opId = this.logger && this.logger.generateOperationId ? this.logger.generateOperationId('act') : ('act_' + Date.now());
+
+        if (this.circuitBreaker && !this.circuitBreaker.canExecute()) {
+            var msg = 'Circuit breaker active: ' + this.circuitBreaker.getReason();
+            if (this.logger && typeof this.logger.logEvent === 'function') {
+                this.logger.logEvent('WARN', 'platform.restriction.detected', 'SafetyManager', {
+                    traceId: traceId,
+                    operationId: opId,
+                    reasonCode: 'CIRCUIT_BREAKER_RESTRICTION',
+                    result: 'BLOCKED',
+                    context: { message: msg }
+                });
+            }
+            this.logger.warn(msg);
+            if (this.showTopToast) this.showTopToast('failed', 'Restriction Active', msg, 4000);
+            return Promise.resolve({ success: false, reason: 'CIRCUIT_BREAKER_RESTRICTION' });
+        }
+
+        var res = this.safety.reserveCapacity(lead.leadId);
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('DEBUG', 'safety.limit.checked', 'SafetyManager', {
+                traceId: traceId,
+                operationId: opId,
+                reasonCode: res.allowed ? 'CAPACITY_RESERVED' : 'RATE_LIMIT_EXCEEDED',
+                result: res.allowed ? 'ALLOWED' : 'BLOCKED'
+            });
+        }
+        if (!res.allowed) {
+            if (this.logger && typeof this.logger.logEvent === 'function') {
+                this.logger.logEvent('WARN', 'safety.limit.reached', 'SafetyManager', {
+                    traceId: traceId,
+                    operationId: opId,
+                    reasonCode: 'RATE_LIMIT_EXCEEDED',
+                    result: 'BLOCKED',
+                    context: { reason: res.reason }
+                });
+            }
+            this.logger.warn('Safety limit reached: ' + res.reason);
+            if (this.showTopToast) this.showTopToast('failed', 'Safety Limit', res.reason, 4000);
+            return Promise.resolve({ success: false, reason: res.reason });
+        }
+
+        if (this.lifecycle) this.lifecycle.transition(lead.leadId, 'ACTION_PENDING');
+        this.stateMachine.setState(lead.leadId, 'ACTION_PENDING');
+        if (this.metrics) this.metrics.recordAcquisitionAttempt(lead.leadId);
+
+        var startTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('INFO', 'action.request.started', 'ActionAdapter', {
+                traceId: traceId,
+                operationId: opId,
+                reasonCode: 'ACQUIRE_DISPATCHED',
+                result: 'IN_PROGRESS'
+            });
+        }
+
+        return this.actionAdapter.acquire(lead).then(function (result) {
+            var duration = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - startTime);
+            if (result && result.success) {
+                self.safety.commitReservation(res.token);
+                self.stateMachine.setState(lead.leadId, 'SERVER_CONFIRMED');
+                if (self.logger && typeof self.logger.logEvent === 'function') {
+                    self.logger.logEvent('INFO', 'action.result.confirmed', 'ActionAdapter', {
+                        traceId: traceId,
+                        operationId: opId,
+                        durationMs: duration,
+                        reasonCode: 'SERVER_CONFIRMED',
+                        result: 'SUCCESS',
+                        context: { code: result.code }
+                    });
+                }
+                self._handleAcquisitionSuccess(lead, result);
+                return { success: true, status: 'SERVER_CONFIRMED', result: result };
+            } else if (result && result.ambiguous) {
+                self.safety.releaseReservation(res.token);
+                self.stateMachine.setState(lead.leadId, 'UNKNOWN', { reason: result.message || 'Ambiguous server outcome' });
+                if (self.logger && typeof self.logger.logEvent === 'function') {
+                    self.logger.logEvent('WARN', 'action.result.unknown', 'ActionAdapter', {
+                        traceId: traceId,
+                        operationId: opId,
+                        durationMs: duration,
+                        reasonCode: 'AMBIGUOUS_OUTCOME',
+                        result: 'UNKNOWN',
+                        context: { message: result.message }
+                    });
+                }
+                return { success: false, status: 'UNKNOWN', result: result };
+            } else {
+                self.safety.releaseReservation(res.token);
+                self.stateMachine.setState(lead.leadId, 'FAILED', { reason: (result && result.message) || 'Action failed' });
+                if (self.logger && typeof self.logger.logEvent === 'function') {
+                    self.logger.logEvent('ERROR', 'action.result.failed', 'ActionAdapter', {
+                        traceId: traceId,
+                        operationId: opId,
+                        durationMs: duration,
+                        reasonCode: (result && result.code) || 'ACQUISITION_FAILED',
+                        result: 'FAILED',
+                        context: { message: (result && result.message) || 'Action failed' },
+                        error: (result && result.message) || 'Action failed'
+                    });
+                }
+                return { success: false, status: 'FAILED', result: result };
+            }
+        }).catch(function (err) {
+            var duration = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - startTime);
+            self.safety.releaseReservation(res.token);
+            self.stateMachine.setState(lead.leadId, 'UNKNOWN', { reason: err && err.message });
+            if (self.logger && typeof self.logger.logEvent === 'function') {
+                self.logger.logEvent('ERROR', 'action.result.unknown', 'ActionAdapter', {
+                    traceId: traceId,
+                    operationId: opId,
+                    durationMs: duration,
+                    reasonCode: 'UNEXPECTED_ERROR',
+                    result: 'UNKNOWN',
+                    error: err && err.message
+                });
+            }
+            return { success: false, status: 'UNKNOWN', error: err };
+        });
+    };
+
+    Orchestrator.prototype._showReviewUI = function (lead) {
         var existing = document.getElementById('bl_approval_' + lead.leadId);
         if (existing) existing.remove();
         var iconUrl = '';
         try { iconUrl = chrome.runtime.getURL('plugin.png'); } catch (e) { }
+
+        var traceId = lead.traceId || (this.logger && this.logger.generateTraceId ? this.logger.generateTraceId(lead.leadId) : lead.leadId);
+        var opId = this.logger && this.logger.generateOperationId ? this.logger.generateOperationId('rev') : ('rev_' + Date.now());
+
+        if (this.logger && typeof this.logger.logEvent === 'function') {
+            this.logger.logEvent('INFO', 'action.review.requested', 'Orchestrator', {
+                traceId: traceId,
+                operationId: opId,
+                reasonCode: 'REVIEW_REQUIRED',
+                result: 'PROMPTED',
+                context: { productName: lead.productName, city: lead.city, country: lead.countryIso }
+            });
+        }
 
         var card = document.createElement('div');
         card.id = 'bl_approval_' + lead.leadId;
         card.className = 'bl-approval';
 
         var countryFlag = '';
-        if (lead.countryIso && lead.countryIso.length === 2) {
+        if (lead.countryIso && lead.countryIso.length === 2 && lead.countryIso !== 'UNKNOWN') {
             try {
                 var codePoints = lead.countryIso.toUpperCase().split('').map(function (c) { return 127397 + c.charCodeAt(0); });
                 countryFlag = String.fromCodePoint.apply(null, codePoints);
             } catch (e) { }
         }
 
+        var locText = [lead.city, lead.state, lead.countryIso || 'UNKNOWN'].filter(Boolean).join(', ');
+        var reqText = (lead.messageText || lead.queryMessage || lead.description || '').trim();
+        if (reqText.length > 120) reqText = reqText.substring(0, 117) + '...';
+
         card.innerHTML =
             '<div class="bl-approval-header">' +
             (iconUrl ? '<img src="' + iconUrl + '" alt="logo" />' : '') +
             '<span class="bl-approval-badge">' +
             '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
-            'Lead Ready' +
+            'Review Lead' +
             '</span>' +
             '</div>' +
-            '<div class="bl-approval-product">' + this._esc(lead.productName) + '</div>' +
-            '<div class="bl-approval-country">' + (countryFlag ? countryFlag + ' ' : '') + this._esc(lead.countryIso || 'Unknown') + '</div>' +
+            '<div class="bl-approval-product">' + this._esc(lead.productName || 'Lead') + '</div>' +
+            (reqText ? '<div style="font-size:11px;color:#52525b;margin-bottom:6px;line-height:1.35;">' + this._esc(reqText) + '</div>' : '') +
+            '<div class="bl-approval-country">' + (countryFlag ? countryFlag + ' ' : '') + this._esc(locText) + '</div>' +
+            (lead._matchReasons ? '<div style="font-size:10px;color:#0284c7;background:#f0f9ff;border:1px solid #bae6fd;border-radius:4px;padding:2px 6px;margin-bottom:8px;">Match: ' + this._esc(lead._matchReasons) + '</div>' : '') +
             '<div class="bl-approval-actions">' +
             '<button class="bl-btn bl-btn-acquire" type="button" data-a="acq">' +
             '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
-            'Acquire' +
+            'Confirm Contact' +
             '</button>' +
             '<button class="bl-btn bl-btn-skip" type="button" data-a="skip">' +
             '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>' +
-            'Skip' +
+            'Dismiss' +
             '</button>' +
             '</div>';
 
         document.body.appendChild(card);
 
         var self = this;
-        card.querySelector('[data-a="acq"]').addEventListener('click', function () {
-            self.actionAdapter.acquire(lead).then(function (r) {
-                if (r.success) {
-                    self.stats.acquired++;
-                    self.stateMachine.setState(lead.leadId, 'ACQUIRED');
-                    self._recordLeadAcquired(lead);
-                    if (self.showTopToast) {
-                        self.showTopToast('contacted', 'Lead Acquired & Contacted', (lead.productName || 'Lead') + ' (' + (lead.senderMobile || 'Contacted') + ')', 2000);
-                    }
+        var acqBtn = card.querySelector('[data-a="acq"]');
+        if (acqBtn) {
+            acqBtn.addEventListener('click', function () {
+                acqBtn.disabled = true;
+                acqBtn.textContent = '⏳ Contacting...';
+                if (self.logger && typeof self.logger.logEvent === 'function') {
+                    self.logger.logEvent('INFO', 'action.user.confirmed', 'Orchestrator', {
+                        traceId: traceId,
+                        operationId: opId,
+                        reasonCode: 'USER_CONFIRMED',
+                        result: 'CONFIRMED'
+                    });
                 }
+                self._confirmAndContactLead(lead).then(function (outcome) {
+                    if (outcome.status === 'SERVER_CONFIRMED') {
+                        acqBtn.textContent = '✅ Contacted';
+                        setTimeout(function () { card.remove(); }, 1500);
+                    } else if (outcome.status === 'UNKNOWN') {
+                        acqBtn.textContent = '⚠️ Status Unknown';
+                    } else {
+                        acqBtn.textContent = '❌ Failed';
+                    }
+                });
             });
-            card.remove();
-        });
-        card.querySelector('[data-a="skip"]').addEventListener('click', function () {
-            self.stateMachine.setState(lead.leadId, 'SKIPPED');
-            card.remove();
-        });
+        }
+        var skipBtn = card.querySelector('[data-a="skip"]');
+        if (skipBtn) {
+            skipBtn.addEventListener('click', function () {
+                self.stateMachine.setState(lead.leadId, 'DISMISSED');
+                card.remove();
+            });
+        }
+    };
+
+    Orchestrator.prototype._showApprovalUI = function (lead) {
+        return this._showReviewUI(lead);
     };
 
     Orchestrator.prototype._esc = function (t) { if (!t) return ''; var d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
@@ -6089,6 +6625,10 @@ console.log('🔗 https://keynlabs.vercel.app/');
         } catch (e) { }
     };
 
+    function _normLeadRecord(s) {
+        return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_');
+    }
+
     Orchestrator.prototype._recordLeadAcquired = function (lead) {
         if (!lead) return;
         var qid = lead.uniqueQueryId || lead.leadId;
@@ -6096,14 +6636,13 @@ console.log('🔗 https://keynlabs.vercel.app/');
         if (lead.leadId) this._acquiredLeadIds.add(String(lead.leadId));
 
         if (!this._acquiredRecords) this._acquiredRecords = [];
-        var norm = function (s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
         var rec = {
             uniqueQueryId: String(qid || ''),
             leadId: String(lead.leadId || ''),
-            productName: norm(lead.productName),
-            sellerName: norm(lead.senderName || lead.sellerName),
+            productName: _normLeadRecord(lead.productName),
+            sellerName: _normLeadRecord(lead.senderName || lead.sellerName),
             phone: String(lead.senderMobile || '').replace(/[^\d]/g, ''),
-            location: norm(lead.location),
+            location: _normLeadRecord(lead.location),
             acquiredAt: Date.now()
         };
         this._acquiredRecords.push(rec);
@@ -6156,9 +6695,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
             //   - If seller (or phone) matches previously acquired lead -> DUPLICATE (return true, DO NOT acquire again)
             //   - If seller is DIFFERENT -> NOT A DUPLICATE (allow acquisition!)
             if (this._acquiredRecords && this._acquiredRecords.length > 0) {
-                var norm = function (s) { return String(s || '').trim().toLowerCase().replace(/[^\w]/g, '_'); };
-                var curProd = norm(lead.productName);
-                var curSeller = norm(lead.senderName || lead.sellerName);
+                var curProd = _normLeadRecord(lead.productName);
+                var curSeller = _normLeadRecord(lead.senderName || lead.sellerName);
                 var curPhone = String(lead.senderMobile || '').replace(/[^\d]/g, '');
 
                 for (var r = 0; r < this._acquiredRecords.length; r++) {
@@ -6188,20 +6726,21 @@ console.log('🔗 https://keynlabs.vercel.app/');
         return this.supabase.loadFilters(force).then(function (success) {
             if (!success) return false;
             var newFilters = self.supabase.getFilters() || [];
-            var newSignature = JSON.stringify(newFilters.map(function (f) {
-                return {
-                    id: f.id,
-                    name: f.name || f.filter_name,
-                    keywords: f.product_keywords,
-                    neg: f.negative_keywords,
-                    loc: f.sender_locations,
-                    act: f.is_active,
-                    mode: f.match_mode,
-                    cfg: f.filter_config,
-                    del: f.deleted_at || f.is_deleted,
-                    upd: f.updated_at
-                };
-            }));
+            var newSignature = (self.supabase && typeof self.supabase._buildSemanticSignature === 'function')
+                ? self.supabase._buildSemanticSignature(newFilters)
+                : JSON.stringify(newFilters.map(function (f) {
+                    return {
+                        id: f.id,
+                        name: f.name || f.filter_name,
+                        keywords: f.product_keywords,
+                        neg: f.negative_keywords,
+                        loc: f.sender_locations,
+                        act: f.is_active,
+                        mode: f.match_mode,
+                        cfg: f.filter_config,
+                        del: f.deleted_at || f.is_deleted
+                    };
+                }));
 
             var hasActiveBefore = self.keywordManager ? self.keywordManager.getActiveFilterCount() : 0;
             if (self._lastFiltersSignature === undefined) {
@@ -6379,42 +6918,59 @@ console.log('🔗 https://keynlabs.vercel.app/');
 
     // Emergency stop triggered when Scanner detects IndiaMART's rate-limit warning.
     // Halts the navigator and queue, marks the extension PAUSED, and shows a status message.
-    Orchestrator.prototype._onRateLimitDetected = function () {
+    Orchestrator.prototype._onRateLimitDetected = function (reason) {
         var self = this;
         try {
-            this.logger.warn('\ud83d\udeab Rate-limit detected \u2014 pausing for 16 minutes then auto-resuming');
-            // Stop the navigator loop
-            if (this.navigator) this.navigator.stop();
-            // Pause the action queue
+            var restrictionReason = reason || 'Platform rate limit or restriction banner detected';
+            this.logger.warn('🛑 ' + restrictionReason + ' — pausing immediately. Auto-resume disabled.');
+            
+            // 1. Trip persistent circuit breaker
+            if (this.circuitBreaker) {
+                this.circuitBreaker.trip(restrictionReason);
+            }
+
+            // 2. Stop navigator loop and observers
+            if (this.navigator && typeof this.navigator.stop === 'function') this.navigator.stop();
+            if (this.scanner && typeof this.scanner.stop === 'function') this.scanner.stop();
+
+            // 3. Pause action queue
             if (this.queue && typeof this.queue.pause === 'function') {
                 this.queue.pause();
             } else if (this.queue) {
                 this.queue._paused = true;
             }
+
+            // 4. Clear timers
+            if (this._filterWatchTimer) clearInterval(this._filterWatchTimer);
+            if (this._rateLimitTimer) { clearTimeout(this._rateLimitTimer); this._rateLimitTimer = null; }
+
             this._isPaused = true;
             this._broadcastStatus();
-            // Update UI
+
+            // 5. Update UI: persistent warning and status
             var statusEl = document.getElementById('bl-status-text');
             if (statusEl) {
-                statusEl.textContent = '\ud83d\udeab RATE LIMITED \u2014 auto-resuming in 16 min';
-                statusEl.style.color = '#f5a623';
+                statusEl.textContent = '🛑 RESTRICTION DETECTED';
+                statusEl.style.color = '#f44336';
             }
-            // Auto-resume after 16 minutes (IndiaMART lifts block after 15 min)
-            var RESUME_AFTER_MS = 16 * 60 * 1000;
-            if (this._rateLimitTimer) clearTimeout(this._rateLimitTimer);
-            this._rateLimitTimer = setTimeout(function () {
-                try {
-                    self.logger.info('\u23f0 Rate-limit window expired \u2014 resuming automatically');
-                    self._isPaused = false;
-                    if (self.queue && typeof self.queue.resume === 'function') self.queue.resume();
-                    else if (self.queue) self.queue._paused = false;
-                    if (self.navigator && typeof self.navigator.start === 'function') self.navigator.start();
-                    self._broadcastStatus();
-                    var stEl = document.getElementById('bl-status-text');
-                    if (stEl) { stEl.textContent = '\u25b6 RUNNING'; stEl.style.color = '#4caf50'; }
-                } catch (e) {}
-            }, RESUME_AFTER_MS);
-        } catch (e) { }
+            var warnEl = document.getElementById('bl-warning-text');
+            if (warnEl) {
+                warnEl.textContent = '🛑 IndiaMART account restriction detected. Auto-resume disabled. Manual review required on platform before resuming.';
+                warnEl.classList.add('show');
+            }
+
+            // 6. Show resume button, hide stop button
+            var resumeBtn = document.getElementById('bl-resume-btn');
+            if (resumeBtn) resumeBtn.style.display = 'inline-block';
+            var stopBtn = document.getElementById('bl-stop-btn');
+            if (stopBtn) stopBtn.style.display = 'none';
+
+            if (this.showTopToast) {
+                this.showTopToast('failed', 'Account Restriction Detected', 'Platform limit reached. Extension halted.', 8000);
+            }
+        } catch (e) {
+            this.logger.error('Error handling rate limit detection: ' + (e && e.message));
+        }
     };
 
     Orchestrator.prototype.setAutoScroll = function (e) {
@@ -6535,9 +7091,12 @@ console.log('🔗 https://keynlabs.vercel.app/');
     };
 
     Orchestrator.prototype.resume = function () {
+        if (this.circuitBreaker && !this.circuitBreaker.isNormal()) {
+            this.circuitBreaker.reset('user_action');
+            this.logger.info('Circuit breaker reset by user action');
+        }
         this._isPaused = false;
-        this._cycleAcquiredThisScan = false; // allow reload loop to run next cycle
-        this._nextMandatoryReloadAt = Date.now() + 20000;
+        this._cycleAcquiredThisScan = false;
         this.safety.resume();
         if (this._supabaseEnabled) this.supabase.updateFilterStatus(true);
         this.logger.info('▶ RESUMED by user — evaluating eligible filters');
@@ -6641,72 +7200,51 @@ console.log('🔗 https://keynlabs.vercel.app/');
             });
         }
 
-        // ── Network-Intercept Fast Path v3 (Bot-Speed) ──────────────────────────
-        // Receives messages from network-interceptor.js v3 (MAIN world) via postMessage.
-        // Two message types:
-        //   { __leadsync_network__: true, leads:[...], payload:{...} }  → lead batch
-        //   { __leadsync_acq_confirm__: true, ok: bool, code: '...' }   → acq confirmed by API
+        // ── Passive Lead Observation Bridge (Read-Only) ────────────────────────
+        // Receives validated passive messages from network-interceptor.js (MAIN world)
+        // All external action replay, template harvesting, and blind confirmation removed.
         window.addEventListener('message', function (evt) {
             try {
-                if (!evt.data) return;
+                if (!evt.data || evt.source !== window) return;
 
-                // ── Acquisition Template (Option 3 → enables Option 1) ────────────
-                // The network interceptor captured the first real contact-buyer API
-                // request. Store it so AcqApiCaller can replicate it directly.
-                if (evt.data.__leadsync_acq_template__) {
-                    if (orchestrator && orchestrator.acqApiCaller) {
-                        orchestrator.acqApiCaller.storeTemplate(evt.data);
-                        orchestrator.logger && orchestrator.logger.info(
-                            '\ud83d\udce1 ACQ template captured: ' + (evt.data.method || '') + ' ' + (evt.data.url || '')
-                        );
+                // ── Structured logs from MAIN world network interceptor ──
+                if (evt.data.__leadsync_log__) {
+                    if (orchestrator && orchestrator.logger && typeof orchestrator.logger.logEvent === 'function') {
+                        orchestrator.logger.logEvent(evt.data);
                     }
                     return;
                 }
 
-                if (evt.data.__leadsync_acq_confirm__) {
-                    if (!orchestrator || !orchestrator._inFlightLead) return;
-                    var acqOk = evt.data.ok;
-                    var inFlight = orchestrator._inFlightLead;
-                    orchestrator.logger && orchestrator.logger.info(
-                        (acqOk ? '\u2705' : '\u26a0\ufe0f') + ' Network ACQ confirm ' +
-                        (inFlight.leadId || '') + ' code=' + (evt.data.code || '')
-                    );
-                    if (acqOk) {
-                        if (orchestrator._acquiredLeadIds)
-                            orchestrator._acquiredLeadIds.add(String(inFlight.uniqueQueryId || inFlight.leadId));
-                        if (orchestrator.duplicateManager)
-                            orchestrator.duplicateManager.markSeen(inFlight.uniqueQueryId || inFlight.leadId);
-                        if (typeof orchestrator._resolveInFlight === 'function') {
-                            orchestrator._resolveInFlight({ success: true, acquisitionSuccess: true, contactSuccess: true, action: 'api_confirmed', popup: { success: true } });
-                            orchestrator._resolveInFlight = null;
-                            orchestrator._inFlightLead = null;
-                        }
-                    }
+                // ── Passive lead observation from network-interceptor (read-only) ──
+                if (evt.data.type === '__leadsync_passive_lead__') {
+                    if (!orchestrator || !orchestrator._initialized || orchestrator._isPaused) return;
+                    if (evt.data.timestamp && (Date.now() - evt.data.timestamp > 30000)) return; // stale check
+                    var passive = evt.data.lead;
+                    if (!passive || typeof passive !== 'object') return;
+                    var pId = passive.uniqueQueryId || passive.query_id || passive.queryId || passive.leadId || passive.lead_id || null;
+                    if (!pId) return;
+                    orchestrator._onNetworkLeads([{ id: 'api_' + String(pId), element: null, _rawApiLead: passive }]);
                     return;
                 }
 
-                // ── Lead Batch ────────────────────────────────────────────────
-                if (!evt.data.__leadsync_network__) return;
-                if (!orchestrator || !orchestrator._initialized) return;
-                if (orchestrator._isPaused) return;
-
-                // v3 interceptor pre-extracts leads; v2 sends raw payload
-                var leads = evt.data.leads;
-                if (!leads || !leads.length) {
-                    leads = _netExtractLeads(evt.data.payload);
-                }
-                if (!leads || !leads.length) return;
-
-                // Build pseudo-cards for ALL leads in batch (v2 capped at 5 — removed)
-                var pseudoCards = [];
-                for (var li = 0; li < leads.length; li++) {
-                    var raw = leads[li];
-                    if (!raw) continue;
-                    var apiId = raw.uniqueQueryId || raw.query_id || raw.queryId
-                        || raw.leadId || raw.lead_id || raw.buyer_id
-                        || raw.buyerId || raw.id || null;
-                    if (!apiId) continue;
-                    pseudoCards.push({ id: 'api_' + String(apiId), element: null, _rawApiLead: raw });
+                // ── Legacy lead batch backwards-compatibility ──
+                if (evt.data.__leadsync_network__) {
+                    if (!orchestrator || !orchestrator._initialized || orchestrator._isPaused) return;
+                    var leads = evt.data.leads;
+                    if (!leads || !leads.length) leads = _netExtractLeads(evt.data.payload);
+                    if (!leads || !leads.length) return;
+                    var pseudoCards = [];
+                    for (var li = 0; li < leads.length; li++) {
+                        var raw = leads[li];
+                        if (!raw) continue;
+                        var apiId = raw.uniqueQueryId || raw.query_id || raw.queryId || raw.leadId || raw.lead_id || raw.buyer_id || raw.buyerId || raw.id || null;
+                        if (!apiId) continue;
+                        pseudoCards.push({ id: 'api_' + String(apiId), element: null, _rawApiLead: raw });
+                    }
+                    if (pseudoCards.length > 0) {
+                        orchestrator._onNetworkLeads(pseudoCards);
+                    }
+                    return;
                 }
 
                 if (pseudoCards.length > 0) {
@@ -6747,7 +7285,8 @@ console.log('🔗 https://keynlabs.vercel.app/');
         window.postMessage({ __leadsync_ready__: true }, '*');
 
 
-        chrome.storage.onChanged.addListener(function (changes, areaName) {
+        if (chrome && chrome.storage && chrome.storage.onChanged && chrome.storage.onChanged.addListener) {
+            chrome.storage.onChanged.addListener(function (changes, areaName) {
             if (areaName !== 'local') return;
             // Instant real-time microsecond filter update
             if (changes.filters_last_updated || changes.supabase_filters_cache || changes.active_filters || changes.cached_filters_v1) {
@@ -6777,6 +7316,7 @@ console.log('🔗 https://keynlabs.vercel.app/');
                 }
             }
         });
+        }
         chrome.runtime.onMessage.addListener(function (req, sender, sendResponse) {
             switch (req.action) {
                 case 'GET_STATUS': sendResponse(Object.assign({ success: true }, orchestrator.getStatus())); return true;
@@ -6838,7 +7378,32 @@ console.log('🔗 https://keynlabs.vercel.app/');
             _flushLogsNow(); // logs queued in the last <3s used to be lost on every auto-reload
         });
 
-        console.log('✅ Ready — v6.4.1');
+        if (typeof window !== 'undefined') {
+            window.Logger = Logger;
+            window.StructuredLogger = Logger;
+            window.__leadsync_logger__ = {
+                Logger: Logger,
+                StructuredLogger: Logger,
+                flushLogsNow: _flushLogsNow,
+                getDroppedLogsCount: function () { return _droppedLogsCount; },
+                getPersistenceErrorsCount: function () { return _persistenceErrorsCount; },
+                generateTraceId: generateTraceId,
+                generateOperationId: generateOperationId,
+                getQueue: function () { return _logQueue; }
+            };
+        }
+
+        console.log('✅ LeadSync Ready — v5.0.0 (Reliability Engine)');
+    }
+
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports.Logger = Logger;
+        module.exports.StructuredLogger = Logger;
+        module.exports.flushLogsNow = _flushLogsNow;
+        module.exports.getDroppedLogsCount = function () { return _droppedLogsCount; };
+        module.exports.getPersistenceErrorsCount = function () { return _persistenceErrorsCount; };
+        module.exports.generateTraceId = generateTraceId;
+        module.exports.generateOperationId = generateOperationId;
     }
 
 })();

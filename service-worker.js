@@ -18,6 +18,40 @@ console.log('📦 Developed by Keyn Labs');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 var cachedStatus = null;
+var SW_INSTANCE_ID = 'sw_' + Math.random().toString(36).substring(2, 10);
+
+function swLogEvent(level, event, data) {
+    data = data || {};
+    var record = {
+        id: 'rec_sw_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
+        schemaVersion: '1.0.0',
+        timestamp: new Date().toISOString(),
+        level: String(level || 'INFO').toUpperCase(),
+        event: event,
+        component: 'ServiceWorker',
+        instanceId: SW_INSTANCE_ID,
+        traceId: data.traceId || null,
+        operationId: data.operationId || null,
+        durationMs: typeof data.durationMs === 'number' ? Math.round(data.durationMs) : null,
+        result: data.result || null,
+        reasonCode: data.reasonCode || null,
+        context: data.context || null,
+        metrics: data.metrics || null,
+        error: data.error ? (typeof data.error === 'string' ? data.error : (data.error.message || String(data.error))) : null,
+        module: 'ServiceWorker',
+        message: event + (data.reasonCode ? ' [' + data.reasonCode + ']' : ''),
+        data: data.context || {}
+    };
+
+    try {
+        browserAPI.storage.local.get('logs', function(result) {
+            var existing = Array.isArray(result && result.logs) ? result.logs : [];
+            var merged = existing.concat([record]);
+            if (merged.length > 1000) merged = merged.slice(merged.length - 1000);
+            browserAPI.storage.local.set({ logs: merged });
+        });
+    } catch (e) {}
+}
 
 var SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
 var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2aHVyb211YnVreWxzeHJzZml6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwODI4MDYsImV4cCI6MjEwMzY1ODgwNn0.29J2uGHxFhPtEqRZvnXjaYpL-x4I0uEc2TT8u9d5PVw';
@@ -104,6 +138,7 @@ function sbHeaders(extra) {
 // ============================================================
 browserAPI.runtime.onInstalled.addListener(function() {
     console.log('[SW] BuyLead Assistant v4.2.0 installed');
+    swLogEvent('INFO', 'app.initialization.completed', { reasonCode: 'SERVICE_WORKER_INSTALLED', result: 'INSTALLED' });
 
     browserAPI.storage.local.get(['initialized_v620', 'mode', 'userSetMode'], function(result) {
         if (result.initialized_v620) {
@@ -138,6 +173,7 @@ browserAPI.runtime.onInstalled.addListener(function() {
 // ============================================================
 browserAPI.runtime.onStartup.addListener(function() {
     console.log('[SW] Extension started');
+    swLogEvent('INFO', 'app.initialization.started', { reasonCode: 'SERVICE_WORKER_STARTED', result: 'STARTED' });
     setupAlarms();
     // Run once on startup, tab-gated
     runGatedFilterCheck();
@@ -494,6 +530,7 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
             var timer = setTimeout(function() {
                 controller.abort();
             }, timeoutMs);
+            var startTime = Date.now();
 
             try {
                 var fetchUrl = request.url;
@@ -502,6 +539,7 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
 
                 var res = await fetch(fetchUrl, fetchOptions);
                 clearTimeout(timer);
+                var duration = Date.now() - startTime;
                 var resText = await res.text();
                 var headersObj = {};
                 if (res.headers && typeof res.headers.forEach === 'function') {
@@ -509,6 +547,14 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
                         headersObj[key.toLowerCase()] = val;
                     });
                 }
+                swLogEvent('DEBUG', 'network.response.observed', {
+                    operationId: request.operationId || null,
+                    traceId: request.traceId || null,
+                    durationMs: duration,
+                    result: 'SUCCESS',
+                    reasonCode: 'PROXY_FETCH_OK',
+                    context: { status: res.status, url: (request.url || '').split('?')[0] }
+                });
                 sendResponse({
                     ok: res.ok,
                     status: res.status,
@@ -518,7 +564,17 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
                 });
             } catch (fetchErr) {
                 clearTimeout(timer);
+                var durationErr = Date.now() - startTime;
                 console.error('[SW] ❌ Proxy fetch error:', fetchErr.message || fetchErr);
+                swLogEvent('ERROR', 'network.capture.failed', {
+                    operationId: request.operationId || null,
+                    traceId: request.traceId || null,
+                    durationMs: durationErr,
+                    result: 'FAILED',
+                    reasonCode: fetchErr.name === 'AbortError' ? 'PROXY_FETCH_TIMEOUT' : 'PROXY_FETCH_ERROR',
+                    error: fetchErr.name === 'AbortError' ? ('Timeout after ' + timeoutMs + 'ms') : (fetchErr.message || String(fetchErr)),
+                    context: { url: (request.url || '').split('?')[0] }
+                });
                 sendResponse({
                     ok: false,
                     status: 0,
@@ -628,6 +684,13 @@ browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse)
         return true;
     }
 
+    // === OPEN_TAB ===
+    if (request.action === 'OPEN_TAB' && request.url) {
+        browserAPI.tabs.create({ url: request.url });
+        sendResponse({ success: true });
+        return true;
+    }
+
     sendResponse({ success: false, error: 'Unknown action: ' + request.action });
     return true;
 });
@@ -697,17 +760,6 @@ browserAPI.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
         }
         push();
     });
-});
-
-// ============================================================
-// RUNTIME MESSAGING (tab opening, etc.)
-// ============================================================
-browserAPI.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-    if (request && request.action === 'OPEN_TAB' && request.url) {
-        browserAPI.tabs.create({ url: request.url });
-        sendResponse({ success: true });
-        return true;
-    }
 });
 
 console.log('[SW] BuyLead Assistant v4.2.0 loaded');

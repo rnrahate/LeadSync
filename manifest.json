@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "IndiaMART BuyLead Assistant (Fast)",
-  "version": "4.2.0",
-  "description": "Fast BuyLead automation with product-name gating, strict-country filter and full Supabase integration.",
+  "name": "IndiaMART BuyLead Assistant",
+  "version": "5.0.0",
+  "description": "Reliable BuyLead monitoring, filter matching, and review assistant with Supabase CRM integration.",
   "homepage_url": "https://leadsync-tau.vercel.app/",
   "permissions": [
     "storage",

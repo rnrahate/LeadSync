@@ -150,6 +150,32 @@
             white-space: nowrap; flex-shrink: 0;
             font-family: ui-monospace, monospace;
         }
+        .trace-badge {
+            display: inline-block; color: #0284c7; background: #e0f2fe;
+            border: 1px solid #bae6fd; padding: 1px 5px; border-radius: 3px;
+            font-size: 10px; cursor: pointer; text-decoration: none;
+            transition: all 0.12s ease; margin-right: 5px;
+        }
+        .trace-badge:hover { background: #bae6fd; text-decoration: underline; }
+        .duration-badge {
+            display: inline-block; color: #4b5563; background: #f3f4f6;
+            padding: 1px 5px; border-radius: 3px; font-size: 10px;
+            font-variant-numeric: tabular-nums; margin-right: 5px;
+        }
+        .event-badge {
+            display: inline-block; color: #4338ca; background: #e0e7ff;
+            border: 1px solid #c7d2fe; padding: 1px 5px; border-radius: 3px;
+            font-size: 10px; font-weight: 600; margin-right: 5px;
+        }
+        .result-badge {
+            display: inline-block; padding: 1px 5px; border-radius: 3px;
+            font-size: 10px; font-weight: 700; margin-right: 5px;
+        }
+        .log-reason {
+            display: inline-block; padding: 1px 6px; border-radius: 3px;
+            font-size: 10px; margin-right: 5px; background: var(--bg-hover);
+            font-weight: 600; vertical-align: middle;
+        }
         .log-buttons { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
         .expand-btn {
             background: none; border: none; color: var(--text-3);
@@ -164,15 +190,73 @@
         }
         .copy-btn:hover { color: var(--accent); background: var(--bg-hover); }
 
+        .log-data-chips {
+            display: inline-flex; flex-wrap: wrap; gap: 4px;
+            align-items: center; max-width: 480px; flex-shrink: 1;
+        }
+        .data-chip {
+            display: inline-flex; align-items: center; background: var(--bg-hover);
+            border: 1px solid var(--border); border-radius: 3px;
+            padding: 1px 5px; font-size: 10px; color: var(--text-2);
+            white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+        }
+        .data-chip-key { color: var(--text-3); margin-right: 3px; font-weight: 500; }
+        .data-chip-val { color: var(--text); font-weight: 600; }
+
         .log-data-full {
-            display: none; width: 100%; padding: 10px; margin-top: 4px;
-            background: var(--bg-subtle); border-radius: 4px;
-            font-size: 11px; color: var(--text-2);
-            white-space: pre-wrap; word-break: break-all;
-            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            display: none; width: 100%; padding: 12px 14px; margin-top: 8px;
+            background: #ffffff; border: 1px solid var(--border); border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
             border-left: 3px solid var(--accent);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }
         .log-data-full.show { display: block; }
+
+        .log-structured-card { display: flex; flex-direction: column; gap: 10px; }
+        .log-meta-row {
+            display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            padding-bottom: 8px; border-bottom: 1px solid var(--border);
+        }
+        .log-meta-item {
+            display: inline-flex; align-items: center; font-size: 11px; gap: 5px;
+            background: var(--bg-subtle); padding: 3px 8px; border-radius: 4px;
+            border: 1px solid var(--border);
+        }
+        .log-meta-label {
+            color: var(--text-3); text-transform: uppercase; font-size: 9px;
+            font-weight: 700; letter-spacing: 0.05em;
+        }
+        .log-meta-val { color: var(--text); font-weight: 600; font-family: ui-monospace, monospace; }
+
+        .log-section-title {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.05em; color: var(--text-3); margin-bottom: 4px;
+        }
+        .log-kv-table {
+            width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 4px;
+        }
+        .log-kv-table th, .log-kv-table td {
+            padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--bg-hover);
+        }
+        .log-kv-table th {
+            width: 160px; color: var(--text-2); font-weight: 600;
+            background: var(--bg-subtle); font-family: ui-monospace, monospace; font-size: 10px;
+        }
+        .log-kv-table td { color: var(--text); word-break: break-word; font-family: ui-monospace, monospace; }
+
+        .raw-json-toggle {
+            background: none; border: none; color: var(--text-3); font-size: 11px;
+            cursor: pointer; padding: 4px 0; text-decoration: underline; align-self: flex-start;
+            font-family: inherit;
+        }
+        .raw-json-toggle:hover { color: var(--accent); }
+        .raw-json-block {
+            display: none; background: var(--bg-subtle); padding: 8px 10px;
+            border-radius: 4px; border: 1px solid var(--border); font-family: ui-monospace, monospace;
+            font-size: 11px; white-space: pre-wrap; word-break: break-all;
+            color: var(--text-2); max-height: 250px; overflow-y: auto; margin-top: 4px;
+        }
+        .raw-json-block.show { display: block; }
 
         /* EMPTY */
         .empty {
@@ -228,8 +312,8 @@
         <div class="header-left">
             <img src="../plugin.png" alt="BuyLead Assistant" class="header-icon-img" />
             <div class="header-text">
-                <h1>Debug Logs</h1>
-                <span class="subtitle">Lead Sync Assistant v6.2.0</span>
+                <h1>Debug Logs &amp; Observability</h1>
+                <span class="subtitle">Lead Sync Assistant v6.3.0</span>
             </div>
         </div>
         <div class="status">
@@ -244,6 +328,12 @@
         <span>WARN: <strong id="statWarn">0</strong></span>
         <span>ERROR: <strong id="statError">0</strong></span>
         <span>DEBUG: <strong id="statDebug">0</strong></span>
+        <span>Scans: <strong id="statScans">0</strong></span>
+        <span>Obs: <strong id="statObs">0</strong></span>
+        <span>Dups: <strong id="statDups">0</strong></span>
+        <span>Rejected: <strong id="statRejected">0</strong></span>
+        <span>CRM: <strong id="statCrm">0</strong></span>
+        <span>Dropped: <strong id="statDropped" style="color:var(--danger)">0</strong></span>
     </div>
 
     <div class="controls">
@@ -257,8 +347,12 @@
             <option value="FATAL">FATAL</option>
         </select>
 
+        <select id="eventFilter">
+            <option value="ALL">All Events</option>
+        </select>
+
         <select id="moduleFilter">
-            <option value="ALL">All Modules</option>
+            <option value="ALL">All Components</option>
         </select>
 
         <select id="reasonFilter">
@@ -269,7 +363,8 @@
             <option value="ALL">All Country Events</option>
         </select>
 
-        <input type="text" id="searchFilter" placeholder="Search logs..." style="width:180px;">
+        <input type="text" id="traceFilter" placeholder="Filter by Trace ID..." style="width:140px;">
+        <input type="text" id="searchFilter" placeholder="Search logs..." style="width:160px;">
 
         <button class="btn-primary"   id="applyFilter">Apply</button>
         <button class="btn-secondary" id="clearFilter">Clear</button>

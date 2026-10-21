@@ -1,16 +1,10 @@
 // debug/debug.js
-// Debug log viewer — Attio theme
+// Debug log viewer & Structured Observability Dashboard — Attio theme
 // Developed by Keyn Labs
 // Version 6.3.0
 // ============================================================================
-// CHANGELOG v6.3.0
-//   • Attio-style UI — removed emojis from all user-facing strings
-//   • Clean SVG icons for expand/copy buttons
-//   • Updated color palette to match popup + config
-//   • All functionality preserved
-// ============================================================================
 
-console.log('BuyLead Assistant Debug v6.3.0');
+console.log('BuyLead Assistant Debug & Observability v6.3.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 
@@ -24,7 +18,7 @@ var REFRESH_MS = 1200;
 var SEARCH_DEBOUNCE_MS = 200;
 var _searchTimer = null;
 
-var FILTER_STORAGE_KEY = 'debugFilters_v620';
+var FILTER_STORAGE_KEY = 'debugFilters_v630';
 
 var ICON_EXPAND = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
 var ICON_COLLAPSE = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>';
@@ -53,9 +47,11 @@ function setupEventListeners() {
     if (clearFilterBtn) {
         clearFilterBtn.addEventListener('click', function() {
             var lf = document.getElementById('levelFilter');    if (lf) lf.value = 'ALL';
+            var ef = document.getElementById('eventFilter');    if (ef) ef.value = 'ALL';
             var mf = document.getElementById('moduleFilter');   if (mf) mf.value = 'ALL';
             var rf = document.getElementById('reasonFilter');   if (rf) rf.value = 'ALL';
             var cf = document.getElementById('countryFilter');  if (cf) cf.value = 'ALL';
+            var tf = document.getElementById('traceFilter');    if (tf) tf.value = '';
             var sf = document.getElementById('searchFilter');   if (sf) sf.value = '';
             saveFilters();
             applyFilters();
@@ -112,34 +108,26 @@ function setupEventListeners() {
         });
     }
 
-    var levelFilter = document.getElementById('levelFilter');
-    if (levelFilter) {
-        levelFilter.addEventListener('change', function() {
-            saveFilters();
-            applyFilters();
+    var traceInput = document.getElementById('traceFilter');
+    if (traceInput) {
+        traceInput.addEventListener('input', function() {
+            if (_searchTimer) clearTimeout(_searchTimer);
+            _searchTimer = setTimeout(function() {
+                saveFilters();
+                applyFilters();
+            }, SEARCH_DEBOUNCE_MS);
         });
     }
-    var moduleFilter = document.getElementById('moduleFilter');
-    if (moduleFilter) {
-        moduleFilter.addEventListener('change', function() {
-            saveFilters();
-            applyFilters();
-        });
-    }
-    var reasonFilter = document.getElementById('reasonFilter');
-    if (reasonFilter) {
-        reasonFilter.addEventListener('change', function() {
-            saveFilters();
-            applyFilters();
-        });
-    }
-    var countryFilter = document.getElementById('countryFilter');
-    if (countryFilter) {
-        countryFilter.addEventListener('change', function() {
-            saveFilters();
-            applyFilters();
-        });
-    }
+
+    ['levelFilter', 'eventFilter', 'moduleFilter', 'reasonFilter', 'countryFilter'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', function() {
+                saveFilters();
+                applyFilters();
+            });
+        }
+    });
 
     var logContainer = document.getElementById('logContainer');
     if (logContainer) {
@@ -147,10 +135,29 @@ function setupEventListeners() {
             var target = e.target;
             if (!target) return;
 
+            var traceBadge = target.closest('.trace-badge');
             var expandBtn = target.closest('.expand-btn');
             var copyBtn = target.closest('.copy-btn');
+            var rawJsonBtn = target.closest('.raw-json-toggle');
 
-            if (expandBtn) {
+            if (rawJsonBtn) {
+                e.stopPropagation();
+                var block = rawJsonBtn.nextElementSibling;
+                if (block) {
+                    var isShowing = block.classList.toggle('show');
+                    rawJsonBtn.textContent = isShowing ? 'Hide Raw JSON' : 'View Raw JSON';
+                }
+            } else if (traceBadge) {
+                e.stopPropagation();
+                var tid = traceBadge.getAttribute('data-trace-id');
+                if (tid) {
+                    var tf = document.getElementById('traceFilter');
+                    if (tf) tf.value = tid;
+                    saveFilters();
+                    applyFilters();
+                    showToast('Filtered to trace: ' + tid);
+                }
+            } else if (expandBtn) {
                 e.stopPropagation();
                 toggleData(expandBtn);
             } else if (copyBtn) {
@@ -209,15 +216,18 @@ function loadFromContentScript() {
 }
 
 function loadFromStorage() {
-    browserAPI.storage.local.get('logs', function(result) {
+    browserAPI.storage.local.get(['logs', '_droppedLogsCount', '_persistenceErrorsCount'], function(result) {
         var logs = result.logs || [];
+        if (typeof result._droppedLogsCount === 'number') {
+            setText('statDropped', result._droppedLogsCount);
+        }
         updateLogs(logs);
     });
 }
 
 function updateLogs(logs) {
-    var lastOld = allLogs.length > 0 ? allLogs[allLogs.length - 1].timestamp : null;
-    var lastNew = logs.length > 0 ? logs[logs.length - 1].timestamp : null;
+    var lastOld = allLogs.length > 0 ? (allLogs[allLogs.length - 1].timestamp || allLogs[allLogs.length - 1].id) : null;
+    var lastNew = logs.length > 0 ? (logs[logs.length - 1].timestamp || logs[logs.length - 1].id) : null;
 
     if (lastOld === lastNew && allLogs.length === logs.length) {
         return;
@@ -233,19 +243,23 @@ function updateLogs(logs) {
 // ============================================================
 function populateFilterOptions() {
     var modules = {};
+    var events = {};
     var reasons = {};
     var countries = {};
 
     for (var i = 0; i < allLogs.length; i++) {
         var log = allLogs[i];
-        if (log.module) modules[log.module] = true;
+        var comp = log.component || log.module;
+        if (comp) modules[comp] = true;
 
-        var reason = log.data && log.data.reason;
+        if (log.event) events[log.event] = true;
+
+        var reason = log.reasonCode || (log.data && log.data.reason);
         if (reason) {
             reasons[reason] = true;
             if (typeof reason === 'string' && reason.indexOf('STRICT_COUNTRY') === 0) {
                 countries[reason] = true;
-                if (log.data.leadCountry) countries[log.data.leadCountry] = true;
+                if (log.data && log.data.leadCountry) countries[log.data.leadCountry] = true;
             }
         }
         var msg = log.message || '';
@@ -255,7 +269,8 @@ function populateFilterOptions() {
         }
     }
 
-    populateSelect('moduleFilter', modules, 'All Modules');
+    populateSelect('eventFilter', events, 'All Events');
+    populateSelect('moduleFilter', modules, 'All Components');
     populateSelect('reasonFilter', reasons, 'All Reasons');
     populateSelect('countryFilter', countries, 'All Country Events');
     applySavedDropdowns();
@@ -286,19 +301,23 @@ function populateSelect(id, valuesObj, defaultLabel) {
 // ============================================================
 function applyFilters() {
     var levelFilter    = getVal('levelFilter', 'ALL');
+    var eventFilter    = getVal('eventFilter', 'ALL');
     var moduleFilter   = getVal('moduleFilter', 'ALL');
     var reasonFilter   = getVal('reasonFilter', 'ALL');
     var countryFilter  = getVal('countryFilter', 'ALL');
+    var traceFilter    = (getVal('traceFilter', '') || '').trim().toLowerCase();
     var searchFilter   = (getVal('searchFilter', '') || '').toLowerCase();
 
     filteredLogs = allLogs.filter(function(log) {
         if (levelFilter !== 'ALL' && log.level !== levelFilter) return false;
-        if (moduleFilter !== 'ALL' && log.module !== moduleFilter) return false;
+        if (eventFilter !== 'ALL' && log.event !== eventFilter) return false;
 
-        var reason = log.data && log.data.reason;
-        if (reasonFilter !== 'ALL') {
-            if (reason !== reasonFilter) return false;
-        }
+        var comp = log.component || log.module;
+        if (moduleFilter !== 'ALL' && comp !== moduleFilter) return false;
+
+        var reason = log.reasonCode || (log.data && log.data.reason);
+        if (reasonFilter !== 'ALL' && reason !== reasonFilter) return false;
+
         if (countryFilter !== 'ALL') {
             var isCountryEvent =
                 (typeof reason === 'string' && reason.indexOf('STRICT_COUNTRY') === 0) ||
@@ -313,10 +332,22 @@ function applyFilters() {
             if (!hit) return false;
         }
 
+        if (traceFilter) {
+            var tid = (log.traceId || (log.data && log.data.traceId) || '').toLowerCase();
+            if (tid.indexOf(traceFilter) === -1) return false;
+        }
+
         if (searchFilter) {
             var searchText = (
+                (log.event || '') + ' ' +
                 (log.message || '') + ' ' +
-                (log.module || '') + ' ' +
+                (comp || '') + ' ' +
+                (log.traceId || '') + ' ' +
+                (log.operationId || '') + ' ' +
+                (reason || '') + ' ' +
+                (log.result || '') + ' ' +
+                (log.error || '') + ' ' +
+                (log.context ? safeStringify(log.context) : '') + ' ' +
                 (log.data ? safeStringify(log.data) : '')
             ).toLowerCase();
             if (searchText.indexOf(searchFilter) === -1) return false;
@@ -333,8 +364,8 @@ function getVal(id, fallback) {
     return el ? el.value : fallback;
 }
 
-function safeStringify(obj) {
-    try { return JSON.stringify(obj); } catch (e) { return '[unserializable]'; }
+function safeStringify(obj, replacer, space) {
+    try { return JSON.stringify(obj, replacer, space); } catch (e) { return '[unserializable]'; }
 }
 
 // ============================================================
@@ -354,19 +385,38 @@ function updateStats() {
     if (statTotal) statTotal.textContent = allLogs.length;
 
     var info = 0, warn = 0, error = 0, debug = 0;
+    var scans = 0, obs = 0, dups = 0, rejected = 0, crm = 0;
+
     for (var i = 0; i < allLogs.length; i++) {
-        switch (allLogs[i].level) {
+        var log = allLogs[i];
+        switch (log.level) {
             case 'INFO':  info++;  break;
             case 'WARN':  warn++;  break;
             case 'ERROR':
             case 'FATAL': error++; break;
-            case 'DEBUG': debug++; break;
+            case 'DEBUG':
+            case 'TRACE': debug++; break;
         }
+
+        var ev = log.event || '';
+        var r = log.reasonCode || (log.data && log.data.reason) || '';
+
+        if (ev.indexOf('scanner.cycle') !== -1 || ev === 'scanner.started') scans++;
+        if (ev === 'lead.observed') obs++;
+        if (ev === 'scanner.card.duplicate' || r === 'DUPLICATE_OBSERVATION') dups++;
+        if (ev === 'lead.normalization.rejected' || r === 'LOCATION_MISMATCH' || r === 'NEGATIVE_KEYWORD_MATCH' || (typeof r === 'string' && r.indexOf('STRICT_') === 0)) rejected++;
+        if (ev === 'crm.write.completed') crm++;
     }
-    setText('statInfo',  info);
-    setText('statWarn',  warn);
-    setText('statError', error);
-    setText('statDebug', debug);
+
+    setText('statInfo',     info);
+    setText('statWarn',     warn);
+    setText('statError',    error);
+    setText('statDebug',    debug);
+    setText('statScans',    scans);
+    setText('statObs',      obs);
+    setText('statDups',     dups);
+    setText('statRejected', rejected);
+    setText('statCrm',      crm);
 }
 
 function setText(id, val) {
@@ -418,6 +468,145 @@ function renderLogs(logs) {
     container.scrollTop = 0;
 }
 
+function formatContextChips(ctx) {
+    if (!ctx || typeof ctx !== 'object') return '';
+    var keys = Object.keys(ctx);
+    if (keys.length === 0) return '';
+
+    var chips = [];
+    var priority = ['leadName', 'product', 'filterName', 'filterId', 'seller', 'location', 'leadId', 'status', 'from', 'to', 'count', 'url'];
+    var seen = {};
+
+    for (var p = 0; p < priority.length; p++) {
+        var pk = priority[p];
+        if (ctx[pk] !== undefined && ctx[pk] !== null && ctx[pk] !== '') {
+            // Avoid duplicate chips if leadName and product are identical
+            if (pk === 'product' && ctx.leadName && ctx.leadName === ctx.product) {
+                seen[pk] = true;
+                continue;
+            }
+            if (pk === 'leadName' && ctx.product && ctx.leadName === ctx.product) {
+                chips.push({ key: 'lead', val: String(ctx[pk]) });
+                seen['leadName'] = true;
+                seen['product'] = true;
+                continue;
+            }
+            chips.push({ key: pk === 'leadName' ? 'lead' : pk, val: String(ctx[pk]) });
+            seen[pk] = true;
+        }
+    }
+    for (var k = 0; k < keys.length; k++) {
+        var rk = keys[k];
+        if (!seen[rk] && ctx[rk] !== undefined && ctx[rk] !== null && ctx[rk] !== '' && typeof ctx[rk] !== 'object') {
+            chips.push({ key: rk, val: String(ctx[rk]) });
+        }
+    }
+
+    if (chips.length === 0) {
+        var s = safeStringify(ctx);
+        return s.length > 50 ? escapeHtml(s.substring(0, 47) + '...') : escapeHtml(s);
+    }
+
+    var html = '<span class="log-data-chips">';
+    var maxChips = 3;
+    for (var c = 0; c < Math.min(chips.length, maxChips); c++) {
+        var item = chips[c];
+        var val = item.val;
+        if (val.length > 25) val = val.substring(0, 22) + '...';
+        html += '<span class="data-chip"><span class="data-chip-key">' + escapeHtml(item.key) + ':</span><span class="data-chip-val">' + escapeHtml(val) + '</span></span>';
+    }
+    if (chips.length > maxChips) {
+        html += '<span class="data-chip" style="color:var(--text-3); font-size:10px;">+' + (chips.length - maxChips) + '</span>';
+    }
+    html += '</span>';
+    return html;
+}
+
+function renderStructuredDetails(log, fullRecord, dataFull) {
+    var ctx = log.context || log.data || {};
+    var hasContext = ctx && typeof ctx === 'object' && Object.keys(ctx).length > 0;
+    var hasMetrics = log.metrics && typeof log.metrics === 'object' && Object.keys(log.metrics).length > 0;
+    var hasError = !!log.error;
+
+    var html = '<div class="log-structured-card">';
+
+    // 1. Meta strip
+    html += '<div class="log-meta-row">';
+    if (log.event) {
+        html += '<div class="log-meta-item"><span class="log-meta-label">Event</span><span class="log-meta-val" style="color:#4338ca;">' + escapeHtml(log.event) + '</span></div>';
+    }
+    if (log.result) {
+        var resColor = (log.result === 'PASSED' || log.result === 'SUCCESS' || log.result === 'COMPLETED') ? 'var(--success)' : (log.result === 'FAILED' ? 'var(--danger)' : 'var(--warning)');
+        html += '<div class="log-meta-item"><span class="log-meta-label">Result</span><span class="log-meta-val" style="color:' + resColor + ';">' + escapeHtml(log.result) + '</span></div>';
+    }
+    if (log.reasonCode) {
+        html += '<div class="log-meta-item"><span class="log-meta-label">Reason</span><span class="log-meta-val" style="color:var(--accent);">' + escapeHtml(log.reasonCode) + '</span></div>';
+    }
+    if (typeof log.durationMs === 'number') {
+        html += '<div class="log-meta-item"><span class="log-meta-label">Duration</span><span class="log-meta-val">' + log.durationMs + ' ms</span></div>';
+    }
+    if (log.traceId) {
+        html += '<div class="log-meta-item"><span class="log-meta-label">Trace ID</span><span class="log-meta-val trace-badge" data-trace-id="' + escapeHtml(log.traceId) + '" style="cursor:pointer;" title="Click to filter">' + escapeHtml(log.traceId) + '</span></div>';
+    }
+    if (log.operationId) {
+        html += '<div class="log-meta-item"><span class="log-meta-label">Op ID</span><span class="log-meta-val">' + escapeHtml(log.operationId) + '</span></div>';
+    }
+    html += '</div>';
+
+    // 2. Context Table
+    if (hasContext) {
+        html += '<div>';
+        html += '<div class="log-section-title">Context &amp; Evaluated Attributes</div>';
+        html += '<table class="log-kv-table"><tbody>';
+        for (var k in ctx) {
+            if (Object.prototype.hasOwnProperty.call(ctx, k)) {
+                var v = ctx[k];
+                var displayVal = '';
+                if (typeof v === 'object' && v !== null) {
+                    displayVal = '<code>' + escapeHtml(safeStringify(v)) + '</code>';
+                } else {
+                    displayVal = '<strong>' + escapeHtml(String(v)) + '</strong>';
+                }
+                html += '<tr><th>' + escapeHtml(k) + '</th><td>' + displayVal + '</td></tr>';
+            }
+        }
+        html += '</tbody></table></div>';
+    }
+
+    // 3. Metrics Table (if any)
+    if (hasMetrics) {
+        html += '<div>';
+        html += '<div class="log-section-title">Performance Metrics</div>';
+        html += '<table class="log-kv-table"><tbody>';
+        for (var mk in log.metrics) {
+            if (Object.prototype.hasOwnProperty.call(log.metrics, mk)) {
+                html += '<tr><th>' + escapeHtml(mk) + '</th><td><strong>' + escapeHtml(String(log.metrics[mk])) + '</strong></td></tr>';
+            }
+        }
+        html += '</tbody></table></div>';
+    }
+
+    // 4. Error Display (if any)
+    if (hasError) {
+        var errObj = log.error;
+        var errMsg = typeof errObj === 'string' ? errObj : (errObj.message || safeStringify(errObj));
+        var errStack = (errObj && errObj.stack) ? errObj.stack : '';
+        html += '<div style="background:var(--danger-bg); border:1px solid #fecaca; border-radius:4px; padding:8px 10px; margin-bottom:6px;">';
+        html += '<div style="color:var(--danger); font-weight:700; font-size:11px; margin-bottom:2px;">Error: ' + escapeHtml(errMsg) + '</div>';
+        if (errStack) {
+            html += '<pre style="color:#991b1b; font-size:10px; margin-top:4px; white-space:pre-wrap; font-family:ui-monospace, monospace;">' + escapeHtml(errStack) + '</pre>';
+        }
+        html += '</div>';
+    }
+
+    // 5. Collapsible Raw JSON
+    html += '<button type="button" class="raw-json-toggle">View Raw JSON</button>';
+    html += '<pre class="raw-json-block">' + escapeHtml(dataFull) + '</pre>';
+
+    html += '</div>';
+    return html;
+}
+
 function renderRow(log) {
     var levelClass = 'level-' + (log.level || 'INFO');
     var timestamp = log.timestamp || '';
@@ -428,48 +617,69 @@ function renderRow(log) {
         timeStr = date.toLocaleTimeString() + '.' + String(date.getMilliseconds()).padStart(3, '0');
     } catch (e) {}
 
-    var moduleName = log.module || '-';
-    var message = escapeHtml(log.message || '');
+    var componentName = log.component || log.module || '-';
+    var eventName = log.event || '';
+    var traceId = log.traceId || (log.data && log.data.traceId) || '';
+    var duration = typeof log.durationMs === 'number' ? (log.durationMs + 'ms') : '';
+    var reason = log.reasonCode || (log.data && log.data.reason) || '';
 
-    var extraInfo = '';
-    if (log.data) {
-        var productName = log.data.productName || log.data.leadId;
-        var reason = log.data.reason;
-        if (productName) {
-            extraInfo += '<span class="log-extra">' + escapeHtml(String(productName).substring(0, 60)) + '</span>';
-        }
-        if (reason && reason !== 'ok') {
-            var isCountry = typeof reason === 'string' && reason.indexOf('STRICT_COUNTRY') === 0;
-            extraInfo += '<span class="log-reason" style="color:' + (isCountry ? 'var(--accent)' : 'var(--warning)') + ';">' +
-                escapeHtml(reason) + '</span>';
-        }
+    var message = '';
+    if (log.message && log.message !== log.event) {
+        message = escapeHtml(log.message);
     }
 
-    var dataStr = '';
-    var dataFull = '';
-    if (log.data && Object.keys(log.data).length > 0) {
-        try {
-            dataStr = safeStringify(log.data).substring(0, 80);
-            if (dataStr.length >= 80) dataStr += '...';
-            dataFull = safeStringify(log.data, null, 2);
-        } catch (e) {
-            dataStr = '[object]';
-        }
+    var badges = '';
+    if (eventName) {
+        badges += '<span class="event-badge">' + escapeHtml(eventName) + '</span>';
+    }
+    if (traceId) {
+        badges += '<span class="trace-badge" data-trace-id="' + escapeHtml(traceId) + '" title="Click to isolate this trace">' + escapeHtml(traceId.substring(0, 16)) + '</span>';
+    }
+    if (duration) {
+        badges += '<span class="duration-badge">' + escapeHtml(duration) + '</span>';
+    }
+    if (log.result) {
+        var resCls = (log.result === 'PASSED' || log.result === 'SUCCESS' || log.result === 'COMPLETED') ? 'level-INFO' : (log.result === 'FAILED' ? 'level-ERROR' : 'level-WARN');
+        badges += '<span class="result-badge ' + resCls + '">' + escapeHtml(log.result) + '</span>';
+    }
+    if (reason && reason !== 'ok') {
+        var isCountry = typeof reason === 'string' && reason.indexOf('STRICT_COUNTRY') === 0;
+        badges += '<span class="log-reason" style="color:' + (isCountry ? 'var(--accent)' : 'var(--warning)') + ';">' + escapeHtml(reason) + '</span>';
     }
 
-    var hasData = dataFull.length > 0;
+    var contextChips = formatContextChips(log.context || log.data);
+
+    // Authoritative full JSON object
+    var fullRecord = Object.assign({
+        schemaVersion: log.schemaVersion || '1.0.0',
+        timestamp: log.timestamp,
+        level: log.level,
+        event: log.event || null,
+        component: componentName,
+        instanceId: log.instanceId || null,
+        traceId: log.traceId || null,
+        operationId: log.operationId || null,
+        durationMs: log.durationMs != null ? log.durationMs : null,
+        result: log.result || null,
+        reasonCode: log.reasonCode || null,
+        context: log.context || log.data || null,
+        metrics: log.metrics || null,
+        error: log.error || null
+    }, log);
+
+    var dataFull = safeStringify(fullRecord, null, 2);
 
     return '<div class="log-entry">' +
         '<span class="log-level ' + levelClass + '">' + (log.level || 'INFO') + '</span>' +
         '<span class="log-time">' + timeStr + '</span>' +
-        '<span class="log-module">' + escapeHtml(moduleName) + '</span>' +
-        '<span class="log-message">' + message + extraInfo + '</span>' +
-        (hasData ? '<span class="log-data">' + escapeHtml(dataStr) + '</span>' : '') +
+        '<span class="log-module">' + escapeHtml(componentName) + '</span>' +
+        '<span class="log-message">' + badges + (message ? (' ' + message) : '') + '</span>' +
+        (contextChips ? '<span class="log-data">' + contextChips + '</span>' : '') +
         '<span class="log-buttons">' +
-            (hasData ? '<button class="expand-btn" aria-label="Expand" data-state="collapsed">' + ICON_EXPAND + '</button>' : '') +
-            '<button class="copy-btn" aria-label="Copy" title="Copy JSON">' + ICON_COPY + '</button>' +
+            '<button class="expand-btn" aria-label="Expand" data-state="collapsed">' + ICON_EXPAND + '</button>' +
+            '<button class="copy-btn" aria-label="Copy" title="Copy Authoritative JSON">' + ICON_COPY + '</button>' +
         '</span>' +
-        (hasData ? '<div class="log-data-full">' + escapeHtml(dataFull) + '</div>' : '') +
+        '<div class="log-data-full">' + renderStructuredDetails(log, fullRecord, dataFull) + '</div>' +
     '</div>';
 }
 
@@ -490,25 +700,8 @@ function copyRowToClipboard(btn) {
     var entry = btn.closest('.log-entry');
     if (!entry) return;
 
-    var levelEl  = entry.querySelector('.log-level');
-    var timeEl   = entry.querySelector('.log-time');
-    var moduleEl = entry.querySelector('.log-module');
-    var msgEl    = entry.querySelector('.log-message');
-    var dataEl   = entry.querySelector('.log-data-full');
-
-    var payload = {
-        level:   levelEl ? levelEl.textContent.trim() : '',
-        time:    timeEl ? timeEl.textContent.trim() : '',
-        module:  moduleEl ? moduleEl.textContent.trim() : '',
-        message: msgEl ? msgEl.textContent.trim() : ''
-    };
-
-    if (dataEl && dataEl.textContent) {
-        try { payload.data = JSON.parse(dataEl.textContent); }
-        catch (e) { payload.data = dataEl.textContent; }
-    }
-
-    var text = safeStringify(payload, null, 2);
+    var dataEl = entry.querySelector('.raw-json-block') || entry.querySelector('.log-data-full');
+    var text = dataEl ? dataEl.textContent : '';
 
     var done = function() {
         btn.innerHTML = ICON_CHECK;
@@ -552,7 +745,7 @@ function escapeHtml(text) {
 function clearLogs() {
     if (!confirm('Clear all debug logs?\n\nThis action cannot be undone.')) return;
 
-    browserAPI.storage.local.set({ logs: [] }, function() {
+    browserAPI.storage.local.set({ logs: [], _droppedLogsCount: 0, _persistenceErrorsCount: 0 }, function() {
         allLogs = [];
         filteredLogs = [];
         renderLogs([]);
@@ -569,19 +762,25 @@ function exportLogs() {
 
     var filterState = {
         level: getVal('levelFilter', 'ALL'),
+        event: getVal('eventFilter', 'ALL'),
         module: getVal('moduleFilter', 'ALL'),
         reason: getVal('reasonFilter', 'ALL'),
         country: getVal('countryFilter', 'ALL'),
+        trace: getVal('traceFilter', ''),
         search: getVal('searchFilter', '')
     };
 
+    var exportLogsArray = filteredLogs.length > 0 ? filteredLogs : allLogs;
+
     var payload = {
+        schemaVersion: '1.0.0',
         exportedAt: new Date().toISOString(),
         extension: 'BuyLead Assistant',
         version: '6.3.0',
         totalLogs: allLogs.length,
+        exportedCount: exportLogsArray.length,
         filters: filterState,
-        logs: filteredLogs.length > 0 ? filteredLogs : allLogs
+        logs: exportLogsArray
     };
 
     var dataStr = JSON.stringify(payload, null, 2);
@@ -589,13 +788,13 @@ function exportLogs() {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'buylead-debug-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+    a.download = 'buylead-observability-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    showToast('Exported ' + (filteredLogs.length > 0 ? filteredLogs.length : allLogs.length) + ' logs');
+    showToast('Exported ' + exportLogsArray.length + ' structured logs (Schema v1.0.0)');
 }
 
 // ============================================================
@@ -604,9 +803,11 @@ function exportLogs() {
 function saveFilters() {
     var state = {
         level: getVal('levelFilter', 'ALL'),
+        event: getVal('eventFilter', 'ALL'),
         module: getVal('moduleFilter', 'ALL'),
         reason: getVal('reasonFilter', 'ALL'),
         country: getVal('countryFilter', 'ALL'),
+        trace: getVal('traceFilter', ''),
         search: getVal('searchFilter', '')
     };
     browserAPI.storage.local.set({ [FILTER_STORAGE_KEY]: state });
@@ -618,15 +819,17 @@ function restoreFilters() {
         if (!state) return;
 
         var lf = document.getElementById('levelFilter');   if (lf && state.level)   lf.value = state.level;
+        var ef = document.getElementById('eventFilter');   if (ef && state.event)   ef.setAttribute('data-saved', state.event);
         var mf = document.getElementById('moduleFilter');  if (mf && state.module)  mf.value = state.module;
         var rf = document.getElementById('reasonFilter');  if (rf && state.reason)  rf.setAttribute('data-saved', state.reason);
         var cf = document.getElementById('countryFilter'); if (cf && state.country) cf.setAttribute('data-saved', state.country);
+        var tf = document.getElementById('traceFilter');   if (tf && state.trace)   tf.value = state.trace;
         var sf = document.getElementById('searchFilter');  if (sf && state.search)  sf.value = state.search;
     });
 }
 
 function applySavedDropdowns() {
-    ['reasonFilter', 'countryFilter'].forEach(function(id) {
+    ['eventFilter', 'reasonFilter', 'countryFilter'].forEach(function(id) {
         var el = document.getElementById(id);
         if (!el) return;
         var saved = el.getAttribute('data-saved');

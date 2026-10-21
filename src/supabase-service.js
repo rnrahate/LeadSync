@@ -38,9 +38,10 @@ class SupabaseService {
         this._filters = [];
         this._filtersLoaded = false;
         this._filtersLastFetch = 0;
-        this._filtersTTL = 1500; // 1.5 seconds (ultra-low latency real-time sync)
+        this._filtersTTL = 30000; // 30s in-memory cache TTL
         this._filtersCacheKey = 'cached_filters_v1';
-        this._filtersCacheTTL = 2000; // 2 seconds (quick cold-boot fallback, continuous real-time refresh)
+        this._filtersCacheTTL = 60000; // 60s storage cache TTL
+        this._inFlightFetchPromise = null;
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
@@ -50,15 +51,47 @@ class SupabaseService {
     }
 
     // ============================================================
-    // LOGGING
+    // LOGGING (Privacy-Safe)
     // ============================================================
     setLogger(logger) {
         this.logger = logger;
     }
 
-    _log(level, msg, data) {
-        if (this.logger && typeof this.logger[level] === 'function') {
-            this.logger[level](msg, data);
+    _sanitizeLogData(data) {
+        if (!data || typeof data !== 'object') return data;
+        var clean = Array.isArray(data) ? [] : {};
+        for (var k in data) {
+            if (!data.hasOwnProperty(k)) continue;
+            var val = data[k];
+            var kLow = k.toLowerCase();
+            if (kLow.indexOf('mobile') !== -1 || kLow.indexOf('phone') !== -1) {
+                clean[k] = typeof val === 'string' && val.length > 4 ? '***' + val.slice(-4) : '***';
+            } else if (kLow.indexOf('email') !== -1) {
+                clean[k] = typeof val === 'string' && val.indexOf('@') !== -1 ? val.replace(/^.+@/, '***@') : '***';
+            } else if (kLow.indexOf('token') !== -1 || kLow.indexOf('auth') !== -1 || kLow.indexOf('key') !== -1 || kLow.indexOf('cookie') !== -1) {
+                clean[k] = '[REDACTED]';
+            } else if (val && typeof val === 'object') {
+                clean[k] = this._sanitizeLogData(val);
+            } else {
+                clean[k] = val;
+            }
+        }
+        return clean;
+    }
+
+    _log(level, msgOrEvent, data) {
+        if (!this.logger) return;
+        var lvl = (level || 'info').toLowerCase();
+        if (typeof this.logger.logEvent === 'function' && typeof msgOrEvent === 'string' && msgOrEvent.indexOf('.') !== -1) {
+            var opts = Object.assign({}, data || {});
+            opts.level = lvl.toUpperCase();
+            opts.event = msgOrEvent;
+            opts.component = 'SupabaseService';
+            this.logger.logEvent(opts);
+            return;
+        }
+        if (typeof this.logger[lvl] === 'function') {
+            this.logger[lvl](msgOrEvent, this._sanitizeLogData(data));
         }
     }
 
@@ -155,23 +188,38 @@ class SupabaseService {
         var self = this;
         var now = Date.now();
 
-        // 1) In-memory cache — fastest (< 1.5s)
+        // 1) In-flight coalescing — return existing shared promise if a network fetch is ongoing
+        if (this._inFlightFetchPromise) {
+            return this._inFlightFetchPromise;
+        }
+
+        // 2) In-memory cache — fast reads
         if (!forceRefresh && this._filtersLoaded && (now - this._filtersLastFetch) < this._filtersTTL) {
+            this._log('debug', 'filters.cache.hit', {
+                reasonCode: 'MEMORY_CACHE_VALID',
+                context: { count: this._filters.length }
+            });
             return true;
         }
 
-        // 2) Storage cache — instant cold boot only (if fresh < 5s)
+        // 3) Storage cache — instant cold boot only (if within cache TTL)
         if (!forceRefresh && !this._filtersLoaded) {
             var cached = await this._readFiltersCache();
             if (cached && Array.isArray(cached.filters)) {
                 var cacheAge = now - cached.timestamp;
-                if (cacheAge <= 5000) {
+                if (cacheAge <= this._filtersCacheTTL) {
+                    var tCache0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
                     this._filters = cached.filters;
                     this._filtersLoaded = true;
                     this._filtersLastFetch = cached.timestamp;
-                    this._log('info', '📦 Filters loaded from cache', {
-                        count: this._filters.length,
-                        ageSec: Math.round(cacheAge / 1000)
+                    var cacheDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tCache0;
+                    this._log('info', 'filters.cache.hit', {
+                        reasonCode: 'STORAGE_CACHE_VALID',
+                        durationMs: cacheDuration,
+                        context: {
+                            count: this._filters.length,
+                            ageSec: Math.round(cacheAge / 1000)
+                        }
                     });
                     if (this._filters.length > 0 && this._filters[0].client_id) {
                         this._clientId = this._filters[0].client_id;
@@ -182,38 +230,103 @@ class SupabaseService {
             }
         }
 
-        // 3) Network fetch (first ever load, or forced refresh, or cache expired)
-        return this._fetchFiltersFromNetwork();
+        this._log('debug', 'filters.cache.miss', {
+            reasonCode: forceRefresh ? 'FORCE_REFRESH' : 'CACHE_EXPIRED'
+        });
+
+        // 4) Network fetch (coalesced)
+        this._inFlightFetchPromise = this._fetchFiltersFromNetwork().finally(function () {
+            self._inFlightFetchPromise = null;
+        });
+        return this._inFlightFetchPromise;
     }
 
     async _fetchFiltersFromNetwork() {
-        try {
-            var url = this.url + '/rest/v1/filters?is_active=eq.true&select=*&order=id.asc';
-            var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
-            if (!response.ok) throw new Error('HTTP ' + response.status);
+        var syncOpId = 'op_sync_' + Date.now().toString(36);
+        var tSync0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        this._log('info', 'filters.sync.started', { operationId: syncOpId });
 
-            var data = await response.json();
-            this._filters = Array.isArray(data) ? data : [];
-            this._filtersLoaded = true;
-            this._filtersLastFetch = Date.now();
+        var maxRetries = 2;
+        var attempt = 0;
+        var lastErr = null;
+        while (attempt < maxRetries) {
+            try {
+                var url = this.url + '/rest/v1/filters?is_active=eq.true&select=*&order=id.asc';
+                var response = await this._fetchWithTimeout(url, { headers: this.headers }, TIMEOUT_READ);
+                if (!response.ok) throw new Error('HTTP ' + response.status);
 
-            if (this._filters.length > 0 && this._filters[0].client_id) {
-                this._clientId = this._filters[0].client_id;
+                var data = await response.json();
+                this._filters = Array.isArray(data) ? data : [];
+                this._filtersLoaded = true;
+                this._filtersLastFetch = Date.now();
+
+                if (this._filters.length > 0 && this._filters[0].client_id) {
+                    this._clientId = this._filters[0].client_id;
+                }
+
+                // Write to storage cache only if semantic filter content changed (excluding updated_at / poll timestamps)
+                var newSig = this._buildSemanticSignature(this._filters);
+                var configChanged = this._lastWrittenFiltersSig !== newSig;
+                if (configChanged) {
+                    this._lastWrittenFiltersSig = newSig;
+                    await this._writeFiltersCache(this._filters);
+                    this._log('info', 'filters.config.changed', {
+                        operationId: syncOpId,
+                        reasonCode: 'CONFIG_CHANGED',
+                        context: { count: this._filters.length }
+                    });
+                } else {
+                    this._log('debug', 'filters.config.unchanged', {
+                        operationId: syncOpId,
+                        reasonCode: 'CONFIG_UNCHANGED',
+                        context: { count: this._filters.length }
+                    });
+                }
+
+                var syncDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tSync0;
+                this._log('info', 'filters.sync.completed', {
+                    operationId: syncOpId,
+                    result: 'SUCCESS',
+                    durationMs: syncDuration,
+                    context: { count: this._filters.length }
+                });
+                return true;
+            } catch (err) {
+                lastErr = err;
+                attempt++;
+                if (attempt < maxRetries) {
+                    await new Promise(function(r) { setTimeout(r, 50 * attempt); });
+                }
             }
-
-            // Write to storage cache only if filters content changed or first write
-            var newSig = JSON.stringify(this._filters.map(function (f) { return f.id + '_' + (f.updated_at || ''); }));
-            if (this._lastWrittenFiltersSig !== newSig) {
-                this._lastWrittenFiltersSig = newSig;
-                await this._writeFiltersCache(this._filters);
-            }
-
-            this._log('info', '📥 Filters loaded from Supabase', { count: this._filters.length });
-            return true;
-        } catch (err) {
-            this._log('error', '❌ Failed to load filters', { error: err.message });
-            return false;
         }
+        var failDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tSync0;
+        this._log('error', 'filters.sync.completed', {
+            operationId: syncOpId,
+            result: 'FAILURE',
+            reasonCode: 'NETWORK_TIMEOUT',
+            durationMs: failDuration,
+            error: lastErr ? { message: lastErr.message } : { message: 'Unknown error' }
+        });
+        return false;
+    }
+
+    _buildSemanticSignature(filters) {
+        return JSON.stringify((filters || []).map(function (f) {
+            return {
+                id: f.id,
+                name: f.name || f.filter_name || '',
+                kw: (f.product_keywords || []).slice().sort(),
+                neg: (f.negative_keywords || []).slice().sort(),
+                loc: (f.sender_locations || []).slice().sort(),
+                act: f.is_active,
+                mode: f.match_mode || 'any',
+                del: f.is_deleted || f.deleted_at ? true : false
+            };
+        }));
+    }
+
+    setClientId(clientId) {
+        this._clientId = clientId || 'default';
     }
 
     _refreshFiltersInBackground() {
@@ -414,6 +527,14 @@ class SupabaseService {
             status: 'new'
         };
 
+        var crmOpId = 'op_crm_' + Date.now().toString(36);
+        var tCrm0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        this._log('info', 'crm.write.started', {
+            operationId: crmOpId,
+            traceId: lead.traceId || null,
+            context: { uniqueQueryId: lead.uniqueQueryId }
+        });
+
         try {
             var url = this.url + '/rest/v1/leads';
             var response = await this._fetchWithTimeout(url, {
@@ -422,10 +543,20 @@ class SupabaseService {
                 body: JSON.stringify(body)
             }, TIMEOUT_WRITE);
 
+            var crmDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tCrm0;
+
             if (response.status === 409) {
                 // Conflict — fetch existing row so caller can recover id
                 this._log('debug', '🔁 Lead already exists (409)', { uniqueQueryId: lead.uniqueQueryId });
                 var existing = await this.leadExists(lead.uniqueQueryId);
+                this._log('info', 'crm.write.completed', {
+                    operationId: crmOpId,
+                    traceId: lead.traceId || null,
+                    result: 'SUCCESS',
+                    reasonCode: 'DUPLICATE_ROW_RECOVERED',
+                    durationMs: crmDuration,
+                    context: { uniqueQueryId: lead.uniqueQueryId, id: existing ? existing.id : null }
+                });
                 return {
                     data: existing,
                     conflict: true,
@@ -440,10 +571,24 @@ class SupabaseService {
 
             var data = await response.json();
             var row = data[0] || null;
-            this._log('info', '💾 Lead inserted', { uniqueQueryId: lead.uniqueQueryId, id: row && row.id });
+            this._log('info', 'crm.write.completed', {
+                operationId: crmOpId,
+                traceId: lead.traceId || null,
+                result: 'SUCCESS',
+                durationMs: crmDuration,
+                context: { uniqueQueryId: lead.uniqueQueryId, id: row && row.id }
+            });
             return { data: row, conflict: false, existingId: null };
         } catch (err) {
-            this._log('error', '❌ Failed to insert lead', { error: err.message, uniqueQueryId: lead.uniqueQueryId });
+            var failDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - tCrm0;
+            this._log('error', 'crm.write.failed', {
+                operationId: crmOpId,
+                traceId: lead.traceId || null,
+                result: 'FAILURE',
+                reasonCode: err.message && err.message.indexOf('timeout') !== -1 ? 'CRM_TIMEOUT' : 'CRM_WRITE_ERROR',
+                durationMs: failDuration,
+                error: err
+            });
             return { data: null, conflict: false, existingId: null, error: err.message };
         }
     }
@@ -799,5 +944,6 @@ class SupabaseService {
     }
 }
 
-// Export to window for content-script consumption
-window.SupabaseService = SupabaseService;
+// Export to window for content-script consumption and module for Node testing
+if (typeof window !== 'undefined') window.SupabaseService = SupabaseService;
+if (typeof module !== 'undefined' && module.exports) module.exports = SupabaseService;

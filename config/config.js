@@ -12,8 +12,8 @@
 console.log('BuyLead Assistant Config v7.1.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
-var SUPABASE_URL = 'https://chqewpjsibouqvqkxuli.supabase.co';
-var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNocWV3cGpzaWJvdXF2cWt4dWxpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEzODg5OTAsImV4cCI6MjEwNjk2NDk5MH0.b-M_MKu-yVjpNwFNwTEmWqksJhj-ffXcZ2Mr42AW1bE';
+var SUPABASE_URL = 'https://zvhuromubukylsxrsfiz.supabase.co';
+var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2aHVyb211YnVreWxzeHJzZml6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwODI4MDYsImV4cCI6MjEwMzY1ODgwNn0.29J2uGHxFhPtEqRZvnXjaYpL-x4I0uEc2TT8u9d5PVw';
 
 var SB_HEADERS = {
     'apikey': SUPABASE_KEY,

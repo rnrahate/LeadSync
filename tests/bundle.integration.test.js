@@ -73,12 +73,14 @@ class MockElement {
             const attrs = match[2];
             const idMatch = /id=["']([^"']+)["']/.exec(attrs);
             const classMatch = /class=["']([^"']+)["']/.exec(attrs);
-            if (idMatch || classMatch) {
+            const dataAMatch = /data-a=["']([^"']+)["']/.exec(attrs);
+            if (idMatch || classMatch || dataAMatch) {
                 const child = new MockElement(tag);
                 if (idMatch) child.id = idMatch[1];
                 if (classMatch) {
                     classMatch[1].split(/\s+/).filter(Boolean).forEach(c => child.classList.add(c));
                 }
+                if (dataAMatch) child.setAttribute('data-a', dataAMatch[1]);
                 this.appendChild(child);
             }
         }
@@ -509,6 +511,8 @@ setTimeout(() => {
         assert.ok(warnEl, '#bl-warning-text must exist in BL panel DOM');
 
         // Simulate lead processing with INSUFFICIENT_BALANCE failure
+        const prevMode = orch.config.mode;
+        orch.config.mode = 'AUTOMATIC';
         const balanceLead = {
             leadId: 'lead-balance-fail',
             filterId: 'f2',
@@ -528,6 +532,7 @@ setTimeout(() => {
         });
 
         orch._processLead(balanceLead).then(() => {
+            orch.config.mode = prevMode;
             assert.strictEqual(orch.lifecycle.getState('lead-balance-fail'), 'BLOCKED', 'Lead state must transition to BLOCKED');
             assert.ok(warnEl.textContent.includes('Insufficient BuyLead Balance'), 'Warning text must show account failure');
             assert.ok(warnEl.classList.contains('show'), 'Warning text must be visible');
