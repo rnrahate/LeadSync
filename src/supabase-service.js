@@ -35,12 +35,12 @@ class SupabaseService {
             'Prefer': 'return=representation'
         };
         this.logger = null;
-                this._filters = [];
+        this._filters = [];
         this._filtersLoaded = false;
         this._filtersLastFetch = 0;
-        this._filtersTTL = 1000; // 1 second (ultra-low latency)
+        this._filtersTTL = 1500; // 1.5 seconds (ultra-low latency real-time sync)
         this._filtersCacheKey = 'cached_filters_v1';
-        this._filtersCacheTTL = 86400000; // 24 hours (instant cache on page reload; real-time invalidated by storage events)
+        this._filtersCacheTTL = 2000; // 2 seconds (quick cold-boot fallback, continuous real-time refresh)
         this._clientId = 'default';
         this._statsBuffer = { scanned: 0, matched: 0, clicked: 0 };
         this._statsFlushTimer = null;
@@ -151,22 +151,21 @@ class SupabaseService {
      * @param {boolean} forceRefresh
      * @returns {Promise<Array>}
      */
-            async loadFilters(forceRefresh) {
+    async loadFilters(forceRefresh) {
         var self = this;
         var now = Date.now();
 
-        // 1) In-memory cache — fastest
+        // 1) In-memory cache — fastest (< 1.5s)
         if (!forceRefresh && this._filtersLoaded && (now - this._filtersLastFetch) < this._filtersTTL) {
             return true;
         }
 
-                // 2) Storage cache — instant, only if FRESH
-        if (!forceRefresh) {
+        // 2) Storage cache — instant cold boot only (if fresh < 5s)
+        if (!forceRefresh && !this._filtersLoaded) {
             var cached = await this._readFiltersCache();
             if (cached && Array.isArray(cached.filters)) {
                 var cacheAge = now - cached.timestamp;
-                if (cacheAge <= this._filtersCacheTTL) {
-                    // Fresh — use it
+                if (cacheAge <= 5000) {
                     this._filters = cached.filters;
                     this._filtersLoaded = true;
                     this._filtersLastFetch = cached.timestamp;
@@ -177,16 +176,13 @@ class SupabaseService {
                     if (this._filters.length > 0 && this._filters[0].client_id) {
                         this._clientId = this._filters[0].client_id;
                     }
+                    this._refreshFiltersInBackground();
                     return true;
                 }
-                // Stale — fall through to network fetch
-                this._log('info', '🔄 Cache stale — fetching fresh filters', {
-                    ageSec: Math.round(cacheAge / 1000)
-                });
             }
         }
 
-        // 3) Network fetch (first ever load, or forced refresh, or cache miss)
+        // 3) Network fetch (first ever load, or forced refresh, or cache expired)
         return this._fetchFiltersFromNetwork();
     }
 
@@ -205,8 +201,12 @@ class SupabaseService {
                 this._clientId = this._filters[0].client_id;
             }
 
-            // Write to storage cache
-            await this._writeFiltersCache(this._filters);
+            // Write to storage cache only if filters content changed or first write
+            var newSig = JSON.stringify(this._filters.map(function (f) { return f.id + '_' + (f.updated_at || ''); }));
+            if (this._lastWrittenFiltersSig !== newSig) {
+                this._lastWrittenFiltersSig = newSig;
+                await this._writeFiltersCache(this._filters);
+            }
 
             this._log('info', '📥 Filters loaded from Supabase', { count: this._filters.length });
             return true;

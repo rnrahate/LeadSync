@@ -50,7 +50,27 @@
         /blacquire/i,
         /buyerlead.*contact/i,
         /contact.*buylead/i,
-        /connectBuyer/i
+        /connectBuyer/i,
+        /bltxnapi.*(?:contact|acquire|buy|consume|reply|enquiry)/i,
+        /bltxn.*(?:contact|acquire|buy|consume|reply|enquiry)/i,
+        /saveBuyerLead/i,
+        /consumeLead/i,
+        /consumeBuyLead/i,
+        /leadConsume/i,
+        /buyLeadConsume/i,
+        /free.*lead/i,
+        /free.*contact/i,
+        /free.*enquiry/i,
+        /view.*contact/i,
+        /view.*buyer/i,
+        /get.*contact/i,
+        /unmask/i,
+        /display.*contact/i,
+        /contact.*details/i,
+        /buyer.*details/i,
+        /bltxnapi.*(?:free|view|lead|detail)/i,
+        /bltxn.*(?:free|view|lead|detail)/i,
+        /enquiry.*(?:submit|send|save|post)/i
     ];
 
     function testPatterns(patterns, url) {
@@ -242,7 +262,14 @@
                             if (capturedAcq) {
                                 handleAcqResponse(xhr.responseText, capturedUrl);
                                 // Capture template from first successful ACQ request
-                                handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedContentType);
+                                try {
+                                    var d = JSON.parse(xhr.responseText);
+                                    var ok = d.CODE === '200' || d.CODE === 200 || d.code === 200 || d.code === '200'
+                                          || d.status === 'success' || d.success === true || d.STATUS === 'SUCCESS';
+                                    if (ok) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedContentType);
+                                } catch (e) {
+                                    if (xhr.status === 200) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedContentType);
+                                }
                             }
                         }
                     } catch (e) {}
@@ -303,9 +330,12 @@
                         // Capture template from first successful ACQ fetch
                         try {
                             var d = JSON.parse(text);
-                            var ok = d.CODE === '200' || d.CODE === 200 || d.code === 200;
+                            var ok = d.CODE === '200' || d.CODE === 200 || d.code === 200 || d.code === '200'
+                                  || d.status === 'success' || d.success === true || d.STATUS === 'SUCCESS';
                             if (ok) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedCT);
-                        } catch (e) {}
+                        } catch (e) {
+                            if (response && response.status === 200) handleAcqTemplate(capturedMethod, capturedUrl, capturedBody, capturedCT);
+                        }
                     }
                 }).catch(function () {});
                 return response;
