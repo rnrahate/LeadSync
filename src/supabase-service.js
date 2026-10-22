@@ -468,6 +468,88 @@ class SupabaseService {
         }
     }
 
+    /**
+     * Deactivates a filter when its unique sellers quota (10 leads) is fulfilled.
+     * @param {string|number} filterId
+     * @returns {Promise<boolean>}
+     */
+    async deactivateFilter(filterId) {
+        if (!filterId) return false;
+        try {
+            var url = this.url + '/rest/v1/filters?id=eq.' + encodeURIComponent(filterId);
+            var body = {
+                is_active: false,
+                is_running: false,
+                updated_at: new Date().toISOString()
+            };
+            var response = await this._fetchWithTimeout(url, {
+                method: 'PATCH',
+                headers: this.headers,
+                body: JSON.stringify(body)
+            }, TIMEOUT_WRITE);
+
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+
+            // Also update in-memory cache if present
+            if (Array.isArray(this._filters)) {
+                for (var i = 0; i < this._filters.length; i++) {
+                    if (String(this._filters[i].id) === String(filterId)) {
+                        this._filters[i].is_active = false;
+                        this._filters[i].is_running = false;
+                        break;
+                    }
+                }
+            }
+
+            this._log('info', 'Filter auto-deactivated after quota reached (10 leads)', { filterId: filterId });
+            return true;
+        } catch (err) {
+            this._log('warn', 'Failed to deactivate filter in Supabase', { filterId: filterId, error: err.message });
+            return false;
+        }
+    }
+
+    /**
+     * Reactivates a filter (e.g. after 60s temporary deactivation or manual toggle).
+     * @param {string|number} filterId
+     * @returns {Promise<boolean>}
+     */
+    async reactivateFilter(filterId) {
+        if (!filterId) return false;
+        try {
+            var url = this.url + '/rest/v1/filters?id=eq.' + encodeURIComponent(filterId);
+            var body = {
+                is_active: true,
+                is_running: true,
+                updated_at: new Date().toISOString()
+            };
+            var response = await this._fetchWithTimeout(url, {
+                method: 'PATCH',
+                headers: this.headers,
+                body: JSON.stringify(body)
+            }, TIMEOUT_WRITE);
+
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+
+            // Also update in-memory cache if present
+            if (Array.isArray(this._filters)) {
+                for (var i = 0; i < this._filters.length; i++) {
+                    if (String(this._filters[i].id) === String(filterId)) {
+                        this._filters[i].is_active = true;
+                        this._filters[i].is_running = true;
+                        break;
+                    }
+                }
+            }
+
+            this._log('info', 'Filter reactivated in Supabase', { filterId: filterId });
+            return true;
+        } catch (err) {
+            this._log('warn', 'Failed to reactivate filter in Supabase', { filterId: filterId, error: err.message });
+            return false;
+        }
+    }
+
     // ============================================================
     // LEADS - Check if exists
     // ============================================================

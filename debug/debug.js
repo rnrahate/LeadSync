@@ -1,10 +1,10 @@
 // debug/debug.js
 // Debug log viewer & Structured Observability Dashboard — Attio theme
 // Developed by Keyn Labs
-// Version 6.3.0
+// Version 6.4.0
 // ============================================================================
 
-console.log('BuyLead Assistant Debug & Observability v6.3.0');
+console.log('BuyLead Assistant Debug & Observability v6.4.0');
 
 var browserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 
@@ -18,7 +18,7 @@ var REFRESH_MS = 1200;
 var SEARCH_DEBOUNCE_MS = 200;
 var _searchTimer = null;
 
-var FILTER_STORAGE_KEY = 'debugFilters_v630';
+var FILTER_STORAGE_KEY = 'debugFilters_v640';
 
 var ICON_EXPAND = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
 var ICON_COLLAPSE = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>';
@@ -629,7 +629,18 @@ function renderRow(log) {
     }
 
     var badges = '';
-    if (eventName) {
+    // ── Filter lifecycle events: amber / red / green prominent badges ──
+    var isFilterLimit = eventName === 'filter.limit.reached';
+    var isFilterDeact = eventName === 'filter.deactivated';
+    var isFilterReact = eventName === 'filter.reactivated';
+
+    if (isFilterLimit) {
+        badges += '<span class="event-badge-limit">⚠️ ' + escapeHtml(eventName) + '</span>';
+    } else if (isFilterDeact) {
+        badges += '<span class="event-badge-deact">🔴 ' + escapeHtml(eventName) + '</span>';
+    } else if (isFilterReact) {
+        badges += '<span class="event-badge-react">🟢 ' + escapeHtml(eventName) + '</span>';
+    } else if (eventName) {
         badges += '<span class="event-badge">' + escapeHtml(eventName) + '</span>';
     }
     if (traceId) {
@@ -669,7 +680,10 @@ function renderRow(log) {
 
     var dataFull = safeStringify(fullRecord, null, 2);
 
-    return '<div class="log-entry">' +
+    // Row-level CSS class for filter lifecycle events
+    var extraRowClass = isFilterLimit ? ' filter-limit' : isFilterDeact ? ' filter-deact' : isFilterReact ? ' filter-react' : '';
+
+    return '<div class="log-entry' + extraRowClass + '">' +
         '<span class="log-level ' + levelClass + '">' + (log.level || 'INFO') + '</span>' +
         '<span class="log-time">' + timeStr + '</span>' +
         '<span class="log-module">' + escapeHtml(componentName) + '</span>' +
@@ -776,7 +790,7 @@ function exportLogs() {
         schemaVersion: '1.0.0',
         exportedAt: new Date().toISOString(),
         extension: 'BuyLead Assistant',
-        version: '6.3.0',
+        version: '6.4.0',
         totalLogs: allLogs.length,
         exportedCount: exportLogsArray.length,
         filters: filterState,

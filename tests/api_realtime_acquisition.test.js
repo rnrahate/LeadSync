@@ -151,7 +151,8 @@ async function runTests() {
         presentedLead = lead;
     };
 
-    console.log('--- Test 1: Passive network lead matching routes to READY_FOR_REVIEW without auto-contact ---');
+    console.log('--- Test 1: In REVIEW mode, passive network lead routes to READY_FOR_REVIEW without auto-contact ---');
+    orch.config.mode = 'REVIEW';
     const initialAcquired = orch.stats.acquired;
 
     const mockNetworkPseudoCards = [
@@ -173,15 +174,15 @@ async function runTests() {
     orch._onNetworkLeads(mockNetworkPseudoCards);
     await new Promise(r => setTimeout(r, 50));
 
-    // Must NOT have automatically acquired the lead
-    assert.strictEqual(orch.stats.acquired, initialAcquired, 'stats.acquired must NOT be incremented automatically');
-    assert.ok(reviewUIPresented, 'Review UI must be displayed for user review');
+    // Must NOT have automatically acquired the lead in REVIEW mode
+    assert.strictEqual(orch.stats.acquired, initialAcquired, 'stats.acquired must NOT be incremented automatically in REVIEW mode');
+    assert.ok(reviewUIPresented, 'Review UI must be displayed for user review in REVIEW mode');
     assert.strictEqual(presentedLead.uniqueQueryId, 'uqid_test_9999', 'Presented lead matches network lead');
     assert.strictEqual(orch.stateMachine.getState('api_uqid_test_9999'), 'READY_FOR_REVIEW', 'Lead must be in READY_FOR_REVIEW state');
 
     const foundToast = recordedToasts.find(t => t.type === 'found' && t.message.indexOf('Pramoxine') !== -1);
     assert.ok(foundToast, 'Found toast must be shown for review-ready network lead');
-    console.log('  ✅ PASS: Passive network lead routes to review workflow without automated contact');
+    console.log('  ✅ PASS: Passive network lead routes to review workflow without automated contact in REVIEW mode');
 
     console.log('\n--- Test 2: Explicit user confirmation completes contact and records authoritative confirmation ---');
     let actionAdapterCalled = false;
@@ -201,6 +202,81 @@ async function runTests() {
     const duplicateDetected = orch._isLeadAcquired({ leadId: 'api_uqid_test_9999', uniqueQueryId: 'uqid_test_9999' });
     assert.strictEqual(duplicateDetected, true, 'Lead 9999 must be recognized as acquired by deduplication');
     console.log('  ✅ PASS: Deduplication prevents duplicate actions on already processed leads');
+
+    console.log('\n--- Test 4: In AUTOMATIC mode, lead is fully automated (zero review prompt, acquired and contacted automatically without pausing) ---');
+    orch._isPaused = false;
+    orch._cycleAcquiredThisScan = false;
+    orch.config.mode = 'AUTOMATIC';
+    reviewUIPresented = false;
+    presentedLead = null;
+    let autoAcquireCalled = false;
+    orch.actionAdapter.acquire = function(lead) {
+        autoAcquireCalled = true;
+        return Promise.resolve({ success: true, contactSuccess: true, action: 'card_updated' });
+    };
+
+    const autoNetworkLead = [
+        {
+            id: 'api_uqid_auto_1111',
+            _rawApiLead: {
+                uniqueQueryId: 'uqid_auto_1111',
+                queryId: 'uqid_auto_1111',
+                buyerId: 'buyer_8888',
+                queryProductName: 'Pramoxine Hydrochloride 1% Foam',
+                queryMessage: 'Automatic order 1000 units',
+                city: 'Delhi',
+                state: 'Delhi',
+                senderMobile: '+919811111111'
+            }
+        }
+    ];
+
+    const preAutoAcquired = orch.stats.acquired;
+    orch._onNetworkLeads(autoNetworkLead);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert.ok(autoAcquireCalled, 'actionAdapter.acquire must be called automatically in AUTOMATIC mode');
+    assert.strictEqual(reviewUIPresented, false, 'No review UI prompt should be shown in AUTOMATIC mode');
+    assert.strictEqual(orch.stats.acquired, preAutoAcquired + 1, 'Acquired count must increment automatically');
+    assert.strictEqual(orch._isPaused, false, 'AUTOMATIC mode must NOT pause workflow');
+    console.log('  ✅ PASS: AUTOMATIC mode acquires and contacts automatically with ZERO user intervention');
+
+    console.log('\n--- Test 5: In ASSISTED mode, lead is acquired automatically, and review UI is displayed ONLY AFTER acquisition ---');
+    orch.config.mode = 'ASSISTED';
+    reviewUIPresented = false;
+    presentedLead = null;
+    let assistedAcquireCalled = false;
+    orch.actionAdapter.acquire = function(lead) {
+        assistedAcquireCalled = true;
+        return Promise.resolve({ success: true, contactSuccess: true, action: 'confirmed' });
+    };
+
+    const assistedNetworkLead = [
+        {
+            id: 'api_uqid_assist_2222',
+            _rawApiLead: {
+                uniqueQueryId: 'uqid_assist_2222',
+                queryId: 'uqid_assist_2222',
+                buyerId: 'buyer_9999',
+                queryProductName: 'Pramoxine Hydrochloride 1% Foam',
+                queryMessage: 'Assisted order 200 units',
+                city: 'Bengaluru',
+                state: 'Karnataka',
+                senderMobile: '+919822222222'
+            }
+        }
+    ];
+
+    const preAssistAcquired = orch.stats.acquired;
+    orch._onNetworkLeads(assistedNetworkLead);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert.ok(assistedAcquireCalled, 'actionAdapter.acquire must be called automatically first in ASSISTED mode');
+    assert.strictEqual(orch.stats.acquired, preAssistAcquired + 1, 'Lead must be acquired before review');
+    assert.ok(reviewUIPresented, 'Review UI must be displayed AFTER lead is acquired in ASSISTED mode');
+    assert.strictEqual(presentedLead.uniqueQueryId, 'uqid_assist_2222', 'Presented lead matches acquired lead');
+    assert.strictEqual(orch._isPaused, true, 'ASSISTED mode pauses for review AFTER acquiring lead');
+    console.log('  ✅ PASS: ASSISTED mode acquires automatically and only displays review UI AFTER acquisition');
 
     console.log('\n=== ALL PASSIVE NETWORK OBSERVATION & REVIEW WORKFLOW TESTS PASSED ===\n');
     process.exit(0);

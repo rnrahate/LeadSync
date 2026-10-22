@@ -3,7 +3,7 @@
   "name": "IndiaMART BuyLead Assistant",
   "version": "5.0.0",
   "description": "Reliable BuyLead monitoring, filter matching, and review assistant with Supabase CRM integration.",
-  "homepage_url": "https://leadsync-tau.vercel.app/",
+  "homepage_url": "https://leadsync-tau-sand.vercel.app/",
   "permissions": [
     "storage",
     "unlimitedStorage",

@@ -3,7 +3,7 @@
 > Automated BuyLead acquisition for IndiaMART sellers with intelligent product-name matching, strict country filtering, lead scoring, acquisition automation, and Supabase CRM synchronization.
 
 **Version:** 6.2.0  
-**Developed by:** [Keyn Labs](https://leadsync-tau.vercel.app/)
+**Developed by:** [Keyn Labs](https://leadsync-tau-sand.vercel.app/)
 
 ---
 
@@ -1641,7 +1641,7 @@ Before production deployment:
 
 Developed by:
 
-**[Keyn Labs](https://leadsync-tau.vercel.app/)**
+**[Keyn Labs](https://leadsync-tau-sand.vercel.app/)**
 
 For support, feature requests, improvements, or bug reports, contact the development team or open an issue in the project repository.
 

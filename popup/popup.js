@@ -350,7 +350,7 @@ function setupEventListeners() {
     var crmBtn = document.getElementById('crmBtn');
     if (crmBtn) {
         crmBtn.addEventListener('click', function() {
-            browserAPI.tabs.create({ url: 'https://leadsync-tau.vercel.app' });
+            browserAPI.tabs.create({ url: 'https://leadsync-tau-sand.vercel.app/' });
         });
     }
 

@@ -210,6 +210,7 @@
             var msg = {
                 __leadsync_network__: true,
                 __leadsync_passive_lead__: true,
+                type: '__leadsync_passive_lead__',
                 leads: validLeads,
                 sourceUrl: sanitizedUrl,
                 ts: Date.now(),
@@ -238,12 +239,21 @@
         }
     }
 
-    // ── Listen for content script ready signal ──────────────────────────
+    // ── Listen for content script signals & direct controller dispatch ──
     window.addEventListener('message', function (evt) {
         if (!evt || !evt.data || evt.source !== window) return;
         if (evt.data.__leadsync_ready__) {
             _contentScriptReady = true;
             flushBuffer();
+        }
+        // Direct Native Controller Dispatch (Optimization 4)
+        if (evt.data.__leadsync_dispatch_lead__) {
+            try {
+                var dLeadId = evt.data.leadId;
+                if (typeof window.blTxnController !== 'undefined' && typeof window.blTxnController.submitLead === 'function') {
+                    window.blTxnController.submitLead(dLeadId);
+                }
+            } catch (de) { }
         }
     });
 
@@ -324,6 +334,33 @@
             }
             return p;
         };
+    }
+
+    // ── Patch WebSocket (zero-overhead passive message observer) ───────────
+    var OrigWebSocket = typeof window !== 'undefined' ? window.WebSocket : null;
+    if (OrigWebSocket) {
+        function PatchedWebSocket(url, protocols) {
+            var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+            var isLeadWs = isLeadFeedUrl(typeof url === 'string' ? url : '');
+            ws.addEventListener('message', function (event) {
+                try {
+                    if (event && event.data) {
+                        if (isLeadWs || (typeof event.data === 'string' && (event.data.indexOf('query') !== -1 || event.data.indexOf('lead') !== -1 || event.data.indexOf('buylead') !== -1))) {
+                            handleLeadResponse(event.data, typeof url === 'string' ? url : 'ws://indiamart');
+                        }
+                    }
+                } catch (e) { }
+            });
+            return ws;
+        }
+        PatchedWebSocket.prototype = OrigWebSocket.prototype;
+        try {
+            PatchedWebSocket.CONNECTING = 0;
+            PatchedWebSocket.OPEN = 1;
+            PatchedWebSocket.CLOSING = 2;
+            PatchedWebSocket.CLOSED = 3;
+        } catch (e) { }
+        window.WebSocket = PatchedWebSocket;
     }
 
     emitLog('INFO', 'network.interceptor.initialized', 'SUCCESS');

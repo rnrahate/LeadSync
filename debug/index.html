@@ -167,6 +167,17 @@
             border: 1px solid #c7d2fe; padding: 1px 5px; border-radius: 3px;
             font-size: 10px; font-weight: 600; margin-right: 5px;
         }
+        /* Filter lifecycle event badges */
+        .event-badge-limit    { display: inline-block; color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700; margin-right: 5px; }
+        .event-badge-deact    { display: inline-block; color: #991b1b; background: #fee2e2; border: 1px solid #fca5a5; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700; margin-right: 5px; }
+        .event-badge-react    { display: inline-block; color: #065f46; background: #d1fae5; border: 1px solid #6ee7b7; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700; margin-right: 5px; }
+        /* Row-level highlight strips for filter lifecycle events */
+        .log-entry.filter-limit   { border-left: 3px solid #f59e0b; background: #fffbeb; }
+        .log-entry.filter-deact   { border-left: 3px solid #ef4444; background: #fff1f2; }
+        .log-entry.filter-react   { border-left: 3px solid #10b981; background: #f0fdf4; }
+        .log-entry.filter-limit:hover { background: #fef3c7; }
+        .log-entry.filter-deact:hover { background: #fee2e2; }
+        .log-entry.filter-react:hover { background: #d1fae5; }
         .result-badge {
             display: inline-block; padding: 1px 5px; border-radius: 3px;
             font-size: 10px; font-weight: 700; margin-right: 5px;
@@ -387,7 +398,7 @@
     </div>
 
     <div class="credit">
-        Developed by <a href="https://leadsync-tau.vercel.app/" target="_blank">Keyn Labs</a> — Debug v6.2.0
+        Developed by <a href="https://leadsync-tau-sand.vercel.app/" target="_blank">Keyn Labs</a> — Debug v6.2.0
     </div>
 
     <script src="debug.js"></script>

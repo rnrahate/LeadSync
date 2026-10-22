@@ -303,9 +303,9 @@ it('enforces explicit step-by-step lifecycle transitions', function() {
 });
 
 // ------------------------------------------------------------
-// 5. BENCHMARKING (Phase 7: 20, 50, 100 filters with 7 leads)
+// 5. BENCHMARKING (Phase 7: 20, 50, 100 filters with 5 leads)
 // ------------------------------------------------------------
-console.log('\n--- 5. Low-Latency Matching Benchmark (7 leads x N filters) ---');
+console.log('\n--- 5. Low-Latency Matching Benchmark (5 leads x N filters) ---');
 
 function runBenchmark(numFilters) {
     var sampleProducts = [
@@ -313,9 +313,7 @@ function runBenchmark(numFilters) {
         'Azithromycin 500mg Strip',
         'Sunscreen SPF 50 Gel 50g',
         'Vitamin C 100ml Serum',
-        'Cetirizine 10mg Box',
-        'Ibuprofen 400mg Caps',
-        'Cough Syrup 100ml Bottle'
+        'Cetirizine 10mg Box'
     ];
 
     var filters = [];

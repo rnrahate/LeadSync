@@ -439,8 +439,8 @@ setTimeout(() => {
         // 11. Test Filters Button Navigation
         global.window._lastOpenedUrl = null;
         filtersBtn.dispatchEvent({ type: 'click', stopPropagation: () => {} });
-        assert.strictEqual(global.window._lastOpenedUrl, 'https://leadsync-tau.vercel.app/', 'Filters button must navigate to CRM/Filters URL');
-        console.log('  ✅ PASS: Filters button navigates to https://leadsync-tau.vercel.app/');
+        assert.strictEqual(global.window._lastOpenedUrl, 'https://leadsync-tau-sand.vercel.app/', 'Filters button must navigate to CRM/Filters URL');
+        console.log('  ✅ PASS: Filters button navigates to https://leadsync-tau-sand.vercel.app/');
 
         // 12. Test Phase 6 & Phase 11: Two Distinct Buyers per Filter Quota & Deduplication
         // Release card-sold-test-2 queued earlier in the test to start with clean in-flight state
